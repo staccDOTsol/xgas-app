@@ -16,6 +16,8 @@ COPY server.js ./
 # server.js imports the connector's tool registry AND serves it at /mcp; only mcp/src is needed
 # at runtime (its deps, viem and the MCP SDK, are root dependencies).
 COPY mcp/src ./mcp/src
+# ...and its package.json: the connector reports its own published version from it.
+COPY mcp/package.json ./mcp/package.json
 COPY src/contracts/l4-deployment.json ./src/contracts/l4-deployment.json
 EXPOSE 3000
 ENV PORT=3000
