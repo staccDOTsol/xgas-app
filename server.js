@@ -26,7 +26,9 @@ const L3_RPC = process.env.VITE_ROBINHOOD_RPC_URL || DEPLOY.parentRpcUrl;
 const L4_RPC_INTERNAL = process.env.L4_RPC_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l3.internal:8449' : DEPLOY.sequencerRpcUrl);
 const L4_RPC_PUBLIC = DEPLOY.publicRpcUrl; // https://xgas.dev/rpc — the only RPC URL users ever see
 // Key allowed to execute Outbox withdrawals on Robinhood on users' behalf (permissionless call; we just pay gas).
-const L3_EXECUTOR_KEY = process.env.L3_EXECUTOR_KEY || '';
+// The Fly secret is still named L2_EXECUTOR_KEY from before the L2->L3->L4 rename.
+// Accept either, so renaming the code does not silently switch the Outbox executor off.
+const L3_EXECUTOR_KEY = process.env.L3_EXECUTOR_KEY || process.env.L2_EXECUTOR_KEY || '';
 
 const DATA_DIR = fs.existsSync('/data') ? '/data' : path.join(__dirname, 'l4-data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
