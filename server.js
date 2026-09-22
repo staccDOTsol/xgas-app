@@ -369,9 +369,15 @@ app.post('/auth/x/logout', (req, res) => {
 // Reads and prepares only — a prepared transaction is inert until the user's wallet
 // signs it, and the browser sends through the wallet, so the submit relays stay off.
 // ---------------------------------------------------------------------------
-app.get('/api/connector', (_req, res) => {
+app.get('/api/connector', (req, res) => {
+  // Anonymous callers (the site in someone's browser) get reads and prepares. A caller holding the
+  // connector's token is the operator, not a visitor, and gets the same surface as the hosted MCP:
+  // the submit relays and the agent wallet included.
+  const operator = authed(req);
+  const allow = operator ? hostableFor(true) : isBrowserSafe;
   res.json({
-    tools: ALL_TOOLS.filter((t) => isBrowserSafe(t.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+    authenticated: operator,
+    tools: ALL_TOOLS.filter((t) => allow(t.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
   });
 });
 
@@ -379,8 +385,14 @@ app.post('/api/connector/:tool', async (req, res) => {
   const name = req.params.tool;
   const tool = TOOLS_BY_NAME.get(name);
   if (!tool) return res.status(404).json({ error: `No such tool: ${name}` });
-  if (!isBrowserSafe(name)) {
-    return res.status(403).json({ error: `${name} is not exposed over HTTP; sign and send through your wallet, or use the MCP connector.` });
+  const operator = authed(req);
+  const allow = operator ? hostableFor(true) : isBrowserSafe;
+  if (!allow(name)) {
+    return res.status(403).json({
+      error: name.startsWith('wallet_') || name.startsWith('submit_')
+        ? `${name} needs the connector's token: send Authorization: Bearer <MCP_AUTH_TOKEN>. Without it this endpoint only reads and prepares, and your own wallet signs.`
+        : `${name} is not exposed over HTTP at all; it spends this host's own gas.`,
+    });
   }
   try {
     const out = unwrap(await tool.handler(req.body || {}));
