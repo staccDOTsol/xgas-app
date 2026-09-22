@@ -3,7 +3,7 @@ import { Terminal, Copy, Check, Search, KeyRound, Zap, Globe, ArrowRight } from 
 
 /**
  * The connector, front and centre: this chain is mostly used by models, so the landing page is the
- * "add this server" screen. Everything below is read live from /api/mcp — the tool list is the one
+ * "add this server" screen. Everything below is read live from /api/mcp, the tool list is the one
  * the server actually serves, never a list typed into a page.
  */
 interface McpTool { name: string; description: string; kind: 'read' | 'prepare' | 'submit' }
@@ -83,7 +83,7 @@ export const McpConnector: React.FC = () => {
 
         <div className="mt-6 grid gap-3 md:grid-cols-2">
           <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4">
-            <div className="flex items-center gap-2 mb-2"><Globe className="w-4 h-4 text-emerald-400" /><span className="text-xs font-black uppercase tracking-wide text-emerald-300 font-mono">Hosted — nothing to install</span></div>
+            <div className="flex items-center gap-2 mb-2"><Globe className="w-4 h-4 text-emerald-400" /><span className="text-xs font-black uppercase tracking-wide text-emerald-300 font-mono">Hosted, nothing to install</span></div>
             <p className="text-xs text-slate-400 mb-3">Add it as a remote MCP server in any host that speaks Streamable HTTP.</p>
             <CopyLine text={info?.transport.http ?? 'https://xgas.dev/mcp'} />
           </div>

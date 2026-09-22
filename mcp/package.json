@@ -1,6 +1,6 @@
 {
   "name": "xgas-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "MCP connector for the xGas Orbit L4 and X Money: vault bridge, P2P OTC desk, NGU curves, fiat ramps, and cross-chain X Money swaps. Non-custodial: it prepares transactions, your wallet signs them.",
   "bin": {

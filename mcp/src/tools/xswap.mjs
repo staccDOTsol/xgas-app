@@ -241,7 +241,7 @@ export const tools = [
       const p = prepared({
         action: `Send ${o._label} on ${o._chain.slug} to ${o.to}, paid in X Money`,
         chainId: PARENT_CHAIN_ID, asset: 'X Money (ERC-20 on Robinhood 4663)', amount: `${fmtXMoney(amount)} escrowed`,
-        counterparty: 'whichever solver bids lowest — permissionless, bonded',
+        counterparty: 'whichever solver bids lowest: permissionless, bonded',
         fees: [{ label: 'protocol fee', amount: `up to ${fmtXMoney((amount * BigInt(t.out.fee_bps)) / BPS)} X Money`, note: `${t.out.fee_bps / 100}% of the winning ask` }],
         net: `${o._label} on ${o._chain.slug}, plus whatever the bidding saves off your ${fmtXMoney(amount)}`,
         timeline: [
@@ -259,7 +259,7 @@ export const tools = [
   },
   {
     name: 'prepare_xswap_in',
-    description: 'The other direction: you hand over an asset on any EVM chain, X Money lands here. Posts an ask — a price, not an escrow. Buyers bid and their X Money is held before you send anything. Signs nothing.',
+    description: 'The other direction: you hand over an asset on any EVM chain, X Money lands here. Posts an ask: a price, not an escrow. Buyers bid and their X Money is held before you send anything. Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -289,7 +289,7 @@ export const tools = [
       const p = prepared({
         action: `Sell ${o._label} on ${o._chain.slug} for X Money`,
         chainId: PARENT_CHAIN_ID, asset: o._label, amount: `floor ${fmtXMoney(floor)} X Money`,
-        counterparty: 'whichever buyer bids highest — their X Money is escrowed before you send',
+        counterparty: 'whichever buyer bids highest, and their X Money is escrowed before you send',
         fees: [{ label: 'protocol fee', amount: `${t.fee_bps / 100}% of the winning bid`, note: 'taken on settlement, not now' }],
         net: `at least ${fmtXMoney(floor)} X Money, less the fee`,
         timeline: [

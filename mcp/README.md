@@ -2,8 +2,7 @@
 
 An MCP server over the xGas stack: the USDG vault bridge on Robinhood Chain (4663),
 the P2P OTC desk and NGU curves on xGas Orbit L4 (466301), a teller layer that routes
-between dollars and $xMoney, and XSwap — X Money in, anything on any EVM chain out,
-and the other way round.
+between dollars and $xMoney, and XSwap: X Money in, anything on any EVM chain out, and the other way round.
 
 49 tools, all grounded in a deployment file and the live chains. Nothing is custodial:
 the connector prepares transactions and your own wallet signs them.
@@ -56,8 +55,7 @@ Environment overrides, all optional:
 
 ## XSwap: X Money in, anything out
 
-`quote_xswap` and `prepare_xswap_out` escrow X Money against an order — chain, asset,
-amount, recipient — hashed the way every solver hashes it. Solvers bid the price down,
+`quote_xswap` and `prepare_xswap_out` escrow X Money against an order (chain, asset, amount, recipient) hashed the way every solver hashes it. Solvers bid the price down,
 the lowest ask wins, and whatever the bidding saves comes back to the payer as credit.
 `prepare_xswap_in` is the other direction: an ask is a price, not an escrow, and the
 buyer's X Money is held before the seller sends anything.
