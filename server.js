@@ -373,6 +373,21 @@ app.post('/auth/x/logout', (req, res) => {
 // Reads and prepares only — a prepared transaction is inert until the user's wallet
 // signs it, and the browser sends through the wallet, so the submit relays stay off.
 // ---------------------------------------------------------------------------
+// The token a person hands their own model. Signed with the session secret, so it needs no storage;
+// tied to their X id, so it can only ever reach their wallet.
+const CONNECTOR_TTL_S = 180 * 24 * 3600;
+app.post('/api/connector/token', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Sign in with X first: this mints a token for your own wallet.' });
+  const token = sign({ k: 'connector', id: String(user.id), handle: user.handle, exp: Date.now() + CONNECTOR_TTL_S * 1000 });
+  res.json({
+    token,
+    handle: user.handle,
+    expires: new Date(Date.now() + CONNECTOR_TTL_S * 1000).toISOString(),
+    usage: `Authorization: Bearer <token> against ${PUBLIC_ORIGIN}/mcp`,
+  });
+});
+
 app.get('/api/connector', (req, res) => {
   // Anonymous callers (the site in someone's browser) get reads and prepares. A caller holding the
   // connector's token is the operator, not a visitor, and gets the same surface as the hosted MCP:
@@ -434,9 +449,19 @@ const hasOperatorToken = (req) => {
 function actorFor(req) {
   const user = currentUser(req);
   if (user) return { kind: 'user', id: String(user.id), handle: user.handle, label: `@${user.handle}` };
+  // A model is not a browser: it has no cookie. A connector token, minted by the person it belongs to
+  // and carrying their X id, lets their agent act as them from anywhere without a shared secret.
+  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (bearer) {
+    const claim = verify(bearer);
+    if (claim && claim.k === 'connector' && claim.id) {
+      return { kind: 'user', id: String(claim.id), handle: claim.handle, label: `@${claim.handle}` };
+    }
+  }
   if (hasOperatorToken(req)) return OPERATOR;
   return null;
 }
+
 // A caller with a wallet of their own may use the wallet tools on it. claim_exit spends this host's gas,
 // so it stays off every HTTP surface no matter who is asking.
 const authed = (req) => !!actorFor(req);

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Terminal, Copy, Check, Search, KeyRound, Zap, Globe, ArrowRight, Wallet, RefreshCw, PartyPopper } from 'lucide-react';
+import { Terminal, Copy, Check, Search, KeyRound, Zap, Globe, ArrowRight, Wallet, RefreshCw, PartyPopper, Link2 } from 'lucide-react';
 
 /**
  * The connector, front and centre: this chain is mostly used by models, so the landing page is the
@@ -47,6 +47,60 @@ interface WalletState { configured: boolean; wallet: { address: string; id: stri
  * The part a person actually came back for. Signing in with X and landing on an identical page is how
  * people end up asking whether it worked, so this says it worked, and shows the address it made for them.
  */
+/**
+ * A model is not a browser and has no cookie. This mints a token that carries only this person's X id,
+ * so their agent can reach their wallet from any host, and nobody else's.
+ */
+const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
+  const [token, setToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [shown, setShown] = useState(false);
+
+  const mint = async () => {
+    setBusy(true);
+    const r = await fetch('/api/connector/token', { method: 'POST', credentials: 'same-origin' }).then(res => res.json()).catch(() => null);
+    setToken(r?.token ?? null);
+    setBusy(false);
+  };
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://xgas.dev';
+  const config = token
+    ? JSON.stringify({ mcpServers: { xgas: { url: `${origin}/mcp`, headers: { Authorization: `Bearer ${token}` } } } }, null, 2)
+    : '';
+
+  return (
+    <div className="mt-4 pt-4 border-t border-[#1e2538]">
+      <div className="flex items-center gap-2 mb-2">
+        <Link2 className="w-3.5 h-3.5 text-cyan-400" />
+        <span className="text-[11px] uppercase font-black tracking-widest text-cyan-300 font-mono">connect a model to this wallet</span>
+      </div>
+      {!token ? (
+        <>
+          <p className="text-xs text-slate-400 mb-3">
+            Your browser has a session; a model somewhere else does not. Mint a token and paste it into your host,
+            and that model acts as @{handle} on this wallet, nothing more.
+          </p>
+          <button onClick={mint} disabled={busy}
+            className="px-4 py-2 rounded-xl bg-[#121624] border border-cyan-500/40 text-cyan-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033]">
+            {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />} {busy ? 'minting…' : 'Mint my connector token'}
+          </button>
+        </>
+      ) : (
+        <>
+          <p className="text-xs text-slate-400 mb-2">
+            Paste this into your MCP host. Treat it like a key: anyone holding it can spend this wallet, and it lasts 180 days.
+          </p>
+          <CopyLine label="host config" text={config} mono />
+          <button onClick={() => setShown(v => !v)} className="mt-2 text-[11px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer">
+            {shown ? 'hide the raw token' : 'show the raw token'}
+          </button>
+          {shown && <div className="mt-1"><CopyLine label="token" text={token} /></div>}
+        </>
+      )}
+    </div>
+  );
+};
+
 const YourWallet: React.FC = () => {
   const [user, setUser] = useState<XUser | null>(null);
   const [configured, setConfigured] = useState(false);
@@ -124,6 +178,7 @@ const YourWallet: React.FC = () => {
             </div>
           )}
           <p className="mt-2 text-[11px] text-slate-500">Send it a little $xMoney on L4 for gas and it can start doing things. It holds what you put in it and no more.</p>
+          <ConnectAModel handle={user.handle} />
         </>
       ) : (
         <>
