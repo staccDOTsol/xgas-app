@@ -6,7 +6,7 @@ import { prepared, renderApproval, reply } from '../approval.mjs';
 import { submitBatch, submitRaw } from '../idempotency.mjs';
 
 /**
- * X Money in, anything on any EVM chain out — and the other direction. Muse holds no keys and cannot see the far
+ * X Money in, anything on any EVM chain out — and the other direction. The connector holds no keys and cannot see the far
  * chain, so this module only ever does three honest things: read the escrow, hash the order the way every solver
  * hashes it, and hand back unsigned transactions. The bond is the permission; the challenge window is the recourse.
  */
@@ -347,9 +347,16 @@ export const tools = [
         parent.getLogs({ address: XSWAP.intents, event: ev(XSWAP_INTENTS_ABI, 'Opened'), args: { user: address }, fromBlock, toBlock: head }).catch(() => []),
         parent.getLogs({ address: XSWAP.asks, event: ev(XSWAP_ASKS_ABI, 'Asked'), args: { seller: address }, fromBlock, toBlock: head }).catch(() => []),
       ]);
+      // Change from the bidding, solver payouts and won disputes all sit as credit until they are pulled.
+      const [creditOut, creditIn] = await Promise.all([
+        readI('credit', [address]).catch(() => 0n), readA('credit', [address]).catch(() => 0n),
+      ]);
+      const waiting = creditOut + creditIn > 0n
+        ? `\n${fmtXMoney(creditOut + creditIn)} X Money is waiting for you in the escrow (change from the bidding, payouts, dispute wins). Pull it with prepare_xswap_action action=withdraw.`
+        : '';
       const rows = [...opened.map((l) => ({ l, side: 'out' })), ...asked.map((l) => ({ l, side: 'in' }))]
         .sort((a, b) => Number(b.l.blockNumber - a.l.blockNumber)).slice(0, limit);
-      if (!rows.length) return reply(`${address} has no swaps in the last ${lookback_blocks} blocks.`, { swaps: [] });
+      if (!rows.length) return reply(`${address} has no swaps in the last ${lookback_blocks} blocks.${waiting}`, { swaps: [], credit_out: creditOut, credit_in: creditIn });
       const swaps = [];
       for (const r of rows) {
         const s = r.side === 'out' ? await intentOf(r.l.args.id) : await askOf(r.l.args.id);
@@ -360,7 +367,7 @@ export const tools = [
       const line = (s) => (s.side === 'out'
         ? `${s.id.slice(0, 10)}… out · ${s.escrowed} X Money → ${s.order ? `${s.order.kind} on chain ${s.order.dstChainId}` : 'see want hash'} · ${s.state}`
         : `${s.id.slice(0, 10)}… in · ${s.order ? `${s.order.kind} on chain ${s.order.dstChainId}` : 'see give hash'} → ${s.floor}+ X Money · ${s.state}`);
-      return reply(`${swaps.length} swap${swaps.length > 1 ? 's' : ''}:\n${swaps.map(line).join('\n')}`, { swaps });
+      return reply(`${swaps.length} swap${swaps.length > 1 ? 's' : ''}:\n${swaps.map(line).join('\n')}${waiting}`, { swaps, credit_out: creditOut, credit_in: creditIn });
     },
   },
   {

@@ -1,17 +1,34 @@
-# xGas Muse connector
+# xgas-mcp
 
 An MCP server over the xGas stack: the USDG vault bridge on Robinhood Chain (4663),
-the P2P OTC desk and NGU curves on xGas Orbit L4 (466301), and a teller layer that
-routes between dollars and $xMoney.
+the P2P OTC desk and NGU curves on xGas Orbit L4 (466301), a teller layer that routes
+between dollars and $xMoney, and XSwap — X Money in, anything on any EVM chain out,
+and the other way round.
 
-39 tools, all grounded in `src/contracts/l4-deployment.json` and the live chains.
+49 tools, all grounded in a deployment file and the live chains. Nothing is custodial:
+the connector prepares transactions and your own wallet signs them.
+
+## Use it without cloning
+
+Hosted, no install — point a host at the remote server:
+
+```
+https://xgas.dev/mcp
+```
+
+Or run it locally over stdio:
+
+```bash
+npx -y xgas-mcp
+```
 
 ## Run it
 
 ```bash
 npm install
 npm start          # stdio
-npm run check      # end-to-end smoke test over real MCP
+npm run check      # smoke test over real MCP stdio, against the live chains
+npm run e2e        # a whole X Money swap on an anvil fork: open, bid, accept, claim, confirm, withdraw
 ```
 
 Host config:
@@ -19,7 +36,7 @@ Host config:
 ```json
 {
   "mcpServers": {
-    "xgas": { "command": "node", "args": ["/Users/stacc/xgas-app/mcp/src/index.mjs"] }
+    "xgas": { "command": "npx", "args": ["-y", "xgas-mcp"] }
   }
 }
 ```
@@ -33,7 +50,25 @@ Environment overrides, all optional:
 | `XGAS_RPC` | `publicRpcUrl` from the deployment | xGas L4 RPC |
 | `XGAS_API` | `https://xgas.dev` | the host that runs the Outbox executor and serves `/api/l4-info` |
 | `XGAS_NGU_LAUNCHER` | unset | the NguLauncher address, until it is in the deployment file |
-| `XGAS_MCP_DATA` | `/data` or `~/.xgas-muse` | where idempotency keys and ramp state live |
+| `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
+| `XSWAP_INTENTS` | `0xf8B4…9a35` | the X-Money-in escrow on the parent chain |
+| `XSWAP_ASKS` | `0x0a33…Cd13` | the X-Money-out escrow on the parent chain |
+
+## XSwap: X Money in, anything out
+
+`quote_xswap` and `prepare_xswap_out` escrow X Money against an order — chain, asset,
+amount, recipient — hashed the way every solver hashes it. Solvers bid the price down,
+the lowest ask wins, and whatever the bidding saves comes back to the payer as credit.
+`prepare_xswap_in` is the other direction: an ask is a price, not an escrow, and the
+buyer's X Money is held before the seller sends anything.
+
+Solving is permissionless. There is no allow-list: `prepare_xswap_action` will prepare a
+bid and a claim for any address, the bond is the permission, and losing a dispute is the
+cost. `xswap_reputation` is only ever the sum of finished jobs, and it says "new here"
+rather than pretending a number it does not have.
+
+The connector cannot see the destination chain. It never claims an asset arrived; the
+challenge window and the bond are what stand in for that.
 
 ## Design rules
 
@@ -43,7 +78,7 @@ already-signed payload. The only key in the system is the host's `L3_EXECUTOR_KE
 which can only execute already-claimable Outbox withdrawals — a permissionless call.
 
 **Quote, review, approve, submit.** Each `prepare_*` returns the approval screen
-the Muse ToS requires: exact action, asset, amount, counterparty (address and X
+a non-custodial connector owes you: exact action, asset, amount, counterparty (address and X
 handle where known), every fee with the net, the finality timeline, and what cannot
 be undone. Nothing auto-approves.
 
@@ -115,7 +150,7 @@ All three items the spec left open are closed.
    `submit_*` and `claim_exit` is refused with 403, because the browser sends
    through the wallet). `web3Client.ts` gained `callConnector`, `isEnvelope` and
    `executeEnvelope`, which walks a prepared envelope through the existing
-   `sendOnChainTx` one step at a time, waiting for each. The site and Muse now
+   `sendOnChainTx` one step at a time, waiting for each. The site and the connector now
    share one source of truth for quotes, fees and approval copy.
 2. **Exit ETAs.** `quote_exit`, `prepare_exit` and `get_exit_status` read
    `confirmPeriodBlocks` off the rollup and measure the parent's cadence over the

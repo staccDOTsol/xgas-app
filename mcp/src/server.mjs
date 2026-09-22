@@ -1,15 +1,21 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { ALL_TOOLS, TOOLS_BY_NAME } from './registry.mjs';
 
-export const VERSION = '0.2.0';
+// One version number, the published one. A hard-coded copy here would drift the day it mattered.
+export const VERSION = JSON.parse(
+  fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+).version;
 
 /**
  * One MCP server, whatever the transport. stdio (src/index.mjs) gets the whole tool set;
  * the hosted endpoint passes a filter, because a tool that spends the host's own gas has no
  * business on a public URL. Everything else is the same code the CLI serves.
  */
-export function createServer({ allow = () => true, name = 'xgas-muse-connector' } = {}) {
+export function createServer({ allow = () => true, name = 'xgas-mcp' } = {}) {
   const tools = ALL_TOOLS.filter((t) => allow(t.name));
   const server = new Server({ name, version: VERSION }, { capabilities: { tools: {} } });
 

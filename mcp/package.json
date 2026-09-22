@@ -1,15 +1,16 @@
 {
-  "name": "xgas-muse-connector",
-  "version": "0.2.0",
+  "name": "xgas-mcp",
+  "version": "0.2.1",
   "type": "module",
   "description": "MCP connector for the xGas Orbit L4 and X Money: vault bridge, P2P OTC desk, NGU curves, fiat ramps, and cross-chain X Money swaps. Non-custodial: it prepares transactions, your wallet signs them.",
   "bin": {
-    "xgas-muse-connector": "./src/index.mjs"
+    "xgas-mcp": "./src/index.mjs"
   },
   "scripts": {
     "start": "node src/index.mjs",
     "check": "node scripts/smoke.mjs",
-    "prepublishOnly": "cp ../src/contracts/l4-deployment.json ./deployment.json"
+    "prepublishOnly": "cp ../src/contracts/l4-deployment.json ./deployment.json",
+    "e2e": "node scripts/xswap-e2e.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.1",

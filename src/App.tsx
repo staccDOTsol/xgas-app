@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { OrbitXMoneyOtc } from './components/OrbitXMoneyOtc';
 import { NguLaunchpad } from './components/NguLaunchpad';
+import { McpConnector } from './components/McpConnector';
 import { UserWallet } from './types';
 import { connectInjectedWallet, switchNetwork, addXMoneyTokenToWallet, addOrbitL4ToWallet, loadL4Info, fetchL4XMoneyBalance, orbitL4RpcUrl, fetchXSession, xLoginUrl, xLogout, type XUser, L3_CHAIN_ID, L4_CHAIN_ID } from './contracts/web3Client';
 import { CONTRACT_ADDRESSES } from './contracts/abis';
@@ -33,7 +34,7 @@ export default function App() {
   const [rpcMismatch, setRpcMismatch] = useState<{ wallet: number; sequencer: number } | null>(null);
   const [xUser, setXUser] = useState<XUser | null>(null);
   const [xConfigured, setXConfigured] = useState<boolean>(false);
-  const [tab, setTab] = useState<'otc' | 'ngu'>('otc');
+  const [tab, setTab] = useState<'mcp' | 'otc' | 'ngu'>('mcp');
 
   // Sign in with X session
   useEffect(() => {
@@ -350,7 +351,11 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 p-3 sm:p-5 max-w-[1780px] w-full mx-auto">
-        <div className="flex gap-1.5 mb-4">
+        <div className="flex gap-1.5 mb-4 overflow-x-auto no-scrollbar [&>*]:shrink-0">
+          <button onClick={() => setTab('mcp')}
+            className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'mcp' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
+            MCP connector
+          </button>
           <button onClick={() => setTab('otc')}
             className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'otc' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
             OTC desk
@@ -360,7 +365,9 @@ export default function App() {
             NGU launchpad
           </button>
         </div>
-        {tab === 'otc' ? (
+        {tab === 'mcp' ? (
+          <McpConnector />
+        ) : tab === 'otc' ? (
           <OrbitXMoneyOtc
             wallet={wallet}
             onConnectWallet={handleConnectWallet}

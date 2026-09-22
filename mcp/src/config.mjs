@@ -79,7 +79,7 @@ export async function nguLauncher() {
 }
 
 // XSwap lives on the parent chain, not the L4: the escrow holds the L3 xMoney ERC-20 that the vault mints,
-// so an intent opened from Muse is the same X Money a bridge exit hands you. Addresses are staccpad's, not
+// so an intent opened through the connector is the same X Money a bridge exit hands you. Addresses are staccpad's, not
 // the Orbit deploy's, so they come from env with the live defaults baked in.
 export const XSWAP = {
   intents: process.env.XSWAP_INTENTS || DEPLOY.xswap?.intents || '0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35',

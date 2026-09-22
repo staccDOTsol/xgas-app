@@ -3,7 +3,7 @@ import path from 'path';
 import { clientFor, rpcFor } from './config.mjs';
 
 const DATA_DIR = process.env.XGAS_MCP_DATA
-  || (fs.existsSync('/data') ? '/data' : path.join(process.env.HOME || '.', '.xgas-muse'));
+  || (fs.existsSync('/data') ? '/data' : path.join(process.env.HOME || '.', '.xgas-mcp'));
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const FILE = path.join(DATA_DIR, 'submits.json');
 

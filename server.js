@@ -365,7 +365,7 @@ app.post('/auth/x/logout', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Connector API: the same quote/prepare tools Muse speaks to, over HTTP for the site.
+// Connector API: the same quote/prepare tools the MCP serves, over HTTP for the site.
 // Reads and prepares only — a prepared transaction is inert until the user's wallet
 // signs it, and the browser sends through the wallet, so the submit relays stay off.
 // ---------------------------------------------------------------------------
@@ -421,10 +421,10 @@ app.all('/mcp', async (req, res) => {
 // What a person (or a host's "add server" screen) needs to wire it up, and what it can do.
 app.get('/api/mcp', (_req, res) => {
   res.json({
-    name: 'xgas-muse-connector',
+    name: 'xgas-mcp',
     version: MCP_VERSION,
-    transport: { http: `${PUBLIC_ORIGIN}/mcp`, stdio: 'npx -y xgas-muse-connector' },
-    npm: 'https://www.npmjs.com/package/xgas-muse-connector',
+    transport: { http: `${PUBLIC_ORIGIN}/mcp`, stdio: 'npx -y xgas-mcp' },
+    npm: 'https://www.npmjs.com/package/xgas-mcp',
     tool_count: MCP_TOOL_COUNT,
     custodial: false,
     tools: ALL_TOOLS.filter((t) => isHostable(t.name)).map(({ name, description }) => ({

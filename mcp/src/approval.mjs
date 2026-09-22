@@ -2,8 +2,8 @@ import { json } from './money.mjs';
 
 /**
  * The connector never signs. Every write comes back as this envelope: an unsigned
- * transaction the user's own wallet signs, alongside the approval screen the Muse
- * ToS requires — exact action, amounts, every fee, the net, the finality timeline,
+ * transaction the user's own wallet signs, alongside the approval screen a
+ * non-custodial connector owes you — exact action, amounts, every fee, the net, the finality timeline,
  * and an explicit word on what cannot be undone.
  */
 export function prepared({ action, chainId, to, data, value = 0n, asset, amount, counterparty, fees = [], net, timeline = [], irreversible, notes = [], steps }) {

@@ -448,7 +448,7 @@ export async function xLogout(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Connector: the same quote/prepare tools Muse speaks to, served at /api/connector.
+// Connector: the same quote/prepare tools the MCP serves, at /api/connector.
 // Quotes, fees and approval copy live in one place (mcp/src/tools) instead of being
 // re-derived in each component.
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 // The tool set, independent of MCP. src/index.mjs serves it over stdio; the app's
 // express server serves the read and prepare tools over HTTP. One source of truth
-// for quotes, fees and approval copy, whether the caller is Muse or the website.
+// for quotes, fees and approval copy, whether the caller is a model or the website.
 import { tools as chainTools } from './tools/chain.mjs';
 import { tools as bridgeTools } from './tools/bridge.mjs';
 import { tools as otcTools } from './tools/otc.mjs';

@@ -10,7 +10,7 @@ const { server } = createServer();
 if (import.meta.url === `file://${process.argv[1]}`) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`xgas-muse-connector ${VERSION}: ${ALL_TOOLS.length} tools on stdio`);
+  console.error(`xgas-mcp ${VERSION}: ${ALL_TOOLS.length} tools on stdio`);
 }
 
 export { server };

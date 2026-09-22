@@ -41,12 +41,17 @@ if (!isFork) { console.error(`${RPC} is not an anvil fork. This script writes st
 
 const XM = 10n ** 18n;
 async function deal(who, amount) {
+  // Probe with a value nothing else would hold, so a wallet that already has `amount` cannot fool the search.
+  const probe = amount + 12_345n;
   for (let slot = 0; slot < 24; slot++) {
     const key = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [who, BigInt(slot)]));
     const before = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [who] });
-    await raw('anvil_setStorageAt', [XSWAP.xmoney, key, pad(toHex(amount), { size: 32 })]);
-    const after = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [who] });
-    if (after === amount && after !== before) return slot;
+    await raw('anvil_setStorageAt', [XSWAP.xmoney, key, pad(toHex(probe), { size: 32 })]);
+    const seen = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [who] });
+    if (seen === probe) {
+      await raw('anvil_setStorageAt', [XSWAP.xmoney, key, pad(toHex(amount), { size: 32 })]);
+      return slot;
+    }
     await raw('anvil_setStorageAt', [XSWAP.xmoney, key, pad(toHex(before), { size: 32 })]);
   }
   throw new Error('Could not find the balance slot on the X Money token.');
@@ -99,8 +104,9 @@ step(st.data?.state_code === 0 && st.data.escrowed === '10', `status: ${st.data?
 
 // ── 2. a solver bids 8, then the user accepts ──────────────────────────────────────────────────────────────────
 const bond = 10n * XM; // bondBps 100% of the escrow
+const solverCreditBefore = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [SOLVER.address] });
 const bidPrep = await call('prepare_xswap_action', { id, action: 'bid', from: SOLVER.address, ask: '8' });
-step(!bidPrep.isError && bidPrep.data.transactions.length === 2, `solver prepared a bid: ${bidPrep.data?.transactions?.length} txs (approve the bond, then bid)`);
+step(!bidPrep.isError && bidPrep.data.transactions.length >= 1, `solver prepared a bid: ${bidPrep.data?.transactions?.length} tx(s) — the bond is approved then posted`);
 await signAndSubmit(SOLVER, bidPrep, `e2e-bid-${id}`);
 st = await call('xswap_status', { id });
 step(st.data?.solver?.toLowerCase() === SOLVER.address.toLowerCase() && st.data.back_to_you === '2', `bid in: ask ${st.data?.solver_ask}, ${st.data?.back_to_you} comes back to the payer`);
@@ -116,19 +122,29 @@ await signAndSubmit(SOLVER, claimPrep, `e2e-claim-${id}`);
 st = await call('xswap_status', { id });
 step(st.data?.state_code === 2, `claimed: ${st.data?.state}`);
 
-const before = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [USER.address] });
+const creditBefore = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [USER.address] });
 const conf = await call('prepare_xswap_action', { id, action: 'confirm' });
 await signAndSubmit(USER, conf, `e2e-confirm-${id}`);
-const after = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [USER.address] });
 st = await call('xswap_status', { id });
 step(st.data?.state_code === 3, `confirmed: ${st.data?.state}`);
-step(after - before === 2n * XM, `bidding handed back ${formatUnits(after - before, 18)} X Money to the payer (expected 2)`);
+const creditAfter = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [USER.address] });
+step(creditAfter - creditBefore === 2n * XM, `bidding set aside ${formatUnits(creditAfter - creditBefore, 18)} X Money for the payer (expected 2)`);
 
-const credit = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [SOLVER.address] });
-step(credit === 8n * XM - (8n * XM * 50n) / 10_000n + bond, `solver credited ${formatUnits(credit, 18)} X Money (ask less fee, plus bond back)`);
+// and the payer pulls it, through the connector like everything else
+const balBefore = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [USER.address] });
+const wd = await call('prepare_xswap_action', { action: 'withdraw', side: 'out' });
+await signAndSubmit(USER, wd, `e2e-withdraw-${id}`);
+const balAfter = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [USER.address] });
+// X Money burns 1 bp on every transfer, so the wallet receives the credit less that burn.
+const expectPulled = creditAfter - (creditAfter * 1n) / 10_000n;
+step(balAfter - balBefore === expectPulled, `withdrew ${formatUnits(balAfter - balBefore, 18)} X Money to the payer's wallet (credit ${formatUnits(creditAfter, 18)} less the 1 bp transfer burn)`);
+
+const solverCredit = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [SOLVER.address] });
+const earned = 8n * XM - (8n * XM * 50n) / 10_000n + bond; // ask, less the 0.5% protocol fee, plus the bond back
+step(solverCredit - solverCreditBefore === earned, `solver credited ${formatUnits(solverCredit - solverCreditBefore, 18)} X Money this run (ask less fee, plus bond back)`);
 
 const rep = await call('xswap_reputation', { address: SOLVER.address });
-step(rep.data?.filled === 1, `reputation: ${rep.text.split('\n')[0]}`);
+step(rep.data?.filled >= 1, `reputation: ${rep.text.split('\n')[0]}`);
 
 // ── 4. the other direction: an ask is a price, not an escrow ───────────────────────────────────────────────────
 const askPrep = await call('prepare_xswap_in', { from: USER.address, want_xmoney: '5', chain: 'apechain', asset: '0x0000000000000000000000000000000000000001', token_id: '42', deadline_minutes: 60 });
@@ -137,7 +153,7 @@ const askSt = await call('xswap_status', { id: askPrep.data.ask_id });
 step(askSt.data?.side === 'in' && askSt.data.floor === '5', `ask posted: ${askSt.data?.state}, floor ${askSt.data?.floor} X Money`);
 
 const mine = await call('list_my_xswaps', { address: USER.address, lookback_blocks: 5000 });
-step(mine.data?.swaps?.length === 2, `list_my_xswaps sees ${mine.data?.swaps?.length} swaps for the payer`);
+step(mine.data?.swaps?.length >= 2, `list_my_xswaps sees ${mine.data?.swaps?.length} swaps for the payer, both directions`);
 
 await mcp.close();
 console.log(failures ? `\n${failures} failure(s)` : '\nall good: the whole swap ran through the connector');
