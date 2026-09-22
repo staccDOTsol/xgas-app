@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Terminal, Copy, Check, Search, KeyRound, Zap, Globe, ArrowRight } from 'lucide-react';
+import { Terminal, Copy, Check, Search, KeyRound, Zap, Globe, ArrowRight, Wallet, RefreshCw, PartyPopper } from 'lucide-react';
 
 /**
  * The connector, front and centre: this chain is mostly used by models, so the landing page is the
@@ -40,6 +40,105 @@ const CopyLine: React.FC<{ text: string; label?: string; mono?: boolean }> = ({ 
   );
 };
 
+interface XUser { id: string; handle: string; name?: string; avatar?: string }
+interface WalletState { configured: boolean; wallet: { address: string; id: string; source: string } | null; balances?: { xgas_native_xmoney: string; parent_usdg: string; parent_xmoney: string } }
+
+/**
+ * The part a person actually came back for. Signing in with X and landing on an identical page is how
+ * people end up asking whether it worked, so this says it worked, and shows the address it made for them.
+ */
+const YourWallet: React.FC = () => {
+  const [user, setUser] = useState<XUser | null>(null);
+  const [configured, setConfigured] = useState(false);
+  const [state, setState] = useState<WalletState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const justSignedIn = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('xauth') === 'ok';
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    const me = await fetch('/api/me', { credentials: 'same-origin' }).then(r => r.json()).catch(() => null);
+    setConfigured(!!me?.configured);
+    setUser(me?.user ?? null);
+    if (!me?.user) { setState(null); setLoading(false); return; }
+    const w = await fetch('/api/connector/wallet_status', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(r => r.json()).catch(() => null);
+    setState(w?.data ?? null);
+    setLoading(false);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // The address exists the moment they ask for it; nobody should have to go and find it.
+  const create = async () => {
+    setBusy(true); setErr(null);
+    const r = await fetch('/api/connector/wallet_create', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(res => res.json()).catch(() => null);
+    if (r?.error) setErr(r.error);
+    await load();
+    setBusy(false);
+  };
+
+  if (!configured) return null;
+
+  if (!user) {
+    return (
+      <section className="rounded-2xl border border-[#1e2538] bg-[#0b0e17] p-4 sm:p-5 flex flex-wrap items-center gap-3">
+        <Wallet className="w-4 h-4 text-emerald-400" />
+        <div className="text-sm text-slate-300 mr-auto">
+          Sign in with X and this connector runs a wallet of your own. Nothing to install, nothing to paste.
+        </div>
+        <a href={`/auth/x/login?returnTo=${encodeURIComponent('/')}`}
+          className="px-4 py-2 rounded-xl bg-white text-black text-xs font-black font-mono flex items-center gap-2 hover:bg-slate-200">
+          <span className="font-black">𝕏</span> Sign in with X
+        </a>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 sm:p-5">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        {justSignedIn && <PartyPopper className="w-4 h-4 text-emerald-400" />}
+        <span className="text-[11px] uppercase font-black tracking-widest text-emerald-300 font-mono">
+          {justSignedIn ? `thanks for connecting, @${user.handle}` : `signed in as @${user.handle}`}
+        </span>
+        <button onClick={load} className="ml-auto p-1.5 rounded-lg bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white cursor-pointer" title="Refresh">
+          <RefreshCw className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="text-xs font-mono text-slate-500 flex items-center gap-2"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> reading your wallet…</div>
+      ) : !state?.configured ? (
+        <div className="text-xs font-mono text-slate-400">Wallets are not switched on for this host yet.</div>
+      ) : state.wallet ? (
+        <>
+          <p className="text-xs text-slate-400 mb-2">This is your wallet on this connector. It is yours alone, and it signs when you ask a model to do something here.</p>
+          <CopyLine label="your address" text={state.wallet.address} />
+          {state.balances && (
+            <div className="mt-2 grid gap-1.5 sm:grid-cols-3 text-[11px] font-mono">
+              <div className="px-3 py-2 rounded-xl bg-[#0b0e17] border border-[#1e2538]"><span className="text-slate-500">xGas L4</span><br /><span className="text-slate-200">{state.balances.xgas_native_xmoney} $xMoney</span></div>
+              <div className="px-3 py-2 rounded-xl bg-[#0b0e17] border border-[#1e2538]"><span className="text-slate-500">parent USDG</span><br /><span className="text-slate-200">{state.balances.parent_usdg}</span></div>
+              <div className="px-3 py-2 rounded-xl bg-[#0b0e17] border border-[#1e2538]"><span className="text-slate-500">parent xMoney</span><br /><span className="text-slate-200">{state.balances.parent_xmoney}</span></div>
+            </div>
+          )}
+          <p className="mt-2 text-[11px] text-slate-500">Send it a little $xMoney on L4 for gas and it can start doing things. It holds what you put in it and no more.</p>
+        </>
+      ) : (
+        <>
+          <p className="text-xs text-slate-400 mb-3">You do not have a wallet here yet. Make one and its address appears right below, ready to fund.</p>
+          <button onClick={create} disabled={busy}
+            className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black font-mono flex items-center gap-2 cursor-pointer disabled:opacity-60">
+            {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Wallet className="w-3.5 h-3.5" />} {busy ? 'making it…' : 'Create my wallet'}
+          </button>
+        </>
+      )}
+      {err && <div className="mt-2 text-[11px] font-mono text-rose-300">{err}</div>}
+    </section>
+  );
+};
+
 export const McpConnector: React.FC = () => {
   const [info, setInfo] = useState<McpInfo | null>(null);
   const [q, setQ] = useState('');
@@ -65,6 +164,7 @@ export const McpConnector: React.FC = () => {
 
   return (
     <div className="space-y-5">
+      <YourWallet />
       {/* The pitch */}
       <section className="rounded-2xl border border-[#1e2538] bg-gradient-to-b from-[#0d1220] to-[#0b0e17] p-5 sm:p-8">
         <div className="flex items-center gap-2 mb-3">

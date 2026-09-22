@@ -353,7 +353,10 @@ app.get('/auth/x/callback', async (req, res) => {
     const sess = { id: me.data.id, handle: me.data.username, name: me.data.name, avatar: me.data.profile_image_url, exp: Date.now() + SESSION_TTL_S * 1000 };
     setCookie(req, res, SESSION_COOKIE, sign(sess), SESSION_TTL_S);
     console.log(`[X AUTH] @${me.data.username} signed in`);
-    res.redirect(pending.returnTo || '/');
+    // Land somewhere that says so. A redirect that looks identical to the page you left is how people
+    // end up asking whether it worked.
+    const back = pending.returnTo || '/';
+    res.redirect(`${back}${back.includes('?') ? '&' : '?'}xauth=ok`);
   } catch (e) {
     console.error('[X AUTH] callback error:', e);
     res.status(500).send('Sign in with X failed.');
