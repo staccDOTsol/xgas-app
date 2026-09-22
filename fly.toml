@@ -1,0 +1,30 @@
+app = "xgas-app"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  VITE_CHAIN_ID = "4663"
+  VITE_ROBINHOOD_RPC_URL = "https://staccpad.fun/rpc"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2
+
+# The Orbit L4 sequencer (anvil) keeps its chain state + bridge ledger here. Exactly ONE machine
+# may run this app: the L4 state is in-process, so a second machine would be a second, diverging chain.
+[mounts]
+  source = "xgas_l3_data"
+  destination = "/data"

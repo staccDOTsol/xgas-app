@@ -1,0 +1,15 @@
+node_modules/
+dist/
+
+# Runtime state, and the HMAC key that signs X sessions — never commit this.
+l4-data/
+*.key
+.env
+.env.*
+
+# Foundry build output and broadcast logs
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+nohup.out

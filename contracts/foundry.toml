@@ -1,0 +1,14 @@
+[profile.default]
+src = "src"
+script = "script"
+out = "out"
+libs = ["lib", "/Users/stacc/nft-range/lib"]
+solc = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+remappings = [
+    "forge-std/=/Users/stacc/nft-range/lib/forge-std/src/",
+    "@openzeppelin/=/Users/stacc/nft-range/lib/openzeppelin-contracts/"
+]
+

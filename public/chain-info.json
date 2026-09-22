@@ -1,0 +1,48 @@
+[
+  {
+    "chain-id": 466301,
+    "parent-chain-id": 4663,
+    "parent-chain-is-arbitrum": true,
+    "chain-name": "xgas Orbit L4",
+    "chain-config": {
+      "chainId": 466301,
+      "homesteadBlock": 0,
+      "daoForkBlock": null,
+      "daoForkSupport": true,
+      "eip150Block": 0,
+      "eip150Hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "eip155Block": 0,
+      "eip158Block": 0,
+      "byzantiumBlock": 0,
+      "constantinopleBlock": 0,
+      "petersburgBlock": 0,
+      "istanbulBlock": 0,
+      "muirGlacierBlock": 0,
+      "berlinBlock": 0,
+      "londonBlock": 0,
+      "clique": {
+        "period": 0,
+        "epoch": 0
+      },
+      "arbitrum": {
+        "EnableArbOS": true,
+        "AllowDebugPrecompiles": false,
+        "DataAvailabilityCommittee": true,
+        "InitialArbOSVersion": 51,
+        "InitialChainOwner": "0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F",
+        "GenesisBlockNum": 0,
+        "MaxCodeSize": 24576,
+        "MaxInitCodeSize": 49152
+      }
+    },
+    "rollup": {
+      "bridge": "0x8b58B2f893770E57e16D8c7551f2E405E9A94E5f",
+      "inbox": "0x67E524A7349ccB4a2d59D6256c51cf20586687b4",
+      "sequencer-inbox": "0x16Daa2551d41243C82366c8b94Dc11418Ac0AeD7",
+      "rollup": "0x5Ba539b34b9F33036CC4788225149ce07Ba183a8",
+      "validator-wallet-creator": "0xB7FE37712e46F28C8f22Ec4bAA33A09fb8B52BD0",
+      "stake-token": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+      "deployed-at": 66624961
+    }
+  }
+]

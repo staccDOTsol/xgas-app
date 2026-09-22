@@ -1,0 +1,49 @@
+{
+  "chainId": 466301,
+  "chainName": "xgas Orbit L4",
+  "rpcUrl": "https://xgas.dev/rpc",
+  "wsUrl": "wss://xgas-l3.fly.dev:8450",
+  "parentChainId": 4663,
+  "parentRpcUrl": "https://staccpad.fun/rpc",
+  "createdAt": "2026-09-18T23:39:54.485Z",
+  "createRollupTx": "0xa49321744d16391e315e4202f576768247c3f60bd79b64dc837ef61fb2f0afc5",
+  "deployedAtBlock": 66624961,
+  "owner": "0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F",
+  "batchPoster": "0xACE374C5d437ffE878a802CEbbc10a688C8CaEFF",
+  "validator": "0x0d61D8e07a6210b0F082DAB784062c9c583BA647",
+  "publicRpcUrl": "https://xgas.dev/rpc",
+  "sequencerRpcUrl": "https://xgas-l3.fly.dev",
+  "l3": {
+    "xMoney": "0xa924C725B64cC346f275269EFA4Bd0538cfBa97E",
+    "legacyXMoney": "0xa72Ab0874A57Ab0F950Bf61B096b01b183A3CB7c",
+    "usdg": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    "fanout": "0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e",
+    "rollup": "0x5Ba539b34b9F33036CC4788225149ce07Ba183a8",
+    "inbox": "0x67E524A7349ccB4a2d59D6256c51cf20586687b4",
+    "outbox": "0x4d4757f0cB643d97B779ee4DD5512C6c2383E78f",
+    "bridge": "0x8b58B2f893770E57e16D8c7551f2E405E9A94E5f",
+    "sequencerInbox": "0x16Daa2551d41243C82366c8b94Dc11418Ac0AeD7",
+    "upgradeExecutor": "0x0349fd32a3D22cDa73180b7f6F893Bed33CCa72d",
+    "challengeManager": "0xFE477feb994A917964197E38AFD0C3eb36B36090",
+    "timelock": "0x70A0fBE369e7C390BddA7c55dFD8590F6C13B47B",
+    "timelockMinDelaySeconds": 86400,
+    "timelockProposers": [
+      "0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F",
+      "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+    ]
+  },
+  "l4": {
+    "escrow": "0x1877f55E01670539b3a93aD7004a45C25Aed19d5",
+    "fomo": "0x556b8c1943905D6e8354E4Df853b9053a62a40d8",
+    "router": "0x98b52B1a50FE263aBE0F6CE19d47C6F65C42c23A",
+    "fanoutSink": "0x652125E71C7f209e640C0069e4a5e77FAfa99b4B",
+    "escrowV2": "0xf8Dbd439A994ff913509e68085B2ED3deC94c26A",
+    "fomoV2": "0xcb4f0EE71D816a74C9c4eCa38261191948EBFcE2",
+    "routerV2": "0x9fF204BAeeEDF2f6CC9951f8ab182cCebF7ADe35",
+    "arbSys": "0x0000000000000000000000000000000000000064",
+    "nodeInterface": "0x00000000000000000000000000000000000000C8",
+    "escrowV1": "0x3a22560c596251f656ffc629675C3F6c7Ca32847",
+    "nguLauncher": "0xEA2cE320B5CDbF14bc734FeB60c78097e146f1B0"
+  }
+}

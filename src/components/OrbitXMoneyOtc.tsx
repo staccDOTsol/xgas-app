@@ -1,0 +1,2156 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Zap, 
+  Flame, 
+  TrendingUp, 
+  ArrowRight, 
+  ShieldCheck, 
+  Coins, 
+  Clock, 
+  ExternalLink, 
+  CheckCircle, 
+  AlertTriangle, 
+  Percent, 
+  RefreshCw, 
+  Send,
+  Lock,
+  Sparkles,
+  Layers,
+  ChevronRight,
+  Info,
+  Award,
+  Hash,
+  Database,
+  Share2,
+  Link2,
+  Plus,
+  ArrowDownUp
+} from 'lucide-react';
+import { UserWallet } from '../types';
+import { CONTRACT_ADDRESSES, l4Addresses } from '../contracts/abis';
+import { OrbitL4Explorer } from './OrbitL4Explorer';
+import { publicClient, l4PublicClient, sendOnChainTx, encodeAbiCall, fetchL4XMoneyBalance, loadL4Info, waitForL4Credit, fetchWithdrawals, executeWithdrawal, type Withdrawal, L3_CHAIN_ID, L4_CHAIN_ID } from '../contracts/web3Client';
+import { sounds } from '../utils/audio';
+import confetti from 'canvas-confetti';
+import { formatEther, parseEther, parseAbi } from 'viem';
+
+interface OtcOrder {
+  id: number;
+  maker: string;
+  makerXHandle: string;
+  side: 'ASK' | 'BID';
+  availableXMoney: number; // in $xMoney
+  fiatRateBps: number;      // 10000 = $1.00 USD
+  minAmount: number;
+  maxAmount: number;
+  active: boolean;
+}
+
+interface OtcTrade {
+  id: number;
+  orderId: number;
+  side: 'ASK' | 'BID';
+  seller: string;
+  sellerXHandle: string;
+  buyer: string;
+  buyerXHandle: string;
+  xMoneyAmount: number;
+  expectedCents: number;
+  deadline: number;
+  completed: boolean;
+  cancelled: boolean;
+}
+
+interface FomoState {
+  roundId: number;
+  roundDeadline: number;
+  currentLeader: string;
+  currentLeaderXHandle: string;
+  jackpotPot: number;
+  totalKeys: number;
+  keyPrice: number;
+  playerKeys: number;
+  playerDividends: number;
+}
+
+interface OrbitXMoneyOtcProps {
+  wallet: UserWallet;
+  onConnectWallet: () => void;
+  /** X handle from Sign in with X; when set, all handle fields are locked to it */
+  xHandle?: string | null;
+}
+
+const USDG_ABI = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)'
+]);
+
+// XMoney: the vault + gas token on Robinhood. enterRollup bridges to the Orbit L4 in the same tx.
+const XUSD_VAULT_ABI = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function enterRollup(uint256 usdgAmount, address l3Recipient) returns (uint256)',
+  'function exitRollup(uint256 xMoneyAmount) returns (uint256)',
+  'function migrate(uint256 legacyAmount, address l3Recipient) returns (uint256)',
+  'function getReserveNAV() view returns (uint256 navRay, uint256 usdgReserve, uint256 circulatingXMoney)',
+  'function totalXMoneyBurned() view returns (uint256)',
+  'function totalUsdgRakedToFanout() view returns (uint256)',
+  'function totalXMoneyBridgedToL4() view returns (uint256)',
+  'event RollupEntered(address indexed user, address indexed l3Recipient, uint256 usdgIn, uint256 xMoneyBridged, uint256 usdgRaked, uint256 xMoneyBurned, uint256 retryableTicketId)',
+  'event RollupExited(address indexed user, uint256 xMoneyBurned, uint256 usdgReturned, uint256 usdgRaked)'
+]);
+
+// ArbSys precompile on the L4: withdrawEth burns native xMoney and queues an L4->L3 message.
+const ARBSYS_ABI = parseAbi(['function withdrawEth(address destination) payable returns (uint256)']);
+
+// xgas Orbit L4 P2P escrow: every amount is NATIVE $xMoney (18 decimals)
+const ESCROW_ABI = parseAbi([
+  'function nextOrderId() view returns (uint256)',
+  'function nextTradeId() view returns (uint256)',
+  'function totalXMoneyBurned() view returns (uint256)',
+  'function totalXMoneyRakedToFanout() view returns (uint256)',
+  'function totalSettledVolumeXMoney() view returns (uint256)',
+  'function orders(uint256) view returns (address maker, string makerXHandle, uint8 side, uint256 availableXMoney, uint256 fiatRateBps, uint256 minAmount, uint256 maxAmount, bool active)',
+  'function trades(uint256) view returns (uint256 orderId, uint8 side, address seller, string sellerXHandle, address buyer, string buyerXHandle, uint256 xMoneyAmount, uint256 expectedCents, uint256 deadline, bool completed, bool cancelled)',
+  'function createSellAsk(string makerXHandle, uint256 xMoneyAmount, uint256 fiatRateBps, uint256 minAmount, uint256 maxAmount) payable returns (uint256)',
+  'function createBuyBid(string makerXHandle, uint256 maxXMoneyWanted, uint256 fiatRateBps, uint256 minAmount, uint256 maxAmount) returns (uint256)',
+  'function fillSellAsk(uint256 orderId, uint256 xMoneyAmount, string buyerXHandle) returns (uint256)',
+  'function fillBuyBid(uint256 orderId, uint256 xMoneyAmount, string sellerXHandle) payable returns (uint256)',
+  'function releaseTrade(uint256 tradeId)',
+  'function cancelTradeTimeout(uint256 tradeId)',
+  'function cancelOrder(uint256 orderId)'
+]);
+
+const FOMO_ABI = parseAbi([
+  'function roundId() view returns (uint256)',
+  'function roundDeadline() view returns (uint256)',
+  'function jackpotPot() view returns (uint256)',
+  'function totalKeys() view returns (uint256)',
+  'function getKeyPrice() view returns (uint256)',
+  'function currentLeader() view returns (address)',
+  'function currentLeaderXHandle() view returns (string)',
+  'function totalBurned() view returns (uint256)',
+  'function totalFanoutRaked() view returns (uint256)',
+  'function players(address) view returns (uint256 keys, uint256 rewardDebt, uint256 pendingDividends, string xHandle)',
+  'function pendingDividendsOf(address) view returns (uint256)',
+  'function pendingDividendsOfRound(uint256 round, address) view returns (uint256)',
+  'function buyKeys(string xHandle, uint256 keyCount) payable',
+  'function claimDividends()',
+  'function claimDividendsForRound(uint256 round)',
+  'function claimJackpot()'
+]);
+
+type TabId = 'otc' | 'explorer' | 'fomo3d' | 'specs';
+const TAB_IDS: TabId[] = ['otc', 'explorer', 'fomo3d', 'specs'];
+const TAB_ALIASES: Record<string, TabId> = {
+  otc: 'otc', desk: 'otc', p2p: 'otc', trade: 'otc',
+  explorer: 'explorer', scan: 'explorer', blocks: 'explorer',
+  fomo3d: 'fomo3d', fomo: 'fomo3d', attrition: 'fomo3d', war: 'fomo3d', game: 'fomo3d',
+  specs: 'specs', docs: 'specs', contracts: 'specs',
+};
+
+/** Parse /order/:id, /trade/:id, /<tab> or #<tab> into a route. */
+function parseRoute(): { tab: TabId; orderId: number | null; tradeId: number | null } {
+  if (typeof window === 'undefined') return { tab: 'otc', orderId: null, tradeId: null };
+  const raw = (window.location.pathname.replace(/^\/+|\/+$/g, '') || window.location.hash.replace(/^#\/?/, '')).toLowerCase();
+  const m = raw.match(/^(?:otc\/)?(order|offer|bid|ask|trade|settlement)\/(\d+)$/);
+  if (m) {
+    const id = parseInt(m[2], 10);
+    return m[1] === 'trade' || m[1] === 'settlement'
+      ? { tab: 'otc', orderId: null, tradeId: id }
+      : { tab: 'otc', orderId: id, tradeId: null };
+  }
+  return { tab: TAB_ALIASES[raw] || 'otc', orderId: null, tradeId: null };
+}
+
+/** Resolve the tab from /path or #hash so every tab is a shareable URL. */
+function tabFromLocation(): TabId {
+  return parseRoute().tab;
+}
+
+const origin = () => (typeof window !== 'undefined' ? window.location.origin : '');
+export const deepLink = (tab: TabId) => `${origin()}/${tab}`;
+export const orderLink = (orderId: number) => `${origin()}/order/${orderId}`;
+export const tradeLink = (tradeId: number) => `${origin()}/trade/${tradeId}`;
+
+export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
+  wallet,
+  onConnectWallet,
+  xHandle = null
+}) => {
+  const [activeTab, setActiveTabState] = useState<TabId>(() => tabFromLocation());
+  const [deepOrderId, setDeepOrderId] = useState<number | null>(() => parseRoute().orderId);
+  const [deepTradeId, setDeepTradeId] = useState<number | null>(() => parseRoute().tradeId);
+  const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState<string | null>(null);
+  const copyLink = (url: string) => {
+    navigator.clipboard.writeText(url).catch(() => {});
+    setCopiedLink(url);
+    setTimeout(() => setCopiedLink(null), 1500);
+  };
+
+  // Deep links: /otc, /explorer, /fomo3d, /specs (and #fomo3d etc.) open that tab directly.
+  const setActiveTab = (tab: TabId) => {
+    setActiveTabState(tab);
+    if (typeof window !== 'undefined' && window.location.pathname !== `/${tab}`) {
+      window.history.pushState({ tab }, '', `/${tab}`);
+    }
+  };
+  useEffect(() => {
+    const onPop = () => {
+      const r = parseRoute();
+      setActiveTabState(r.tab);
+      setDeepOrderId(r.orderId);
+      setDeepTradeId(r.tradeId);
+      if (r.orderId == null) setSelectedOrderForTrade(null);
+    };
+    window.addEventListener('popstate', onPop);
+    window.addEventListener('hashchange', onPop);
+    if (window.location.pathname === '/' && !window.location.hash) {
+      window.history.replaceState({ tab: activeTab }, '', `/${activeTab}`);
+    }
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('hashchange', onPop);
+    };
+  }, []);
+  
+  // Real On-Chain Metrics (Abstracted to xMoney)
+  const [totalBurnedSupply, setTotalBurnedSupply] = useState<number>(0);
+  const [totalFanoutRaked, setTotalFanoutRaked] = useState<number>(0);
+  const [totalSettledXMoney, setTotalSettledXMoney] = useState<number>(0);
+  const [navMultiplier, setNavMultiplier] = useState<number>(1.00000);
+
+  // User Balance in xMoney
+  const [userXMoneyBalance, setUserXMoneyBalance] = useState<number>(0);
+  const [userL3XMoney, setUserL3XMoney] = useState<number>(0);      // xMoney sitting on Robinhood (withdrawn, not yet redeemed)
+  const [userUsdg, setUserUsdg] = useState<number>(0);
+  const [bridgeStatus, setBridgeStatus] = useState<string | null>(null);
+  const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
+  const [executorEnabled, setExecutorEnabled] = useState<boolean>(false);
+  const [pastRoundDividends, setPastRoundDividends] = useState<{ round: number; amount: number }[]>([]);
+
+  // Vault On-Ramp / Off-Ramp State
+  const [vaultAmount, setVaultAmount] = useState('50');
+
+  // Orders & Trades
+  const [orders, setOrders] = useState<OtcOrder[]>([]);
+  const [trades, setTrades] = useState<OtcTrade[]>([]);
+  const [orderBookSide, setOrderBookSide] = useState<'ALL' | 'ASK' | 'BID'>('ALL');
+
+  // Modals & Forms
+  const [isCreateOrderModalOpen, setIsCreateOrderModalOpen] = useState(false);
+  const [orderSideToCreate, setOrderSideToCreate] = useState<'ASK' | 'BID'>('ASK');
+  const [newOrderAmount, setNewOrderAmount] = useState('50');
+  const [newOrderHandle, setNewOrderHandle] = useState('');
+  const [newOrderSpread, setNewOrderSpread] = useState('2.0'); // +2.0%
+  const [newOrderMin, setNewOrderMin] = useState('10');
+  const [newOrderMax, setNewOrderMax] = useState('50');
+  const [isSubmittingTx, setIsSubmittingTx] = useState(false);
+
+  // Fill Modal
+  const [selectedOrderForTrade, setSelectedOrderForTrade] = useState<OtcOrder | null>(null);
+  const [tradeAmount, setTradeAmount] = useState('10');
+  const [takerHandle, setTakerHandle] = useState('');
+
+  // FOMO3D Game State
+  const [fomo, setFomo] = useState<FomoState>({
+    roundId: 1,
+    roundDeadline: Date.now() + 3600 * 1000,
+    currentLeader: '0x0000000000000000000000000000000000000000',
+    currentLeaderXHandle: '',
+    jackpotPot: 0,
+    totalKeys: 0,
+    keyPrice: 0.001,
+    playerKeys: 0,
+    playerDividends: 0
+  });
+
+  const [keysToBuy, setKeysToBuy] = useState<number>(1);
+  const [fomoXHandle, setFomoXHandle] = useState<string>('');
+
+  // Signed in with X: every handle field is the verified handle
+  useEffect(() => {
+    if (xHandle) {
+      setNewOrderHandle(xHandle);
+      setTakerHandle(xHandle);
+      setFomoXHandle(xHandle);
+    }
+  }, [xHandle]);
+  const handleLocked = !!xHandle;
+  const [timeLeftStr, setTimeLeftStr] = useState<string>('00:00:00');
+
+  // 1. POLL STRICTLY REAL ON-CHAIN DATA
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchRealData = async () => {
+      try {
+        const [navData, totalBurnedBig, totalRakedBig] = await Promise.all([
+          publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'getReserveNAV' }),
+          publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'totalXMoneyBurned' }),
+          publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'totalUsdgRakedToFanout' })
+        ]);
+
+        // Everything below the vault lives on the xgas Orbit L4
+        await loadL4Info();
+        const escrowAddr = l4Addresses.escrow as `0x${string}`;
+        const fomoAddr = l4Addresses.fomo as `0x${string}`;
+
+        const [nextOrderBig, nextTradeBig, escrowVolBig] = await Promise.all([
+          l4PublicClient.readContract({ address: escrowAddr, abi: ESCROW_ABI, functionName: 'nextOrderId' }),
+          l4PublicClient.readContract({ address: escrowAddr, abi: ESCROW_ABI, functionName: 'nextTradeId' }),
+          l4PublicClient.readContract({ address: escrowAddr, abi: ESCROW_ABI, functionName: 'totalSettledVolumeXMoney' })
+        ]);
+
+        const [roundIdBig, deadlineBig, potBig, keysBig, priceBig, leader, handle] = await Promise.all([
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'roundId' }),
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'roundDeadline' }),
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'jackpotPot' }),
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'totalKeys' }),
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'getKeyPrice' }),
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'currentLeader' }),
+          l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'currentLeaderXHandle' })
+        ]);
+
+        if (!isMounted) return;
+
+        const navFloat = Number(navData[0]) / 1e18;
+        setNavMultiplier(navFloat > 0 ? navFloat : 1.00000);
+        setTotalBurnedSupply(Number(formatEther(totalBurnedBig)));
+        setTotalFanoutRaked(Number(totalRakedBig) / 1e6);
+        setTotalSettledXMoney(Number(formatEther(escrowVolBig)));
+
+        setFomo(prev => ({
+          ...prev,
+          roundId: Number(roundIdBig),
+          roundDeadline: Number(deadlineBig) * 1000,
+          currentLeader: leader,
+          currentLeaderXHandle: handle,
+          jackpotPot: Number(formatEther(potBig)),
+          totalKeys: Number(keysBig),
+          keyPrice: Number(formatEther(priceBig))
+        }));
+
+        const activeUser = wallet.address || (typeof window !== 'undefined' && (window as any).ethereum?.selectedAddress) || null;
+        if (activeUser) {
+          try {
+            const [l4Bal, p, owed, l3X, l3U] = await Promise.all([
+              fetchL4XMoneyBalance(activeUser),
+              l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'players', args: [activeUser as `0x${string}`] }),
+              l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'pendingDividendsOf', args: [activeUser as `0x${string}`] }),
+              publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'balanceOf', args: [activeUser as `0x${string}`] }),
+              publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: USDG_ABI, functionName: 'balanceOf', args: [activeUser as `0x${string}`] }),
+            ]);
+            // dividends left behind in finished rounds (last 8 rounds)
+            const rid = Number(roundIdBig);
+            const past: { round: number; amount: number }[] = [];
+            for (let r = Math.max(1, rid - 8); r < rid; r++) {
+              const o = await l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'pendingDividendsOfRound', args: [BigInt(r), activeUser as `0x${string}`] });
+              if (o > 0n) past.push({ round: r, amount: Number(formatEther(o)) });
+            }
+            if (wallet.connected) {
+              fetchWithdrawals(activeUser).then(w => { if (isMounted) { setWithdrawals(w.withdrawals); setExecutorEnabled(w.executorEnabled); } }).catch(() => {});
+            }
+
+            if (isMounted) {
+              setUserXMoneyBalance(l4Bal);
+              setUserL3XMoney(Number(formatEther(l3X)));
+              setUserUsdg(Number(l3U) / 1e6);
+              setPastRoundDividends(past);
+              if (p) {
+                setFomo(prev => ({
+                  ...prev,
+                  playerKeys: Number(p[0]),
+                  playerDividends: Number(formatEther(owed))
+                }));
+              }
+            }
+          } catch (e) {
+            console.warn('User balances warning:', e);
+          }
+        }
+
+        // Read real active orders
+        const numOrders = Number(nextOrderBig);
+        if (numOrders > 0) {
+          const orderPromises = [];
+          for (let i = 0; i < numOrders; i++) {
+            orderPromises.push(l4PublicClient.readContract({
+              address: escrowAddr,
+              abi: ESCROW_ABI,
+              functionName: 'orders',
+              args: [BigInt(i)]
+            }));
+          }
+          const rawOrders = await Promise.all(orderPromises);
+          if (isMounted) {
+            const parsed: OtcOrder[] = rawOrders.map((o: any, idx: number) => ({
+              id: idx,
+              maker: o[0],
+              makerXHandle: o[1],
+              side: o[2] === 0 ? 'ASK' : 'BID',
+              availableXMoney: Number(formatEther(o[3])),
+              fiatRateBps: Number(o[4]),
+              minAmount: Number(formatEther(o[5])),
+              maxAmount: Number(formatEther(o[6])),
+              active: o[7]
+            }));
+            // active AND still fillable: a fully-taken order keeps active=true on-chain until cancelled
+            setOrders(parsed.filter(o => o.active && o.availableXMoney > 0 && o.availableXMoney >= o.minAmount));
+          }
+        } else {
+          setOrders([]);
+        }
+
+        // Read real active trades
+        const numTrades = Number(nextTradeBig);
+        if (numTrades > 0) {
+          const tradePromises = [];
+          for (let i = 0; i < numTrades; i++) {
+            tradePromises.push(l4PublicClient.readContract({
+              address: escrowAddr,
+              abi: ESCROW_ABI,
+              functionName: 'trades',
+              args: [BigInt(i)]
+            }));
+          }
+          const rawTrades = await Promise.all(tradePromises);
+          if (isMounted) {
+            const parsedTrades: OtcTrade[] = rawTrades.map((t: any, idx: number) => ({
+              id: idx,
+              orderId: Number(t[0]),
+              side: t[1] === 0 ? 'ASK' : 'BID',
+              seller: t[2],
+              sellerXHandle: t[3],
+              buyer: t[4],
+              buyerXHandle: t[5],
+              xMoneyAmount: Number(formatEther(t[6])),
+              expectedCents: Number(t[7]),
+              deadline: Number(t[8]) * 1000,
+              completed: t[9],
+              cancelled: t[10]
+            }));
+            setTrades(parsedTrades.filter(t => !t.completed && !t.cancelled));
+          }
+        } else {
+          setTrades([]);
+        }
+      } catch (err) {
+        console.warn('Live state poll warning:', err);
+      }
+    };
+
+    fetchRealData();
+    const interval = setInterval(fetchRealData, 4000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [wallet.connected, wallet.address]);
+
+  // Deep link /order/:id -> open that offer/bid in the fill modal once the book has loaded
+  useEffect(() => {
+    if (deepOrderId == null || orders.length === 0 && trades.length === 0) return;
+    const order = orders.find(o => o.id === deepOrderId);
+    if (order) {
+      setSelectedOrderForTrade(order);
+      setTradeAmount(String(Math.min(10, order.maxAmount)));
+      setDeepLinkNotice(null);
+    } else if (orders.length > 0 || trades.length > 0) {
+      setDeepLinkNotice(`Order #${deepOrderId} is no longer open on the book (filled or cancelled).`);
+    }
+    setDeepOrderId(null);
+  }, [deepOrderId, orders, trades]);
+
+  useEffect(() => {
+    if (deepTradeId == null || trades.length === 0) return;
+    const el = document.getElementById(`trade-${deepTradeId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-cyan-400');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-cyan-400'), 4000);
+    } else {
+      setDeepLinkNotice(`Trade #${deepTradeId} is not in active settlement (released or cancelled).`);
+    }
+    setDeepTradeId(null);
+  }, [deepTradeId, trades]);
+
+  // Keep the URL in sync with the open offer/bid
+  const openOrder = (order: OtcOrder) => {
+    setSelectedOrderForTrade(order);
+    setTradeAmount(String(Math.min(10, order.maxAmount)));
+    if (window.location.pathname !== `/order/${order.id}`) window.history.pushState({ order: order.id }, '', `/order/${order.id}`);
+  };
+  const closeOrder = () => {
+    setSelectedOrderForTrade(null);
+    if (/^\/order\//.test(window.location.pathname)) window.history.replaceState({ tab: 'otc' }, '', '/otc');
+  };
+
+  // Countdown timer string
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const diff = Math.max(0, fomo.roundDeadline - now);
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const secs = Math.floor((diff % (1000 * 60)) / 1000);
+      setTimeLeftStr(
+        `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+      );
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [fomo.roundDeadline]);
+
+  const refreshL4Balance = async () => {
+    try {
+      const l4Bal = await fetchL4XMoneyBalance(wallet.address);
+      setUserXMoneyBalance(l4Bal);
+    } catch (e) {
+      console.warn('L4 balance read warning:', e);
+    }
+  };
+
+  // ON-CHAIN WRITE (L3 -> L4): Enter rollup = lock USDG in the Robinhood vault; the vault bridges native
+  // $xMoney to your address on the xgas Orbit L4 through the canonical Inbox (retryable ticket, auto-redeemed).
+  const handleMintXMoney = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+
+    setIsSubmittingTx(true);
+    setBridgeStatus(null);
+    try {
+      const rawUnits = BigInt(Math.round(parseFloat(vaultAmount) * 1e6));
+      if (rawUnits <= 0n) throw new Error('Enter a USDG amount');
+      const before = await l4PublicClient.getBalance({ address: wallet.address as `0x${string}` }).catch(() => 0n);
+
+      // 1) Approve USDG once (max) so later entries are a single transaction
+      const allowance = await publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: parseAbi(['function allowance(address,address) view returns (uint256)']), functionName: 'allowance', args: [wallet.address as `0x${string}`, CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`] });
+      if (allowance < rawUnits) {
+        setBridgeStatus('Approving USDG on Robinhood…');
+        const approveCall = encodeAbiCall(USDG_ABI, 'approve', [CONTRACT_ADDRESSES.XMONEY_USD_L3, 2n ** 256n - 1n], CONTRACT_ADDRESSES.USDG, '0', L3_CHAIN_ID);
+        await sendOnChainTx({ to: CONTRACT_ADDRESSES.USDG, data: approveCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
+      }
+
+      // 2) enterRollup: USDG locked, xMoney minted and sent through the Orbit Inbox to you on the L4
+      setBridgeStatus('Locking USDG and sending through the Orbit Inbox…');
+      const depositCall = encodeAbiCall(XUSD_VAULT_ABI, 'enterRollup', [rawUnits, wallet.address], CONTRACT_ADDRESSES.XMONEY_USD_L3, '0', L3_CHAIN_ID);
+      const res = await sendOnChainTx({ to: CONTRACT_ADDRESSES.XMONEY_USD_L3, data: depositCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
+
+      // 3) The sequencer includes the delayed message; the retryable auto-redeems and credits native gas
+      setBridgeStatus(`Bridging… the L4 sequencer is picking up your deposit (tx ${res.txHash.slice(0, 10)}…). Usually under a minute.`);
+      const after = await waitForL4Credit(wallet.address, before);
+      if (after == null) {
+        setBridgeStatus('Deposit is on Robinhood but the L4 credit is taking longer than expected. It will arrive; check back shortly.');
+      } else {
+        setBridgeStatus(null);
+        sounds.playBuyApe();
+        confetti({ particleCount: 70, spread: 90 });
+        setUserXMoneyBalance(Number(formatEther(after)));
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Enter rollup error:', err);
+      setBridgeStatus(null);
+      alert(err?.shortMessage || err?.message || 'Enter rollup failed');
+    } finally {
+      setIsSubmittingTx(false);
+    }
+  };
+
+  // ON-CHAIN WRITE (L4 -> L3) step 1: withdraw native $xMoney from the L4 through ArbSys.
+  // It becomes claimable on Robinhood once our validator confirms the assertion (minutes with fast confirmation).
+  const handleBurnXMoney = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+    setIsSubmittingTx(true);
+    try {
+      const rawXMoney = parseEther(vaultAmount);
+      if (rawXMoney <= 0n) throw new Error('Enter an $xMoney amount');
+      const wCall = encodeAbiCall(ARBSYS_ABI, 'withdrawEth', [wallet.address], CONTRACT_ADDRESSES.ARB_SYS, formatEther(rawXMoney));
+      await sendOnChainTx({ to: CONTRACT_ADDRESSES.ARB_SYS, data: wCall.calldata, valueWei: rawXMoney, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      sounds.playBuyApe();
+      setBridgeStatus('Withdrawal queued on the L4. It shows below as "pending" until Robinhood confirms the assertion, then "claimable".');
+      await refreshL4Balance();
+      fetchWithdrawals(wallet.address).then(w => { setWithdrawals(w.withdrawals); setExecutorEnabled(w.executorEnabled); }).catch(() => {});
+    } catch (err: any) {
+      console.error('Withdraw error:', err);
+      alert(err?.shortMessage || err?.message || 'Withdraw failed');
+    } finally {
+      setIsSubmittingTx(false);
+    }
+  };
+
+  // Step 2: execute the confirmed withdrawal on the Robinhood Outbox (host pays gas; permissionless call)
+  const handleClaimWithdrawal = async (w: Withdrawal) => {
+    setIsSubmittingTx(true);
+    try {
+      const r = await executeWithdrawal(w.txHash, w.position);
+      sounds.playBuyApe();
+      setBridgeStatus(r.alreadyExecuted ? 'Already claimed.' : `Claimed on Robinhood: ${w.amount} $xMoney is now in your wallet on L3. Redeem it for USDG below.`);
+      fetchWithdrawals(wallet.address).then(x => setWithdrawals(x.withdrawals)).catch(() => {});
+    } catch (err: any) {
+      alert(err?.message || 'Claim failed');
+    } finally {
+      setIsSubmittingTx(false);
+    }
+  };
+
+  // Step 3: redeem L3 xMoney for USDG from the vault (0.01% rake)
+  const handleRedeemUsdg = async () => {
+    if (!wallet.connected) { onConnectWallet(); return; }
+    setIsSubmittingTx(true);
+    try {
+      const bal = await publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'balanceOf', args: [wallet.address as `0x${string}`] });
+      if (bal <= 0n) throw new Error('No $xMoney on Robinhood to redeem');
+      const redeemCall = encodeAbiCall(XUSD_VAULT_ABI, 'exitRollup', [bal], CONTRACT_ADDRESSES.XMONEY_USD_L3, '0', L3_CHAIN_ID);
+      await sendOnChainTx({ to: CONTRACT_ADDRESSES.XMONEY_USD_L3, data: redeemCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
+      sounds.playBuyApe();
+      confetti({ particleCount: 70, spread: 90 });
+      setBridgeStatus('Redeemed: USDG is back in your wallet on Robinhood Chain.');
+      setUserL3XMoney(0);
+    } catch (err: any) {
+      alert(err?.shortMessage || err?.message || 'Redeem failed');
+    } finally {
+      setIsSubmittingTx(false);
+    }
+  };
+
+  // War of Attrition: claim dividends left in a finished round
+  const handleClaimPastRound = async (round: number) => {
+    if (!wallet.connected) { onConnectWallet(); return; }
+    try {
+      const c = encodeAbiCall(FOMO_ABI, 'claimDividendsForRound', [BigInt(round)], l4Addresses.fomo);
+      await sendOnChainTx({ to: l4Addresses.fomo, data: c.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      sounds.playBuyApe();
+      confetti({ particleCount: 50, spread: 70 });
+      await refreshL4Balance();
+    } catch (err: any) {
+      alert(err?.shortMessage || err?.message || 'Claim failed');
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): Create Order (Sell Ask escrows native $xMoney; Buy Bid is a fiat commitment)
+  const handleCreateOrderOnChain = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+
+    setIsSubmittingTx(true);
+    try {
+      const rawUnits = parseEther(newOrderAmount || '0');
+      const spreadPct = parseFloat(newOrderSpread);
+      const bps = Math.round(10000 + spreadPct * 100);
+      const minRaw = parseEther(newOrderMin || '0');
+      const maxRaw = parseEther(newOrderMax || '0');
+      const handle = newOrderHandle.replace('@', '');
+
+      if (orderSideToCreate === 'ASK') {
+        const askCall = encodeAbiCall(ESCROW_ABI, 'createSellAsk', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], l4Addresses.escrow);
+        const res = await sendOnChainTx({
+          to: l4Addresses.escrow,
+          data: askCall.calldata,
+          valueWei: rawUnits,
+          from: wallet.address,
+          chainId: L4_CHAIN_ID,
+          waitForConfirmation: true
+        });
+        if (res.txHash) {
+          sounds.playBuyApe();
+          confetti({ particleCount: 50, spread: 70 });
+          setIsCreateOrderModalOpen(false);
+        }
+      } else {
+        const bidCall = encodeAbiCall(ESCROW_ABI, 'createBuyBid', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], l4Addresses.escrow);
+        const res = await sendOnChainTx({
+          to: l4Addresses.escrow,
+          data: bidCall.calldata,
+          from: wallet.address,
+          chainId: L4_CHAIN_ID,
+          waitForConfirmation: true
+        });
+        if (res.txHash) {
+          sounds.playBuyApe();
+          confetti({ particleCount: 50, spread: 70 });
+          setIsCreateOrderModalOpen(false);
+        }
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Create order error:', err);
+      alert(err?.shortMessage || err?.message || 'Transaction failed');
+    } finally {
+      setIsSubmittingTx(false);
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): Fill Order (taking a Bid escrows native $xMoney)
+  const handleFillOrderOnChain = async () => {
+    if (!selectedOrderForTrade) return;
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+
+    setIsSubmittingTx(true);
+    try {
+      const rawUnits = parseEther(tradeAmount || '0');
+      const handle = takerHandle.replace('@', '');
+
+      if (selectedOrderForTrade.side === 'ASK') {
+        const takeAskCall = encodeAbiCall(ESCROW_ABI, 'fillSellAsk', [BigInt(selectedOrderForTrade.id), rawUnits, handle], l4Addresses.escrow);
+        const res = await sendOnChainTx({
+          to: l4Addresses.escrow,
+          data: takeAskCall.calldata,
+          from: wallet.address,
+          chainId: L4_CHAIN_ID,
+          waitForConfirmation: true
+        });
+        if (res.txHash) {
+          sounds.playBuyApe();
+          confetti({ particleCount: 60, spread: 80 });
+          closeOrder();
+        }
+      } else {
+        const takeBidCall = encodeAbiCall(ESCROW_ABI, 'fillBuyBid', [BigInt(selectedOrderForTrade.id), rawUnits, handle], l4Addresses.escrow);
+        const res = await sendOnChainTx({
+          to: l4Addresses.escrow,
+          data: takeBidCall.calldata,
+          valueWei: rawUnits,
+          from: wallet.address,
+          chainId: L4_CHAIN_ID,
+          waitForConfirmation: true
+        });
+        if (res.txHash) {
+          sounds.playBuyApe();
+          confetti({ particleCount: 60, spread: 80 });
+          closeOrder();
+        }
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Fill order error:', err);
+      alert(err?.shortMessage || err?.message || 'Transaction failed');
+    } finally {
+      setIsSubmittingTx(false);
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): Release Escrow (0.01% burn to 0xdead + 0.01% rake to Fanout, 99.98% to buyer)
+  const handleReleaseTradeOnChain = async (tradeId: number) => {
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+
+    try {
+      const releaseCall = encodeAbiCall(ESCROW_ABI, 'releaseTrade', [BigInt(tradeId)], l4Addresses.escrow);
+      const res = await sendOnChainTx({
+        to: l4Addresses.escrow,
+        data: releaseCall.calldata,
+        from: wallet.address,
+        chainId: L4_CHAIN_ID,
+        waitForConfirmation: true
+      });
+
+      if (res.txHash) {
+        sounds.playBuyApe();
+        confetti({ particleCount: 70, spread: 90 });
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Release trade error:', err);
+      alert(err?.shortMessage || err?.message || 'Release failed');
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): Cancel a maker order (refunds uncommitted escrowed $xMoney on Asks)
+  const handleCancelOrderOnChain = async (orderId: number) => {
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+    try {
+      const cancelCall = encodeAbiCall(ESCROW_ABI, 'cancelOrder', [BigInt(orderId)], l4Addresses.escrow);
+      await sendOnChainTx({
+        to: l4Addresses.escrow,
+        data: cancelCall.calldata,
+        from: wallet.address,
+        chainId: L4_CHAIN_ID,
+        waitForConfirmation: true
+      });
+      sounds.playBuyApe();
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Cancel order error:', err);
+      alert(err?.shortMessage || err?.message || 'Cancel failed');
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): War of Attrition — buy keys with native $xMoney (exact cost read on-chain; overpay is refunded)
+  const handleBuyKeysOnChain = async () => {
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+
+    try {
+      const count = BigInt(Math.max(1, Math.floor(keysToBuy)));
+      const priceWei = await l4PublicClient.readContract({ address: l4Addresses.fomo as `0x${string}`, abi: FOMO_ABI, functionName: 'getKeyPrice' });
+      const costWei = priceWei * count;
+      const buyCall = encodeAbiCall(FOMO_ABI, 'buyKeys', [fomoXHandle.replace('@', ''), count], l4Addresses.fomo, formatEther(costWei));
+      const res = await sendOnChainTx({
+        to: l4Addresses.fomo,
+        data: buyCall.calldata,
+        valueWei: costWei,
+        from: wallet.address,
+        chainId: L4_CHAIN_ID,
+        waitForConfirmation: true
+      });
+
+      if (res.txHash) {
+        sounds.playBuyApe();
+        confetti({ particleCount: 50, spread: 70 });
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Buy keys error:', err);
+      alert(err?.shortMessage || err?.message || 'Transaction failed');
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): War of Attrition — claim continuous dividends in native $xMoney
+  const handleClaimDividendsOnChain = async () => {
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+
+    try {
+      const claimCall = encodeAbiCall(FOMO_ABI, 'claimDividends', [], l4Addresses.fomo);
+      const res = await sendOnChainTx({
+        to: l4Addresses.fomo,
+        data: claimCall.calldata,
+        from: wallet.address,
+        chainId: L4_CHAIN_ID,
+        waitForConfirmation: true
+      });
+
+      if (res.txHash) {
+        sounds.playBuyApe();
+        confetti({ particleCount: 50, spread: 70 });
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Claim dividends error:', err);
+      alert(err?.shortMessage || err?.message || 'Transaction failed');
+    }
+  };
+
+  // ON-CHAIN WRITE (L4): War of Attrition — pay the expired round's jackpot to the last king and open the next round
+  const handleClaimJackpotOnChain = async () => {
+    if (!wallet.connected) {
+      onConnectWallet();
+      return;
+    }
+    try {
+      const jackpotCall = encodeAbiCall(FOMO_ABI, 'claimJackpot', [], l4Addresses.fomo);
+      const res = await sendOnChainTx({
+        to: l4Addresses.fomo,
+        data: jackpotCall.calldata,
+        from: wallet.address,
+        chainId: L4_CHAIN_ID,
+        waitForConfirmation: true
+      });
+      if (res.txHash) {
+        sounds.playBuyApe();
+        confetti({ particleCount: 120, spread: 120 });
+      }
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Claim jackpot error:', err);
+      alert(err?.shortMessage || err?.message || 'Transaction failed');
+    }
+  };
+
+  const roundExpired = Date.now() > fomo.roundDeadline && fomo.currentLeader !== '0x0000000000000000000000000000000000000000';
+
+  const filteredOrders = useMemo(() => {
+    if (orderBookSide === 'ALL') return orders;
+    return orders.filter(o => o.side === orderBookSide);
+  }, [orders, orderBookSide]);
+
+  return (
+    <div className="max-w-[1780px] mx-auto px-3 sm:px-6 py-4 space-y-5 font-sans">
+      
+      {/* 1. TOPOLOGY & PROTOCOL BANNER */}
+      <div className="relative overflow-hidden rounded-2xl border border-emerald-500/30 bg-gradient-to-r from-[#0d121f] via-[#090e18] to-[#120a1f] p-3.5 sm:p-5 shadow-2xl">
+        <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none -mr-20 -mt-20" />
+
+        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-4 sm:gap-6">
+          <div className="space-y-2 min-w-0">
+            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-3.5 px-3.5 sm:mx-0 sm:px-0 sm:flex-wrap [&>*]:shrink-0 [&>*]:whitespace-nowrap">
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 font-mono tracking-wider flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                ARBITRUM ORBIT L4 · LIVE
+              </span>
+              <a 
+                href="https://robinhoodchain.blockscout.com" 
+                target="_blank" 
+                rel="noreferrer"
+                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono border border-slate-700 flex items-center gap-1 transition-colors"
+              >
+                <span>SETTLES ON ROBINHOOD CHAIN #4663</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+              <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-500/20 text-emerald-300 font-mono border border-emerald-500/40 flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" />
+                <span>100% FULL RESERVE BACKING</span>
+              </span>
+              <a
+                href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e"
+                target="_blank"
+                rel="noreferrer"
+                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-mono border border-cyan-500/40 flex items-center gap-1 transition-colors"
+              >
+                <Award className="w-3 h-3" />
+                <span>0.01% TO STACC FANOUT</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+              <a
+                href="https://robinhoodchain.blockscout.com/address/0x000000000000000000000000000000000000dEaD"
+                target="_blank"
+                rel="noreferrer"
+                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-mono border border-amber-500/30 flex items-center gap-1 transition-colors"
+              >
+                <Flame className="w-3 h-3" />
+                <span>0.01% SUPPLY BURN TO 0xdead</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            </div>
+
+            <h1 className="text-lg sm:text-3xl font-black text-white font-display tracking-tight flex items-center gap-2.5 leading-tight">
+              <span>The @XMoney Gas Rollup on Robinhood Chain</span>
+              <span className="text-[10px] sm:text-xs px-2 py-0.5 rounded bg-emerald-500 text-slate-950 font-black shrink-0">L4 LIVE</span>
+            </h1>
+
+            <p className="hidden sm:block text-sm text-slate-400 max-w-3xl leading-relaxed">
+              100% full Reserve backing. Makers & Takers trade <strong className="text-white">$xMoney</strong> against X Money P2P fiat. 
+              0.01% of supply is burned to <code className="text-amber-400 font-mono">0xdead</code> on every transaction while the Reserve is <strong>NEVER burned</strong>, 
+              permanently ratcheting NAV higher and higher above $1.00 USD.
+            </p>
+          </div>
+
+          {/* Real Metrics Cards */}
+          <div className="grid grid-cols-3 gap-2 sm:gap-3 shrink-0 font-mono">
+            <div className="p-2.5 sm:p-3 rounded-xl bg-[#121624] border border-amber-500/30 min-w-0">
+              <div className="flex items-center gap-1 text-[11px] font-bold text-amber-400 uppercase tracking-wider">
+                <Flame className="w-3.5 h-3.5" />
+                <span className="truncate">Burned</span>
+              </div>
+              <div className="text-sm sm:text-xl font-black text-white mt-1 truncate">
+                {totalBurnedSupply.toFixed(4)} <span className="hidden sm:inline text-xs text-slate-400">$xMoney</span>
+              </div>
+              <a 
+                href="https://robinhoodchain.blockscout.com/address/0x000000000000000000000000000000000000dEaD" 
+                target="_blank" 
+                rel="noreferrer"
+                className="hidden sm:flex text-[10px] text-amber-400 hover:underline items-center gap-1 mt-0.5"
+              >
+                <span>0x000...dEaD</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            </div>
+
+            <div className="p-2.5 sm:p-3 rounded-xl bg-[#121624] border border-cyan-500/30 min-w-0">
+              <div className="flex items-center gap-1 text-[11px] font-bold text-cyan-400 uppercase tracking-wider">
+                <Award className="w-3.5 h-3.5" />
+                <span className="truncate"><span className="sm:hidden">Rake</span><span className="hidden sm:inline">Fanout Rake</span></span>
+              </div>
+              <div className="text-sm sm:text-xl font-black text-cyan-300 mt-1 truncate">
+                ${totalFanoutRaked.toFixed(2)} <span className="hidden sm:inline text-xs text-slate-400">USD</span>
+              </div>
+              <a 
+                href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e" 
+                target="_blank" 
+                rel="noreferrer"
+                className="hidden sm:flex text-[10px] text-cyan-400 hover:underline items-center gap-1 mt-0.5"
+              >
+                <span>0x04C9...36e</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            </div>
+
+            <div className="p-2.5 sm:p-3 rounded-xl bg-[#121624] border border-[#1e2538] min-w-0">
+              <div className="flex items-center gap-1 text-[11px] font-bold text-emerald-400 uppercase tracking-wider">
+                <TrendingUp className="w-3.5 h-3.5" />
+                <span className="truncate">NAV</span>
+              </div>
+              <div className="text-sm sm:text-xl font-black text-emerald-400 mt-1 truncate">
+                <span className="sm:hidden">${navMultiplier.toFixed(4)}</span><span className="hidden sm:inline">${navMultiplier.toFixed(6)}</span>
+              </div>
+              <div className="text-[10px] text-emerald-500 font-bold">&gt; $1.00 Pegged</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. SUB-NAVIGATION TABS */}
+      <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2.5 sm:gap-3 border-b border-[#1f2638] pb-2">
+        <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto no-scrollbar -mx-3 px-3 sm:mx-0 sm:px-0 snap-x [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>button]:snap-start">
+          <button
+            onClick={() => setActiveTab('otc')}
+            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold font-display transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'otc'
+                ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+                : 'text-slate-400 hover:text-white hover:bg-[#121624]'
+            }`}
+          >
+            <Coins className="w-4 h-4" />
+            <span className="sm:hidden">Desk</span><span className="hidden sm:inline">P2P $xMoney Desk</span>
+            <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-black/20 text-slate-900 font-mono">
+              {orders.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('explorer')}
+            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold font-display transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'explorer'
+                ? 'bg-gradient-to-r from-cyan-400 to-blue-500 text-slate-950 shadow-lg shadow-cyan-500/20 font-black'
+                : 'text-slate-400 hover:text-white hover:bg-[#121624]'
+            }`}
+          >
+            <Database className="w-4 h-4" />
+            <span className="sm:hidden">Explorer</span><span className="hidden sm:inline">L4 Explorer</span>
+            <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-cyan-500/20 text-cyan-300">
+              LIVE
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('fomo3d')}
+            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold font-display transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'fomo3d'
+                ? 'bg-gradient-to-r from-amber-500 to-rose-500 text-slate-950 shadow-lg shadow-amber-500/20 font-black'
+                : 'text-slate-400 hover:text-white hover:bg-[#121624]'
+            }`}
+          >
+            <Clock className="w-4 h-4" />
+            <span className="sm:hidden">FOMO3D</span><span className="hidden sm:inline">FOMO3D Attrition</span>
+            <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-rose-500/20 text-rose-300">
+              POT: ${fomo.jackpotPot.toFixed(2)}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('specs')}
+            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold font-display transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'specs'
+                ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+                : 'text-slate-400 hover:text-white hover:bg-[#121624]'
+            }`}
+          >
+            <Info className="w-4 h-4" />
+            <span className="sm:hidden">Specs</span><span className="hidden sm:inline">Specs & Deep Links</span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:flex items-center gap-2">
+          <button
+            onClick={() => {
+              setOrderSideToCreate('ASK');
+              setIsCreateOrderModalOpen(true);
+            }}
+            className="px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 hover:brightness-110 transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer font-display"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Post Sell Ask</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setOrderSideToCreate('BID');
+              setIsCreateOrderModalOpen(true);
+            }}
+            className="px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-cyan-400 to-blue-500 text-slate-950 hover:brightness-110 transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer font-display"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Post Buy Bid</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 2.5 TAB: REAL L4 EXPLORER */}
+      {activeTab === 'explorer' && <OrbitL4Explorer />}
+
+      {/* 3. TAB A: P2P OTC ORDERBOOK & ON-RAMP / OFF-RAMP */}
+      {activeTab === 'otc' && (
+        <div className="space-y-6">
+          {deepLinkNotice && (
+            <div className="px-4 py-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-mono flex items-center justify-between gap-3">
+              <span>{deepLinkNotice}</span>
+              <button onClick={() => setDeepLinkNotice(null)} className="text-amber-300 hover:text-white cursor-pointer">✕</button>
+            </div>
+          )}
+          
+          {/* TOP SECTION: 1-CLICK ON-RAMP & CASH-OUT (ABSTRACTED IN XMONEY) */}
+          <div className="bg-[#0e121d] border border-emerald-500/40 rounded-2xl p-5 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1b2334] pb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <h3 className="text-base font-bold text-white font-display flex items-center gap-2">
+                    <ArrowDownUp className="w-4 h-4 text-emerald-400" />
+                    <span>$xMoney Reserve Gateway: Enter & Exit</span>
+                  </h3>
+                </div>
+                <p className="hidden sm:block text-xs text-slate-400 mt-0.5">
+                  Enter: USDG → vault mints $xMoney → Orbit Inbox → native gas on the L4 (one tx). Cash out: ArbSys withdraw → Outbox claim on Robinhood → redeem USDG.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3 font-mono text-xs">
+                <div className="px-3 py-1.5 rounded-xl bg-[#141a29] border border-emerald-500/40">
+                  <span className="text-slate-400">L4 gas: </span>
+                  <strong className="text-emerald-400 font-bold">{userXMoneyBalance.toFixed(3)} $xMoney</strong>
+                  <span className="text-slate-600"> · </span>
+                  <span className="text-slate-400">USDG on Robinhood: </span>
+                  <strong className="text-white font-bold">${userUsdg.toFixed(2)}</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Mint & Burn Action Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 font-mono text-xs">
+              {/* ENTER / MINT */}
+              <div className="p-4 rounded-xl bg-[#121624] border border-emerald-500/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Enter Rollup (Mint $xMoney)</span>
+                  </span>
+                  <span className="text-[10px] text-slate-500">1:1 Backed</span>
+                </div>
+
+                <p className="hidden sm:block text-[11px] text-slate-400 leading-relaxed font-sans">
+                  Locks USDG in the Robinhood vault; the vault sends net $xMoney through the canonical Orbit Inbox to your address on the L4. Lands in about a minute. 0.01% Fanout + 0.01% burn.
+                </p>
+
+                <form onSubmit={handleMintXMoney} className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-2.5 text-slate-500 font-bold">$</span>
+                    <input
+                      type="number"
+                      step="1"
+                      required
+                      value={vaultAmount}
+                      onChange={e => setVaultAmount(e.target.value)}
+                      placeholder="Amount USD"
+                      className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl pl-7 pr-3 py-2 text-white font-bold focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingTx}
+                    className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-md shadow-emerald-500/20 cursor-pointer shrink-0"
+                  >
+                    <span className="sm:hidden">Enter → L4</span><span className="hidden sm:inline">Enter Rollup → L4</span>
+                  </button>
+                </form>
+              </div>
+
+              {/* EXIT / BURN */}
+              <div className="p-4 rounded-xl bg-[#121624] border border-rose-500/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Flame className="w-3.5 h-3.5" />
+                    <span>Cash Out (Burn $xMoney)</span>
+                  </span>
+                  <span className="text-[10px] text-slate-500">Full Reserve Backing</span>
+                </div>
+
+                <p className="hidden sm:block text-[11px] text-slate-400 leading-relaxed font-sans">
+                  Burns native $xMoney on the L4 via ArbSys. Once Robinhood confirms the assertion it becomes claimable below, then redeemable for USDG. 0.01% Fanout rake.
+                </p>
+
+                <form onSubmit={handleBurnXMoney} className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-2.5 text-slate-500 font-bold">$</span>
+                    <input
+                      type="number"
+                      step="1"
+                      required
+                      value={vaultAmount}
+                      onChange={e => setVaultAmount(e.target.value)}
+                      placeholder="Amount $xMoney"
+                      className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl pl-7 pr-3 py-2 text-white font-bold focus:outline-none focus:border-rose-500"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingTx}
+                    className="px-5 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-md shadow-rose-500/20 cursor-pointer shrink-0"
+                  >
+                    <span className="sm:hidden">Withdraw</span><span className="hidden sm:inline">Withdraw (L4 → Robinhood)</span>
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {bridgeStatus && (
+              <div className="px-4 py-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-200 text-xs font-mono flex items-center justify-between gap-3">
+                <span>{bridgeStatus}</span>
+                <button onClick={() => setBridgeStatus(null)} className="text-cyan-300 hover:text-white cursor-pointer">✕</button>
+              </div>
+            )}
+
+            {/* Withdrawals: L4 -> Robinhood -> USDG */}
+            {wallet.connected && (withdrawals.length > 0 || userL3XMoney > 0) && (
+              <div className="p-4 rounded-xl bg-[#121624] border border-[#1e2538] space-y-3 font-mono text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">Withdrawals to Robinhood</span>
+                  <span className="text-[10px] text-slate-500">{withdrawals.filter(w => w.status !== 'executed').length} open</span>
+                </div>
+                {withdrawals.filter(w => w.status !== 'executed').map(w => (
+                  <div key={`${w.txHash}:${w.position}`} className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-[#0e121d] border border-[#1e2538]">
+                    <div className="space-y-0.5">
+                      <div className="text-white font-bold">{Number(w.amount).toFixed(4)} $xMoney</div>
+                      <div className="text-[10px] text-slate-500">L4 tx {w.txHash.slice(0, 10)}… · position #{w.position}</div>
+                    </div>
+                    {w.status === 'claimable' ? (
+                      <button onClick={() => handleClaimWithdrawal(w)} disabled={isSubmittingTx || !executorEnabled} className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black cursor-pointer" title={executorEnabled ? 'Execute on the Robinhood Outbox' : 'Host executor not configured'}>
+                        Claim on Robinhood
+                      </button>
+                    ) : (
+                      <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px]">Awaiting confirmation on Robinhood…</span>
+                    )}
+                  </div>
+                ))}
+                {userL3XMoney > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-[#0e121d] border border-emerald-500/30">
+                    <div>
+                      <div className="text-white font-bold">{userL3XMoney.toFixed(4)} $xMoney on Robinhood</div>
+                      <div className="text-[10px] text-slate-500">Claimed from the L4. Redeem it for USDG from the vault (0.01% rake).</div>
+                    </div>
+                    <button onClick={handleRedeemUsdg} disabled={isSubmittingTx} className="px-3 py-1.5 rounded-lg bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 font-black cursor-pointer">
+                      Redeem → USDG
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* LOWER SECTION: P2P ORDERBOOK (TRADING $XMONEY PEER-TO-PEER) */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            {/* Main Book Column */}
+            <div className="lg:col-span-2 space-y-4">
+              <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-4 shadow-xl">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#1b2234]">
+                  <div>
+                    <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+                      <Coins className="w-4 h-4 text-emerald-400" />
+                      <span>$xMoney P2P OTC Order Book</span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Sellers deposit $xMoney into escrow; buyers send fiat on X Money. 0.01% raked to Fanout, 0.01% burned to 0xdead.
+                    </p>
+                  </div>
+
+                  {/* Filter Side Pills */}
+                  <div className="flex items-center gap-1 text-xs font-mono">
+                    {(['ALL', 'ASK', 'BID'] as const).map(s => (
+                      <button
+                        key={s}
+                        onClick={() => setOrderBookSide(s)}
+                        className={`px-3 py-1 rounded-lg cursor-pointer transition-all ${
+                          orderBookSide === s
+                            ? (s === 'ASK' ? 'bg-emerald-500 text-slate-950 font-black' : (s === 'BID' ? 'bg-cyan-400 text-slate-950 font-black' : 'bg-slate-700 text-white font-bold'))
+                            : 'bg-[#151c2d] text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {s === 'ALL' ? 'All Orders' : (s === 'ASK' ? 'Sell Asks' : 'Buy Bids')}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Order Table */}
+                <div className="mt-3 overflow-x-auto">
+                  {filteredOrders.length === 0 ? (
+                    <div className="text-center py-12 space-y-3">
+                      <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mx-auto text-slate-500">
+                        <Coins className="w-6 h-6" />
+                      </div>
+                      <div className="text-sm font-bold text-white font-display">No Active Orders on xgas Orbit L4 Yet</div>
+                      <p className="text-xs text-slate-400 max-w-sm mx-auto font-sans">
+                        Contract is freshly deployed. Be the first to post a Sell Ask or Buy Bid on-chain!
+                      </p>
+                      <div className="flex flex-col sm:flex-row justify-center gap-2 pt-2">
+                        <button
+                          onClick={() => {
+                            setOrderSideToCreate('ASK');
+                            setIsCreateOrderModalOpen(true);
+                          }}
+                          className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 cursor-pointer"
+                        >
+                          Post First Sell Ask
+                        </button>
+                        <button
+                          onClick={() => {
+                            setOrderSideToCreate('BID');
+                            setIsCreateOrderModalOpen(true);
+                          }}
+                          className="px-4 py-2 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-black text-xs font-display shadow-lg shadow-cyan-500/20 cursor-pointer"
+                        >
+                          Post First Buy Bid
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                    {/* Phone: one card per order, action full-width */}
+                    <div className="sm:hidden divide-y divide-[#171d2c] font-mono">
+                      {filteredOrders.map(order => {
+                        const spreadPct = ((order.fiatRateBps - 10000) / 100).toFixed(1);
+                        const unitPrice = (order.fiatRateBps / 10000).toFixed(3);
+                        const mine = wallet.connected && order.maker.toLowerCase() === wallet.address.toLowerCase();
+                        return (
+                          <div key={order.id} className="py-3 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                                order.side === 'ASK' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40'
+                              }`}>
+                                {order.side === 'ASK' ? 'SELL ASK' : 'BUY BID'}
+                              </span>
+                              <a href={`https://x.com/${order.makerXHandle}`} target="_blank" rel="noreferrer" className="font-bold text-white text-xs font-sans truncate">
+                                @{order.makerXHandle}
+                              </a>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 text-[11px]">
+                              <div>
+                                <div className="text-[9px] uppercase text-slate-500">Available</div>
+                                <div className="font-bold text-white">${order.availableXMoney.toFixed(2)}</div>
+                              </div>
+                              <div>
+                                <div className="text-[9px] uppercase text-slate-500">Rate</div>
+                                <div className="font-bold text-emerald-400">${unitPrice} <span className="text-slate-500 font-normal">({spreadPct > '0' ? `+${spreadPct}%` : '0%'})</span></div>
+                              </div>
+                              <div>
+                                <div className="text-[9px] uppercase text-slate-500">Min / Max</div>
+                                <div className="text-slate-300">${order.minAmount} – ${order.maxAmount}</div>
+                              </div>
+                            </div>
+                            {mine ? (
+                              <button
+                                onClick={() => handleCancelOrderOnChain(order.id)}
+                                className="w-full py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-300 font-bold text-xs cursor-pointer"
+                              >
+                                Cancel Mine
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => openOrder(order)}
+                                className="w-full py-2 rounded-lg bg-emerald-500 text-slate-950 font-bold text-xs cursor-pointer shadow-md shadow-emerald-500/20"
+                              >
+                                {order.side === 'ASK' ? 'Buy $xMoney' : 'Sell $xMoney'}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => copyLink(orderLink(order.id))}
+                              className="w-full py-1.5 rounded-lg bg-[#151c2d] text-slate-400 text-[11px] cursor-pointer"
+                            >
+                              {copiedLink === orderLink(order.id) ? 'Link copied ✓' : `Copy link · /order/${order.id}`}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <table className="hidden sm:table w-full text-left text-xs">
+                      <thead>
+                        <tr className="text-slate-400 border-b border-[#1a2133] uppercase font-mono text-[10px]">
+                          <th className="pb-2">Side</th>
+                          <th className="pb-2">Maker / X Handle</th>
+                          <th className="pb-2">Available $xMoney</th>
+                          <th className="pb-2">Price Rate</th>
+                          <th className="pb-2">Min / Max</th>
+                          <th className="pb-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#171d2c] font-mono">
+                        {filteredOrders.map(order => {
+                          const spreadPct = ((order.fiatRateBps - 10000) / 100).toFixed(1);
+                          const unitPrice = (order.fiatRateBps / 10000).toFixed(3);
+
+                          return (
+                            <tr key={order.id} className="hover:bg-[#131826] transition-colors">
+                              <td className="py-3">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                                  order.side === 'ASK' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40'
+                                }`}>
+                                  {order.side === 'ASK' ? 'SELL ASK' : 'BUY BID'}
+                                </span>
+                              </td>
+                              <td className="py-3 font-sans">
+                                <div className="flex items-center gap-2">
+                                  <a 
+                                    href={`https://x.com/${order.makerXHandle}`} 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="font-bold text-white hover:text-emerald-400 flex items-center gap-1 transition-colors"
+                                  >
+                                    <span>@{order.makerXHandle}</span>
+                                    <ExternalLink className="w-2.5 h-2.5 text-slate-500" />
+                                  </a>
+                                </div>
+                              </td>
+                              <td className="py-3 font-bold text-white">
+                                ${order.availableXMoney.toFixed(2)}
+                              </td>
+                              <td className="py-3">
+                                <span className="font-bold text-emerald-400">${unitPrice}</span>
+                                <span className="text-[10px] ml-1 text-slate-400">({spreadPct > '0' ? `+${spreadPct}%` : '0%'})</span>
+                              </td>
+                              <td className="py-3 text-slate-300">
+                                ${order.minAmount} – ${order.maxAmount}
+                              </td>
+                              <td className="py-3 text-right">
+                                {wallet.connected && order.maker.toLowerCase() === wallet.address.toLowerCase() ? (
+                                  <button
+                                    onClick={() => handleCancelOrderOnChain(order.id)}
+                                    className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 border border-rose-500/40 text-rose-300 font-bold transition-all text-xs cursor-pointer"
+                                    title="Cancel your order and withdraw escrowed $xMoney"
+                                  >
+                                    Cancel Mine
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => openOrder(order)}
+                                    className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold transition-all text-xs cursor-pointer shadow-md shadow-emerald-500/20"
+                                  >
+                                    {order.side === 'ASK' ? 'Buy $xMoney' : 'Sell $xMoney'}
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => copyLink(orderLink(order.id))}
+                                  className="ml-1.5 px-2 py-1.5 rounded-lg bg-[#151c2d] hover:bg-[#1c2438] text-slate-400 hover:text-white text-xs cursor-pointer align-middle"
+                                  title={`Copy deep link ${orderLink(order.id)}`}
+                                >
+                                  {copiedLink === orderLink(order.id) ? '✓' : <Link2 className="w-3.5 h-3.5 inline" />}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Active Escrow Trades */}
+              <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-4 shadow-xl">
+                <div className="flex items-center justify-between pb-3 border-b border-[#1b2234]">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+                    <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                    <span>On-Chain Escrow Settlements</span>
+                  </h3>
+                  <span className="text-xs text-slate-400 font-mono">
+                    {trades.length} active settlements
+                  </span>
+                </div>
+
+                <div className="mt-3 space-y-3">
+                  {trades.length === 0 ? (
+                    <div className="text-center py-6 text-slate-500 text-xs font-mono">
+                      No active trades in escrow. Take an order above to initiate settlement.
+                    </div>
+                  ) : (
+                    trades.map(trade => (
+                      <div 
+                        key={trade.id} 
+                        id={`trade-${trade.id}`}
+                        className="p-3.5 rounded-xl border bg-[#121624] border-cyan-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-shadow"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => copyLink(tradeLink(trade.id))}
+                              className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono cursor-pointer"
+                              title={`Copy deep link ${tradeLink(trade.id)}`}
+                            >
+                              {copiedLink === tradeLink(trade.id) ? 'LINK COPIED ✓' : `TRADE #${trade.id} 🔗`}
+                            </button>
+                            <span className="text-xs font-bold text-white font-sans">
+                              @{trade.buyerXHandle} taking ${trade.xMoneyAmount.toFixed(2)} from @{trade.sellerXHandle}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3 font-mono">
+                            <span>Fiat: <strong className="text-emerald-400">${(trade.expectedCents / 100).toFixed(2)} USD</strong></span>
+                            <span>•</span>
+                            <span>0.01% Burn: <strong className="text-amber-400">${((trade.xMoneyAmount * 1) / 10000).toFixed(4)}</strong></span>
+                            <span>•</span>
+                            <span>0.01% Fanout Rake: <strong className="text-cyan-400">${((trade.xMoneyAmount * 1) / 10000).toFixed(4)}</strong></span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0 [&>button]:flex-1 sm:[&>button]:flex-none">
+                          <a
+                            href={`https://x.com/${trade.sellerXHandle}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-2.5 py-1.5 rounded-lg bg-[#1a2133] hover:bg-[#222b40] text-slate-300 text-xs font-bold flex items-center gap-1 font-sans"
+                          >
+                            <span>Open @{trade.sellerXHandle}</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+
+                          <a
+                            href={`https://x.com/intent/post?text=${encodeURIComponent(`Settling Trade #${trade.id} on @xgas_dev! @${trade.buyerXHandle} -> @${trade.sellerXHandle} on @XMoney. 0.01% burned to 0xdead + 0.01% to Stacc Fanout. xgas.dev`)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+                            title="Share on X"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                          </a>
+
+                          <button
+                            onClick={() => handleReleaseTradeOnChain(trade.id)}
+                            className="px-3 py-2 sm:py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-slate-950 font-bold text-xs shadow-md shadow-emerald-500/20 cursor-pointer flex items-center justify-center gap-1.5 font-display"
+                          >
+                            <CheckCircle className="w-3.5 h-3.5" />
+                            <span>Release On-Chain</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Deep Link Protocol Hub */}
+            <div className="space-y-4">
+              
+              {/* Deep Links Hub */}
+              <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-4 shadow-xl space-y-3">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2 font-display">
+                  <ExternalLink className="w-4 h-4 text-emerald-400" />
+                  <span>Deep Links to Everything</span>
+                </h4>
+                <div className="space-y-2 text-xs font-mono">
+                  <div className="grid grid-cols-2 gap-2">
+                    {TAB_IDS.map(tab => (
+                      <a
+                        key={tab}
+                        href={`/${tab}`}
+                        onClick={(ev) => { ev.preventDefault(); setActiveTab(tab); }}
+                        className={`p-2.5 rounded-lg border flex items-center justify-between transition-colors ${
+                          activeTab === tab ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : 'bg-[#141a29] hover:bg-[#1a2336] border-[#1e2538] text-slate-300'
+                        }`}
+                        title={`Deep link: ${deepLink(tab)}`}
+                      >
+                        <span className="font-bold">
+                          {tab === 'otc' ? 'P2P Desk' : tab === 'explorer' ? 'L4 Explorer' : tab === 'fomo3d' ? 'FOMO3D' : 'Specs'}
+                        </span>
+                        <span className="text-[10px] text-slate-500">/{tab}</span>
+                      </a>
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#0b0e17] border border-[#1e2538]">
+                    <span className="text-slate-400 truncate">{deepLink(activeTab)}</span>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(deepLink(activeTab))}
+                      className="px-2 py-1 rounded bg-emerald-500 text-slate-950 font-black uppercase text-[10px] cursor-pointer shrink-0"
+                    >
+                      Copy link
+                    </button>
+                  </div>
+                  <a
+                    href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_USD_L3}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-2.5 rounded-lg bg-[#141a29] hover:bg-[#1a2336] border border-[#1e2538] flex items-center justify-between text-slate-300 transition-colors"
+                  >
+                    <span className="text-slate-400">Vault Contract:</span>
+                    <span className="text-cyan-400 font-bold flex items-center gap-1">
+                      <span>{CONTRACT_ADDRESSES.XMONEY_USD_L3.slice(0, 8)}...</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href="#explorer"
+                    onClick={(ev) => { ev.preventDefault(); setActiveTab('explorer'); }}
+                    className="p-2.5 rounded-lg bg-[#141a29] hover:bg-[#1a2336] border border-[#1e2538] flex items-center justify-between text-slate-300 transition-colors"
+                  >
+                    <span className="text-slate-400">P2P Escrow (Orbit L4):</span>
+                    <span className="text-emerald-400 font-bold flex items-center gap-1">
+                      <span>{l4Addresses.escrow.slice(0, 8)}...</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-2.5 rounded-lg bg-[#141a29] hover:bg-[#1a2336] border border-[#1e2538] flex items-center justify-between text-slate-300 transition-colors"
+                  >
+                    <span className="text-slate-400">Stacc Wizards Fanout:</span>
+                    <span className="text-cyan-400 font-bold flex items-center gap-1">
+                      <span>0x04C9...36e</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href="https://robinhoodchain.blockscout.com/address/0x000000000000000000000000000000000000dEaD"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-2.5 rounded-lg bg-[#141a29] hover:bg-[#1a2336] border border-[#1e2538] flex items-center justify-between text-slate-300 transition-colors"
+                  >
+                    <span className="text-slate-400">Dead Burn Sink:</span>
+                    <span className="text-amber-400 font-bold flex items-center gap-1">
+                      <span>0x000...dEaD</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href={`https://x.com/intent/post?text=${encodeURIComponent(`Trading @XMoney P2P on @xgas_dev L4! Every single trade burns 1 bp to 0xdead and rakes 1 bp to @staccpad Stacc Wizards Fanout on Robinhood Chain. xgas.dev`)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-500/20 to-cyan-500/20 hover:brightness-110 border border-blue-500/40 text-cyan-300 font-bold flex items-center justify-center gap-2 transition-colors mt-2 font-sans"
+                  >
+                    <Share2 className="w-3.5 h-3.5" />
+                    <span>Share Desk on X Timeline</span>
+                  </a>
+                </div>
+              </div>
+
+              {/* The Nash Mechanics Card */}
+              <div className="bg-gradient-to-b from-[#111726] to-[#0d111c] border border-amber-500/30 rounded-2xl p-4 shadow-xl">
+                <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-2 font-mono">
+                  <Flame className="w-4 h-4" />
+                  <span>On-Chain Deflationary Mechanics</span>
+                </div>
+                <h4 className="text-sm font-bold text-white mb-2 font-display">Dual 0.01% Fee Structure</h4>
+                <p className="text-xs text-slate-400 leading-relaxed space-y-2 font-sans">
+                  Every trade burns 0.01% of $xMoney supply straight to <code className="text-amber-400 font-mono">0xdead</code> and routes 0.01% directly to the <code className="text-cyan-400 font-mono">HomecomingDividendVault</code>.
+                </p>
+
+                <div className="mt-4 p-3 rounded-xl bg-black/40 border border-amber-500/20 space-y-2 font-mono text-xs">
+                  <div className="flex justify-between text-slate-400">
+                    <span>Gross Trade:</span>
+                    <span className="text-white">$100.00 xMoney</span>
+                  </div>
+                  <div className="flex justify-between text-amber-400">
+                    <span>0.01% Burn (0xdead):</span>
+                    <span>-$0.01</span>
+                  </div>
+                  <div className="flex justify-between text-cyan-400">
+                    <span>0.01% Fanout Rake:</span>
+                    <span>-$0.01</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-400 font-bold border-t border-slate-800 pt-1">
+                    <span>Net Delivered:</span>
+                    <span>$99.98</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. TAB B: FOMO3D ATTRITION MACHINE */}
+      {activeTab === 'fomo3d' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-4">
+            <div className="relative overflow-hidden rounded-2xl border border-rose-500/40 bg-gradient-to-b from-[#180d19] via-[#0f0a14] to-[#0a070d] p-6 shadow-2xl text-center">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-400 text-xs font-mono font-bold mb-3">
+                <Flame className="w-3.5 h-3.5 animate-bounce" />
+                <span>ROUND #{fomo.roundId} WAR OF ATTRITION</span>
+              </div>
+
+              {/* Countdown Clock */}
+              <div className="space-y-1 my-4">
+                <div className="text-[11px] font-mono uppercase tracking-widest text-slate-400">TIME REMAINING UNTIL JACKPOT PAYOUT</div>
+                <div className="text-[13vw] sm:text-7xl font-black font-mono tracking-tighter leading-none text-transparent bg-clip-text bg-gradient-to-r from-rose-400 via-amber-300 to-rose-400 animate-pulse">
+                  {timeLeftStr}
+                </div>
+              </div>
+
+              {/* Current King */}
+              <div className="mt-4 p-4 rounded-xl bg-black/50 border border-rose-500/30 max-w-xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-3 font-mono">
+                <div className="text-left space-y-0.5 min-w-0">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">CURRENT KING OF THE HILL</div>
+                  <div className="text-base font-bold text-white flex items-center gap-2 font-sans">
+                    <Award className="w-4 h-4 text-amber-400" />
+                    <span className="truncate">{fomo.currentLeaderXHandle ? `@${fomo.currentLeaderXHandle}` : 'No Leader Yet'}</span>
+                    <span className="hidden sm:inline text-xs text-slate-500 font-mono">({fomo.currentLeader.slice(0, 6)}...{fomo.currentLeader.slice(-4)})</span>
+                  </div>
+                </div>
+
+                <div className="text-left sm:text-right flex sm:block items-baseline justify-between gap-2 border-t sm:border-0 border-rose-500/20 pt-2 sm:pt-0">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">ESTIMATED WIN</div>
+                  <div className="text-lg font-black text-emerald-400 font-mono">
+                    ${fomo.jackpotPot.toFixed(2)} USD
+                  </div>
+                </div>
+              </div>
+
+              {/* Buy Keys Action Row */}
+              <div className="mt-6 pt-5 border-t border-rose-500/20 max-w-xl mx-auto space-y-4 font-mono">
+                <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
+                  {[1, 5, 10, 50].map(k => (
+                    <button
+                      key={k}
+                      onClick={() => setKeysToBuy(k)}
+                      className={`py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        keysToBuy === k
+                          ? 'bg-rose-500 text-slate-950 font-black shadow-lg shadow-rose-500/30 scale-105'
+                          : 'bg-[#1b1422] text-slate-300 hover:bg-[#251b2e]'
+                      }`}
+                    >
+                      {k} {k === 1 ? 'Key' : 'Keys'} <span className="hidden sm:inline">(+{k * 30}s)</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 [&>button]:w-full sm:[&>button]:w-auto">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-2.5 text-slate-500 text-xs font-bold">@</span>
+                    <input
+                      type="text"
+                      value={fomoXHandle}
+                      onChange={e => setFomoXHandle(e.target.value)}
+                      readOnly={handleLocked}
+                      placeholder="your_x_handle"
+                      title={handleLocked ? 'Verified via Sign in with X' : 'Sign in with X (header) to verify your handle'}
+                      className={`w-full bg-[#120d17] border rounded-xl pl-7 pr-3 py-2 text-xs font-bold text-white placeholder-slate-600 focus:outline-none font-sans ${handleLocked ? 'border-emerald-500/40 text-emerald-300' : 'border-[#2a1b32] focus:border-rose-500'}`}
+                    />
+                  </div>
+                  {roundExpired ? (
+                    <button
+                      onClick={handleClaimJackpotOnChain}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-amber-500/30 transition-all cursor-pointer shrink-0"
+                    >
+                      Round Over — Pay ${fomo.jackpotPot.toFixed(2)} Jackpot &amp; Start Round #{fomo.roundId + 1}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleBuyKeysOnChain}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-500 via-amber-500 to-rose-500 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-rose-500/30 transition-all cursor-pointer shrink-0"
+                    >
+                      Buy {keysToBuy} Keys for ${(keysToBuy * fomo.keyPrice).toFixed(3)} $xMoney
+                    </button>
+                  )}
+                </div>
+
+                <div className="text-[11px] text-slate-400 flex items-center justify-center gap-4">
+                  <span>55% Dividends</span>
+                  <span>•</span>
+                  <span>35% Jackpot</span>
+                  <span>•</span>
+                  <span className="text-amber-400">0.01% Burn</span>
+                  <span>•</span>
+                  <span className="text-cyan-400">0.01% Fanout Rake</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column: Player Stash & Continuous Dividends */}
+          <div className="space-y-4">
+            <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-5 shadow-xl space-y-4 font-mono">
+              <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+                <Coins className="w-4 h-4 text-emerald-400" />
+                <span>Your Continuous Dividends</span>
+              </h3>
+
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-1">
+                <div className="text-[11px] text-emerald-400 uppercase tracking-wider font-bold">ACCUMULATED REWARD</div>
+                <div className="text-3xl font-black text-white">
+                  ${fomo.playerDividends.toFixed(2)} <span className="text-xs text-slate-400">$xMoney</span>
+                </div>
+                <div className="text-[11px] text-slate-400 font-sans">From {fomo.playerKeys} keys held in Round #{fomo.roundId}</div>
+              </div>
+
+              <button
+                onClick={handleClaimDividendsOnChain}
+                disabled={fomo.playerDividends <= 0}
+                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 transition-all cursor-pointer flex items-center justify-center gap-2"
+              >
+                <CheckCircle className="w-4 h-4" />
+                <span>Claim On-Chain Dividends</span>
+              </button>
+
+              {pastRoundDividends.map(pr => (
+                <button
+                  key={pr.round}
+                  onClick={() => handleClaimPastRound(pr.round)}
+                  className="w-full py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 font-bold text-xs font-display cursor-pointer"
+                >
+                  Claim {pr.amount.toFixed(4)} $xMoney left from Round #{pr.round}
+                </button>
+              ))}
+
+              <div className="p-3 rounded-xl bg-[#141a29] border border-[#1e2538] space-y-1 text-xs">
+                <div className="flex justify-between text-slate-400">
+                  <span>Current Key Price:</span>
+                  <span className="text-white">${fomo.keyPrice.toFixed(4)}</span>
+                </div>
+                <div className="flex justify-between text-slate-400">
+                  <span>Total Keys Minted:</span>
+                  <span className="text-white">{fomo.totalKeys.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-slate-400">
+                  <span>Contract Address:</span>
+                  <a 
+                    href="#explorer"
+                    onClick={(ev) => { ev.preventDefault(); setActiveTab('explorer'); }}
+                    className="text-cyan-400 hover:underline flex items-center gap-1"
+                  >
+                    <span>{l4Addresses.fomo.slice(0, 8)}... (Orbit L4)</span>
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5. TAB C: SPECS & DEEP LINKS */}
+      {activeTab === 'specs' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 font-mono text-xs">
+          {/* Trust model, units, admin powers: everything an integrator or auditor needs, stated plainly */}
+          <div className="lg:col-span-2 bg-[#0e121d] border border-emerald-500/30 rounded-2xl p-5 shadow-xl space-y-4">
+            <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>Trust Model, Units &amp; Admin Powers</span>
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[11px] leading-relaxed text-slate-300">
+              <div className="space-y-2">
+                <div className="text-emerald-400 font-bold uppercase tracking-wider">What is verifiable</div>
+                <p>xgas Orbit L4 (#{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}) is an Arbitrum Orbit AnyTrust chain. Every batch is posted to the SequencerInbox on Robinhood Chain and every state assertion to the Rollup contract; anyone can run a node from <a href="/chain-info.json" className="text-cyan-400 hover:underline">chain-info.json</a> (see <a href="/RUN-A-NODE.md" className="text-cyan-400 hover:underline">RUN-A-NODE.md</a>) and verify without trusting xgas.dev.</p>
+                <p>Deposits go through the canonical Orbit Inbox; exits go through the Outbox on Robinhood. The site executes Outbox claims as a convenience, but the call is permissionless.</p>
+                <p className="text-slate-400">What you do trust today: a single sequencer (ordering, liveness) and a single-member data committee, both operated by xgas.dev. Neither can mint, freeze or take funds.</p>
+              </div>
+              <div className="space-y-2">
+                <div className="text-amber-400 font-bold uppercase tracking-wider">Admin powers</div>
+                <p>The L4 escrow, War of Attrition and router are ownerless: no owner, pause, upgrade, role or withdraw path. Source: <a href="/source/XMoneyEscrow.sol" className="text-cyan-400 hover:underline">escrow</a>, <a href="/source/FomoAttritionL4.sol" className="text-cyan-400 hover:underline">game</a>, <a href="/source/XGasRouter.sol" className="text-cyan-400 hover:underline">router</a>.</p>
+                <p>The XMoney vault (<a href="/source/XMoney.sol" className="text-cyan-400 hover:underline">source</a>) has exactly two owner functions: setBridgeSystem (inbox/bridge addresses) and setL4RetryableParams (gas for the L4 leg). Minting only happens inside enterRollup / migrate against USDG actually received; the owner cannot mint, pause or withdraw the reserve.</p>
+                <p>Owner = a 24-hour <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_TIMELOCK}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">TimelockController</a>: any change is queued publicly and waits a day before it can execute.</p>
+              </div>
+              <div className="space-y-2">
+                <div className="text-cyan-400 font-bold uppercase tracking-wider">Units &amp; accounting</div>
+                <p><code className="text-white">getReserveNAV()</code> returns <code className="text-white">navRay</code> scaled by 1e18 (a WAD, despite the name), <code className="text-white">usdgReserve</code> in 6 decimals, <code className="text-white">circulatingXMoney</code> in 18 decimals. The name is frozen because the token is the chain's native gas asset and cannot be redeployed.</p>
+                <p>Burns are sent to 0x…dEaD and stay inside <code className="text-white">totalSupply()</code>. The canonical supply figure is <code className="text-white">totalSupply − balanceOf(0xdead)</code>, which is what circulatingXMoney reports and what NAV is computed from.</p>
+                <p>0x…dEaD on Robinhood is a shared sink used by other projects; only XMoney's own balance there is xgas burn.</p>
+              </div>
+            </div>
+          </div>
+          <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-5 shadow-xl space-y-3">
+            <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+              <Layers className="w-4 h-4 text-cyan-400" />
+              <span>Orbit L4 Topology Specs</span>
+            </h3>
+            <div className="space-y-2 text-slate-300">
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
+                <span className="text-slate-500">Rollup Framework:</span>
+                <span className="text-white font-bold">Arbitrum Nitro (Orbit L4)</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
+                <span className="text-slate-500">Parent Settlement L3:</span>
+                <span className="text-emerald-400 font-bold">Robinhood Chain (#4663)</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
+                <span className="text-slate-500">L4 Gas Token:</span>
+                <span className="text-amber-400 font-bold">$xMoney (18 Decimals, 1:1 Backed)</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
+                <span className="text-slate-500">0.01% Burn Sink:</span>
+                <a href="https://robinhoodchain.blockscout.com/address/0x000000000000000000000000000000000000dEaD" target="_blank" rel="noreferrer" className="text-amber-400 hover:underline flex items-center gap-1">
+                  <span>0x000...dEaD</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
+                <span className="text-slate-500">0.01% Protocol Rake:</span>
+                <a href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e" target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline flex items-center gap-1">
+                  <span>Stacc Wizards Fanout</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-5 shadow-xl space-y-3">
+            <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+              <Hash className="w-4 h-4 text-emerald-400" />
+              <span>Verified On-Chain Contracts</span>
+            </h3>
+            <div className="space-y-2 text-slate-300">
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] space-y-1">
+                <div className="flex justify-between text-slate-400">
+                  <span>$xMoney Vault Contract:</span>
+                  <span className="text-cyan-400 font-bold">1:1 Backing</span>
+                </div>
+                <a 
+                  href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_USD_L3}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-white hover:text-cyan-400 flex items-center gap-1 truncate"
+                >
+                  <span className="truncate">{CONTRACT_ADDRESSES.XMONEY_USD_L3}</span>
+                  <ExternalLink className="w-3 h-3 shrink-0" />
+                </a>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] space-y-1">
+                <div className="flex justify-between text-slate-400">
+                  <span>P2P Escrow Contract:</span>
+                  <span className="text-emerald-400 font-bold">Two-Sided Book</span>
+                </div>
+                <a 
+                  href="#explorer"
+                  onClick={(ev) => { ev.preventDefault(); setActiveTab('explorer'); }}
+                  className="text-white hover:text-emerald-400 flex items-center gap-1 truncate"
+                >
+                  <span className="truncate">{l4Addresses.escrow} · xgas Orbit L4 #{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}</span>
+                  <ExternalLink className="w-3 h-3 shrink-0" />
+                </a>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] space-y-1">
+                <div className="flex justify-between text-slate-400">
+                  <span>Stacc Wizards Fee Fanout:</span>
+                  <span className="text-cyan-400 font-bold">0x04C9...36e</span>
+                </div>
+                <a 
+                  href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-white hover:text-cyan-400 flex items-center gap-1 truncate"
+                >
+                  <span className="truncate">0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e</span>
+                  <ExternalLink className="w-3 h-3 shrink-0" />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CREATE ON-CHAIN ORDER (SELL ASK OR BUY BID IN $XMONEY) */}
+      {isCreateOrderModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#0e121d] border border-emerald-500/40 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#1f2638]">
+              <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+                <Coins className="w-4 h-4 text-emerald-400" />
+                <span>Post {orderSideToCreate === 'ASK' ? 'Sell Ask' : 'Buy Bid'} ($xMoney)</span>
+              </h3>
+              <button 
+                onClick={() => setIsCreateOrderModalOpen(false)}
+                className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateOrderOnChain} className="space-y-3 text-xs font-mono">
+              <div className="space-y-1">
+                <label className="text-[11px] text-slate-400 uppercase font-sans">Your X Handle</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2.5 text-slate-500 font-bold">@</span>
+                  <input
+                    type="text"
+                    required
+                    value={newOrderHandle}
+                    onChange={e => setNewOrderHandle(e.target.value)}
+                    readOnly={handleLocked}
+                    placeholder="my_handle"
+                    title={handleLocked ? 'Verified via Sign in with X' : 'Sign in with X (header) to verify your handle'}
+                    className={`w-full bg-[#141a29] border rounded-xl pl-7 pr-3 py-2 font-bold focus:outline-none font-sans ${handleLocked ? 'border-emerald-500/40 text-emerald-300' : 'border-[#1e2538] text-white focus:border-emerald-500'}`}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] text-slate-400 uppercase font-sans">
+                    {orderSideToCreate === 'ASK' ? 'Amount to Sell ($xMoney)' : 'Amount Wanted ($xMoney)'}
+                  </label>
+                  <input
+                    type="number"
+                    step="1"
+                    required
+                    value={newOrderAmount}
+                    onChange={e => setNewOrderAmount(e.target.value)}
+                    className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] text-slate-400 uppercase font-sans">Price Spread (%)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    required
+                    value={newOrderSpread}
+                    onChange={e => setNewOrderSpread(e.target.value)}
+                    placeholder="2.0"
+                    className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] text-slate-400 uppercase font-sans">Min Limit ($)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    required
+                    value={newOrderMin}
+                    onChange={e => setNewOrderMin(e.target.value)}
+                    className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] text-slate-400 uppercase font-sans">Max Limit ($)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    required
+                    value={newOrderMax}
+                    onChange={e => setNewOrderMax(e.target.value)}
+                    className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-black/40 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+                <div>Price Rate: <strong className="text-emerald-400">${(1 + parseFloat(newOrderSpread || '0') / 100).toFixed(3)} USD / 1 xMoney</strong></div>
+                <div>0.01% Burn on Release + 0.01% Stacc Fanout Rake</div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmittingTx}
+                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
+              >
+                {isSubmittingTx ? 'Broadcasting on xgas Orbit L4...' : `Post ${orderSideToCreate === 'ASK' ? 'Sell Ask' : 'Buy Bid'} On-Chain`}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: FILL ORDER */}
+      {selectedOrderForTrade && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#0e121d] border border-cyan-500/40 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-2xl space-y-4 font-mono text-xs max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#1f2638]">
+              <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
+                <Coins className="w-4 h-4 text-cyan-400" />
+                <span>Fill Order #{selectedOrderForTrade.id} with @{selectedOrderForTrade.makerXHandle}</span>
+              </h3>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => copyLink(orderLink(selectedOrderForTrade.id))}
+                  className="px-2 py-1 rounded-lg bg-[#151c2d] hover:bg-[#1c2438] text-slate-300 hover:text-white text-[11px] cursor-pointer flex items-center gap-1"
+                  title={orderLink(selectedOrderForTrade.id)}
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>{copiedLink === orderLink(selectedOrderForTrade.id) ? 'Copied' : 'Link'}</span>
+                </button>
+                <a
+                  href={`https://x.com/intent/post?text=${encodeURIComponent(`${selectedOrderForTrade.side === 'ASK' ? 'Buy' : 'Sell'} ${selectedOrderForTrade.availableXMoney.toFixed(2)} $xMoney @ $${(selectedOrderForTrade.fiatRateBps / 10000).toFixed(3)} from @${selectedOrderForTrade.makerXHandle} on @xgas_dev L4 → ${orderLink(selectedOrderForTrade.id)}`)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="p-1.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+                  title="Share this offer on X"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                </a>
+                <button 
+                  onClick={closeOrder}
+                  className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer px-1"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-[11px] text-slate-400 uppercase font-sans">Amount ($xMoney)</label>
+                <input
+                  type="number"
+                  step="1"
+                  value={tradeAmount}
+                  onChange={e => setTradeAmount(e.target.value)}
+                  className="w-full bg-[#141a29] border border-[#1e2538] rounded-xl px-3 py-2 text-white text-sm focus:outline-none focus:border-cyan-500 font-bold"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] text-slate-400 uppercase font-sans">Your X Handle</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2.5 text-slate-500 font-bold">@</span>
+                  <input
+                    type="text"
+                    value={takerHandle}
+                    onChange={e => setTakerHandle(e.target.value)}
+                    readOnly={handleLocked}
+                    placeholder="my_handle"
+                    title={handleLocked ? 'Verified via Sign in with X' : 'Sign in with X (header) to verify your handle'}
+                    className={`w-full bg-[#141a29] border rounded-xl pl-7 pr-3 py-2 font-bold focus:outline-none font-sans ${handleLocked ? 'border-emerald-500/40 text-emerald-300' : 'border-[#1e2538] text-white focus:border-cyan-500'}`}
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-black/40 border border-slate-800 text-[11px] space-y-1.5">
+                <div className="flex justify-between text-slate-400">
+                  <span>Unit Price:</span>
+                  <span className="text-white">${(selectedOrderForTrade.fiatRateBps / 10000).toFixed(3)}</span>
+                </div>
+                <div className="flex justify-between text-slate-400">
+                  <span>Fiat Owed on X Money:</span>
+                  <span className="text-emerald-400 font-black text-sm">
+                    ${((parseFloat(tradeAmount || '0') * selectedOrderForTrade.fiatRateBps) / 10000).toFixed(2)} USD
+                  </span>
+                </div>
+              </div>
+
+              <button
+                onClick={handleFillOrderOnChain}
+                disabled={isSubmittingTx}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-cyan-500/20 transition-all cursor-pointer"
+              >
+                {isSubmittingTx ? 'Broadcasting on xgas Orbit L4...' : 'Lock Escrow On-Chain'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};

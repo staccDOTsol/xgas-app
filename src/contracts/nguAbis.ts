@@ -1,0 +1,38 @@
+// Auto-generated from forge artifacts (NguToken.sol / NguLauncher.sol).
+// Trimmed to the functions/events the frontend uses.
+export const NGU_TOKEN_ABI = [
+  {"type": "function","name": "balanceOf","inputs": [{"name": "account","type": "address","internalType": "address"}],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "basePrice","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "betaBps","inputs": [],"outputs": [{"name": "","type": "uint16","internalType": "uint16"}],"stateMutability": "view"},
+  {"type": "function","name": "buy","inputs": [{"name": "qty","type": "uint256","internalType": "uint256"},{"name": "to","type": "address","internalType": "address"}],"outputs": [{"name": "cost","type": "uint256","internalType": "uint256"}],"stateMutability": "payable"},
+  {"type": "function","name": "decimals","inputs": [],"outputs": [{"name": "","type": "uint8","internalType": "uint8"}],"stateMutability": "view"},
+  {"type": "function","name": "donate","inputs": [],"outputs": [],"stateMutability": "payable"},
+  {"type": "function","name": "floor","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "lastPrice","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "maxLossBps","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "maxSupply","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "minted","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "name","inputs": [],"outputs": [{"name": "","type": "string","internalType": "string"}],"stateMutability": "view"},
+  {"type": "function","name": "nextPrice","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "quoteBuy","inputs": [{"name": "qty","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "cost","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "quoteSell","inputs": [{"name": "qty","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "payout","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "reserve","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "sell","inputs": [{"name": "qty","type": "uint256","internalType": "uint256"},{"name": "to","type": "address","internalType": "address payable"},{"name": "minOut","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "payout","type": "uint256","internalType": "uint256"}],"stateMutability": "nonpayable"},
+  {"type": "function","name": "stepBps","inputs": [],"outputs": [{"name": "","type": "uint16","internalType": "uint16"}],"stateMutability": "view"},
+  {"type": "function","name": "supply","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "symbol","inputs": [],"outputs": [{"name": "","type": "string","internalType": "string"}],"stateMutability": "view"},
+  {"type": "event","name": "Tick","inputs": [{"name": "kind","type": "uint8","indexed": true,"internalType": "uint8"},{"name": "who","type": "address","indexed": true,"internalType": "address"},{"name": "qty","type": "uint256","indexed": false,"internalType": "uint256"},{"name": "price","type": "uint256","indexed": false,"internalType": "uint256"},{"name": "floor","type": "uint256","indexed": false,"internalType": "uint256"},{"name": "supply","type": "uint256","indexed": false,"internalType": "uint256"},{"name": "reserve","type": "uint256","indexed": false,"internalType": "uint256"},{"name": "minted","type": "uint256","indexed": false,"internalType": "uint256"}],"anonymous": false},
+  {"type": "error","name": "BadParams","inputs": []},
+  {"type": "error","name": "FloorWouldDrop","inputs": []},
+  {"type": "error","name": "Slippage","inputs": []},
+  {"type": "error","name": "SoldOut","inputs": []},
+  {"type": "error","name": "Underpaid","inputs": []},
+] as const;
+
+export const NGU_LAUNCHER_ABI = [
+  {"type": "function","name": "allTokens","inputs": [{"name": "","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "","type": "address","internalType": "address"}],"stateMutability": "view"},
+  {"type": "function","name": "allTokensLength","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "fanoutSink","inputs": [],"outputs": [{"name": "","type": "address","internalType": "address"}],"stateMutability": "view"},
+  {"type": "function","name": "isNguToken","inputs": [{"name": "","type": "address","internalType": "address"}],"outputs": [{"name": "","type": "bool","internalType": "bool"}],"stateMutability": "view"},
+  {"type": "function","name": "launch","inputs": [{"name": "name","type": "string","internalType": "string"},{"name": "symbol","type": "string","internalType": "string"},{"name": "maxSupply","type": "uint256","internalType": "uint256"},{"name": "basePrice","type": "uint256","internalType": "uint256"},{"name": "stepBps","type": "uint16","internalType": "uint16"},{"name": "betaBps","type": "uint16","internalType": "uint16"},{"name": "seedQty","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "token","type": "address","internalType": "address"}],"stateMutability": "payable"},
+] as const;
