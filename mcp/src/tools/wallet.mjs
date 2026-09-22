@@ -4,21 +4,24 @@ import { ERC20_ABI } from '../abis.mjs';
 import { fmtUsdg, fmtXMoney } from '../money.mjs';
 import { reply } from '../approval.mjs';
 import { agentWallet, createAgentWallet, signStep, privyConfigured, NOT_CONFIGURED } from '../privy.mjs';
+import { actorLabel, currentActor } from '../actor.mjs';
 import { record, recorded, submitRaw } from '../idempotency.mjs';
 
 const CUSTODY_NOTE =
-  'This wallet is held by Privy on the app\'s behalf, not by you in a browser. Anything that can reach '
-  + 'this connector can spend it. Fund it with what an agent should be trusted with and no more.';
+  'This wallet is held by Privy, not by you in a browser. Signing in with X is what reaches it, so it is as '
+  + 'safe as that login and no safer. Keep in it what you are willing to have an agent spend.';
+/** Whose wallet this call is about, said plainly, because two people must never see each other\'s. */
+const whose = () => (currentActor().kind === 'user' ? `${actorLabel()}'s wallet` : 'the operator wallet');
 
 export const tools = [
   {
     name: 'wallet_status',
-    description: 'The agent wallet: whether Privy is configured, the address it signs as, and what it holds on both chains. Read-only.',
+    description: 'Your wallet on this connector: whether Privy is configured, the address it signs as, and what it holds on both chains. Signed in with X, that is your own wallet and nobody else can reach it. Read-only.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
       if (!privyConfigured()) return reply(NOT_CONFIGURED, { configured: false, wallet: null });
       const w = await agentWallet();
-      if (!w) return reply('Privy is configured but no agent wallet exists yet. Call wallet_create to make one.', { configured: true, wallet: null });
+      if (!w) return reply(`Privy is configured but there is no wallet for ${currentActor().kind === 'user' ? actorLabel() : 'the operator'} yet. Call wallet_create to make one.`, { configured: true, wallet: null, actor: currentActor().kind });
       const [native, usdg, xm] = await Promise.all([
         xgas.getBalance({ address: w.address }),
         parent.readContract({ address: L3.usdg, abi: ERC20_ABI, functionName: 'balanceOf', args: [w.address] }),
@@ -26,12 +29,12 @@ export const tools = [
       ]);
       const data = {
         configured: true,
-        wallet: { address: w.address, id: w.id, source: w.source },
+        wallet: { address: w.address, id: w.id, source: w.source, owner: w.owner || null },
         balances: { xgas_native_xmoney: formatEther(native), parent_usdg: fmtUsdg(usdg), parent_xmoney: fmtXMoney(xm) },
         custody: CUSTODY_NOTE,
       };
       return reply(
-        `Agent wallet ${w.address} (Privy, from ${w.source}).\n`
+        `${whose()}: ${w.address} (Privy, ${w.source}).\n`
         + `  xGas L4: ${formatEther(native)} $xMoney — this pays gas for everything on 466301\n`
         + `  Parent:  ${fmtUsdg(usdg)} USDG, ${fmtXMoney(xm)} xMoney\n${CUSTODY_NOTE}`,
         data,
@@ -41,7 +44,7 @@ export const tools = [
 
   {
     name: 'wallet_create',
-    description: 'Create the agent\'s Privy wallet, once. Returns the address to fund. Does nothing if one already exists.',
+    description: 'Create your Privy wallet on this connector, once. Returns the address to fund. Does nothing if you already have one.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
       if (!privyConfigured()) return reply(NOT_CONFIGURED, { configured: false });
@@ -49,7 +52,7 @@ export const tools = [
       return reply(
         w.created
           ? `Created ${w.address}.\nIt holds nothing yet. It needs native $xMoney on xGas (466301) for gas before it can do anything there, and ETH on the parent (4663) for anything on that side.\n${CUSTODY_NOTE}`
-          : `A wallet already exists: ${w.address}. Nothing created.`,
+          : `You already have one: ${w.address}. Nothing created.`,
         w,
       );
     },
@@ -58,7 +61,7 @@ export const tools = [
   {
     name: 'wallet_execute',
     description:
-      'Run a prepare_* tool and actually execute it with the agent wallet: Privy signs each step, this connector broadcasts it. '
+      'Run a prepare_* tool and actually execute it with your own wallet: Privy signs each step, this connector broadcasts it. '
       + 'The approval terms are returned with the result, and confirm must be true — there is no way to undo a sent transaction.',
     inputSchema: {
       type: 'object',
@@ -74,7 +77,7 @@ export const tools = [
     async handler({ tool, args = {}, idempotency_key, confirm }) {
       if (!privyConfigured()) return reply(NOT_CONFIGURED, { configured: false });
       const w = await agentWallet();
-      if (!w) return reply('No agent wallet yet. Call wallet_create first.', { wallet: null });
+      if (!w) return reply('No wallet yet. Call wallet_create first.', { wallet: null });
 
       const prior = recorded(idempotency_key);
       if (prior) return reply(`Already executed under this key; nothing re-sent. ${JSON.stringify(prior.hashes || prior.hash)}`, { ...prior, replayed: true });

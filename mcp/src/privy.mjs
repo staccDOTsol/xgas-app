@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { clientFor, PARENT_CHAIN_ID, XGAS_CHAIN_ID } from './config.mjs';
+import { actorKey, actorLabel, currentActor } from './actor.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,29 +47,46 @@ async function client() {
   return _client;
 }
 
-function stored() {
-  try { return JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8')); } catch { return null; }
+/**
+ * One file, one wallet per caller: `operator` for whoever runs the connector, `x:<id>` for each person
+ * signed in with X. The old single-wallet file is read as the operator's, so nothing is orphaned.
+ */
+function book() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(WALLET_FILE, 'utf8'));
+    return raw && raw.wallets ? raw : { wallets: raw && raw.id ? { operator: raw } : {} };
+  } catch { return { wallets: {} }; }
 }
-function store(rec) {
-  fs.writeFileSync(WALLET_FILE, JSON.stringify(rec, null, 2), { mode: 0o600 });
+function put(key, rec) {
+  const b = book();
+  b.wallets[key] = rec;
+  fs.writeFileSync(WALLET_FILE, JSON.stringify(b, null, 2), { mode: 0o600 });
   return rec;
 }
 
-/** The wallet this connector acts as. PRIVY_WALLET_ID pins a specific one. */
+/**
+ * The wallet the current caller signs as. A signed-in person gets their own; the operator gets the one
+ * pinned by PRIVY_WALLET_ID, or the one in the local store.
+ */
 export async function agentWallet() {
-  if (process.env.PRIVY_WALLET_ID && process.env.PRIVY_WALLET_ADDRESS) {
-    return { id: process.env.PRIVY_WALLET_ID, address: process.env.PRIVY_WALLET_ADDRESS, source: 'environment' };
+  const a = currentActor();
+  const key = actorKey(a);
+  const rec = book().wallets[key];
+  if (rec) return { ...rec, source: a.kind === 'user' ? 'yours, from your X sign-in' : 'local store', owner: key };
+  if (a.kind !== 'user' && process.env.PRIVY_WALLET_ID && process.env.PRIVY_WALLET_ADDRESS) {
+    return { id: process.env.PRIVY_WALLET_ID, address: process.env.PRIVY_WALLET_ADDRESS, source: 'environment', owner: 'operator' };
   }
-  const rec = stored();
-  return rec ? { ...rec, source: 'local store' } : null;
+  return null;
 }
 
 export async function createAgentWallet() {
   const existing = await agentWallet();
   if (existing) return { ...existing, created: false };
+  const a = currentActor();
   const p = await client();
   const w = await p.walletApi.create({ chainType: 'ethereum' });
-  return { ...store({ id: w.id, address: w.address, createdAt: new Date().toISOString() }), created: true };
+  const rec = put(actorKey(a), { id: w.id, address: w.address, owner: actorKey(a), label: actorLabel(a), createdAt: new Date().toISOString() });
+  return { ...rec, source: a.kind === 'user' ? 'yours, from your X sign-in' : 'local store', created: true };
 }
 
 /**
@@ -78,7 +96,7 @@ export async function createAgentWallet() {
  */
 export async function signStep({ chainId, to, data, value }) {
   const wallet = await agentWallet();
-  if (!wallet) throw new Error('No agent wallet yet. Call wallet_create first.');
+  if (!wallet) throw new Error('No wallet yet for this caller. Call wallet_create first.');
   const cid = Number(chainId);
   if (cid !== PARENT_CHAIN_ID && cid !== XGAS_CHAIN_ID) throw new Error(`Refusing to sign for unknown chain ${cid}.`);
   const pub = clientFor(cid);

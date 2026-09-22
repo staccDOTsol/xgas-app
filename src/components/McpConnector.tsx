@@ -78,8 +78,8 @@ export const McpConnector: React.FC = () => {
         <p className="mt-3 text-sm sm:text-base text-slate-400 max-w-3xl leading-relaxed">
           {info ? info.tool_count : '49'} tools over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
           and X Money swaps that land an asset on any of 39 EVM chains. Ask in words; it quotes, it prepares, and your own
-          wallet signs. Give it Privy credentials and it can run an agent wallet of its own instead, which is the one part
-          of this that is custodial, and the one part a public URL will not hand out without a token.
+          wallet signs. Or sign in with X and it runs a wallet of your own, held by Privy: the one custodial part of this, and
+          the one part nobody reaches without being signed in as you.
         </p>
 
         <div className="mt-6 grid gap-3 md:grid-cols-2">

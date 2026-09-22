@@ -1,6 +1,6 @@
 {
   "name": "xgas-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "MCP connector for the xGas Orbit L4 and X Money: vault bridge, P2P OTC desk, NGU curves, fiat ramps, and cross-chain X Money swaps. Prepares transactions for your own wallet to sign; with Privy configured it can also sign as an agent wallet of its own.",
   "bin": {

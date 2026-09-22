@@ -174,12 +174,14 @@ An agent has no browser and no wallet, so `prepare_*` on its own is a dead end f
 - `wallet_execute` : run any `prepare_*` tool and actually send it, with `confirm: true` and an idempotency key
 
 Privy signs; this connector broadcasts (Privy's own RPC has never heard of chain 466301).
-Anything that can call these tools can spend that wallet, so they are off the browser surface
-entirely, and off the hosted endpoint unless the caller presents `MCP_AUTH_TOKEN`. Fund the
-address with what an agent should be trusted with and no more.
+
+Over stdio there is one caller and it gets one wallet. Over HTTP there are as many callers as
+there are people signed in, and each gets their own: the X sign-in is the gate, the wallet is
+filed under that X id, and no tool can reach anyone else's. Signed out, the HTTP surface is
+reads and prepares only. `MCP_AUTH_TOKEN` is for our own tooling, not for users.
 
 | Variable | Use |
 |---|---|
 | `PRIVY_APP_ID`, `PRIVY_APP_SECRET` | turn the wallet tools on |
 | `PRIVY_WALLET_ID`, `PRIVY_WALLET_ADDRESS` | pin a specific wallet instead of the local store |
-| `MCP_AUTH_TOKEN` | on a host: the bearer token that unlocks `wallet_*` over HTTP |
+| `MCP_AUTH_TOKEN` | operator token for our own tooling; users use their X sign-in instead |
