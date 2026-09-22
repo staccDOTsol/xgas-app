@@ -231,7 +231,7 @@ export const McpConnector: React.FC = () => {
           Hand this chain to your model.
         </h1>
         <p className="mt-3 text-sm sm:text-base text-slate-400 max-w-3xl leading-relaxed">
-          {info ? info.tool_count : '49'} tools over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
+          {info ? info.tool_count : '48'} tools over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
           and X Money swaps that land an asset on any of 39 EVM chains. Ask in words; it quotes, it prepares, and your own
           wallet signs. Or sign in with X and it runs a wallet of your own, held by Privy: the one custodial part of this, and
           the one part nobody reaches without being signed in as you.
