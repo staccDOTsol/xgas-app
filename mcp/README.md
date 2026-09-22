@@ -4,8 +4,9 @@ An MCP server over the xGas stack: the USDG vault bridge on Robinhood Chain (466
 the P2P OTC desk and NGU curves on xGas Orbit L4 (466301), a teller layer that routes
 between dollars and $xMoney, and XSwap: X Money in, anything on any EVM chain out, and the other way round.
 
-49 tools, all grounded in a deployment file and the live chains. Nothing is custodial:
-the connector prepares transactions and your own wallet signs them.
+52 tools, all grounded in a deployment file and the live chains. By default nothing is
+custodial: the connector prepares transactions and your own wallet signs them. The three
+`wallet_*` tools are the deliberate exception, and they only exist when you configure Privy.
 
 ## Use it without cloning
 
@@ -162,3 +163,23 @@ Known unrelated breakage: `npm run lint` fails with 11 errors, all in the orphan
 `src/components/OrbitL3Explorer.tsx`, which still imports `l3Addresses`,
 `loadL3Info`, `orbitL3RpcUrl` and `XMONEY_USD_L2` from before the L3→L4 rename.
 Nothing imports the component.
+
+## The agent wallet (optional, and custodial on purpose)
+
+An agent has no browser and no wallet, so `prepare_*` on its own is a dead end for one. Set
+`PRIVY_APP_ID` and `PRIVY_APP_SECRET` and three more tools appear:
+
+- `wallet_status` : the address it signs as, and what it holds on both chains
+- `wallet_create` : make the wallet once, then fund it
+- `wallet_execute` : run any `prepare_*` tool and actually send it, with `confirm: true` and an idempotency key
+
+Privy signs; this connector broadcasts (Privy's own RPC has never heard of chain 466301).
+Anything that can call these tools can spend that wallet, so they are off the browser surface
+entirely, and off the hosted endpoint unless the caller presents `MCP_AUTH_TOKEN`. Fund the
+address with what an agent should be trusted with and no more.
+
+| Variable | Use |
+|---|---|
+| `PRIVY_APP_ID`, `PRIVY_APP_SECRET` | turn the wallet tools on |
+| `PRIVY_WALLET_ID`, `PRIVY_WALLET_ADDRESS` | pin a specific wallet instead of the local store |
+| `MCP_AUTH_TOKEN` | on a host: the bearer token that unlocks `wallet_*` over HTTP |

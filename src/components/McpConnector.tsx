@@ -78,7 +78,8 @@ export const McpConnector: React.FC = () => {
         <p className="mt-3 text-sm sm:text-base text-slate-400 max-w-3xl leading-relaxed">
           {info ? info.tool_count : '49'} tools over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
           and X Money swaps that land an asset on any of 39 EVM chains. Ask in words; it quotes, it prepares, and your own
-          wallet signs. It holds no keys and it never moves money on its own.
+          wallet signs. Give it Privy credentials and it can run an agent wallet of its own instead, which is the one part
+          of this that is custodial, and the one part a public URL will not hand out without a token.
         </p>
 
         <div className="mt-6 grid gap-3 md:grid-cols-2">
@@ -107,7 +108,7 @@ export const McpConnector: React.FC = () => {
         {[
           { icon: <Search className="w-4 h-4 text-cyan-400" />, head: '1 · it reads', body: 'Balances, NAV, the order book, your open swaps, a solver\'s record. Straight off the chains, no index in between.' },
           { icon: <KeyRound className="w-4 h-4 text-emerald-400" />, head: '2 · it prepares', body: 'Every write comes back unsigned, with the exact amounts, every fee, the net, the timeline and what cannot be undone. Your wallet signs it, or nothing happens.' },
-          { icon: <Zap className="w-4 h-4 text-amber-400" />, head: '3 · it relays', body: 'Signed transactions go out with an idempotency key, so a retry returns the first hash instead of sending twice.' },
+          { icon: <Zap className="w-4 h-4 text-amber-400" />, head: '3 · it relays', body: 'Signed transactions go out with an idempotency key, so a retry returns the first hash instead of sending twice. An agent with no browser can let its own Privy wallet sign that step, if you have given it one.' },
         ].map(c => (
           <div key={c.head} className="rounded-2xl border border-[#1e2538] bg-[#0b0e17] p-4">
             <div className="flex items-center gap-2 mb-2">{c.icon}<span className="text-xs font-black uppercase tracking-wide text-slate-300 font-mono">{c.head}</span></div>
