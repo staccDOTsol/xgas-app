@@ -2,7 +2,7 @@ import { encodeFunctionData, isAddress } from 'viem';
 import { L4, XGAS_CHAIN_ID, xgas, ZERO, BURN_BPS, FANOUT_RAKE_BPS, TRADE_TIMEOUT_S } from '../config.mjs';
 import { ESCROW_ABI } from '../abis.mjs';
 import { expectedCents, fmtXMoney, parseXMoney, rateToUsd, usd } from '../money.mjs';
-import { prepared, renderApproval, reply } from '../approval.mjs';
+import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitRaw } from '../idempotency.mjs';
 
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
@@ -12,6 +12,19 @@ const SIDE = ['ask', 'bid'];
 const read = (fn, args = []) => xgas.readContract({ address: L4.escrow, abi: ESCROW_ABI, functionName: fn, args });
 
 /** fiatRateBps from either an explicit bps number or a friendlier "$0.99" style price. */
+/**
+ * The maker fields post_ask and post_bid both take. Shared: these two are the same
+ * form on opposite sides, and post_bid shipped every one of them bare while post_ask
+ * described them. Each tool still says its own xmoney_amount and from.
+ */
+export const makerFields = {
+  maker_x_handle: { type: 'string', description: 'Your X handle, without the @. On this desk your handle is the commitment.' },
+  usd_price: { type: 'string', description: 'USD per $xMoney, e.g. "1.00". Must land on whole basis points (0.0001 USD steps).' },
+  fiat_rate_bps: { type: 'integer', description: 'Alternative to usd_price, in basis points: 10000 = $1.00. Give this or usd_price.' },
+  min_amount: { type: 'string', description: 'Minimum $xMoney per trade. Must be greater than zero.' },
+  max_amount: { type: 'string', description: 'Maximum $xMoney per trade. Must be at least min_amount.' },
+};
+
 function rateBps({ fiat_rate_bps, usd_price }) {
   if (fiat_rate_bps !== undefined && fiat_rate_bps !== null) return BigInt(fiat_rate_bps);
   if (usd_price === undefined || usd_price === null) throw new Error('Give fiat_rate_bps or usd_price.');
@@ -155,12 +168,8 @@ export const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        maker_x_handle: { type: 'string', description: 'Your X handle, without the @.' },
+        ...makerFields,
         xmoney_amount: { type: 'string', description: 'Total $xMoney to escrow.' },
-        usd_price: { type: 'string', description: 'USD per $xMoney, e.g. "1.00". Whole basis points.' },
-        fiat_rate_bps: { type: 'integer', description: 'Alternative to usd_price: 10000 = $1.00.' },
-        min_amount: { type: 'string', description: 'Minimum $xMoney per trade.' },
-        max_amount: { type: 'string', description: 'Maximum $xMoney per trade.' },
         from: { ...addr, description: 'The address that will sign and escrow.' },
       },
       required: ['maker_x_handle', 'xmoney_amount', 'min_amount', 'max_amount', 'from'],
@@ -208,13 +217,9 @@ export const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        maker_x_handle: { type: 'string' },
+        ...makerFields,
         xmoney_amount: { type: 'string', description: 'Maximum $xMoney you want to buy.' },
-        usd_price: { type: 'string' },
-        fiat_rate_bps: { type: 'integer' },
-        min_amount: { type: 'string' },
-        max_amount: { type: 'string' },
-        from: addr,
+        from: { ...addr, description: 'The address that will sign and settle. Nothing is escrowed on this side.' },
       },
       required: ['maker_x_handle', 'xmoney_amount', 'min_amount', 'max_amount', 'from'],
       additionalProperties: false,
@@ -448,7 +453,7 @@ export const tools = [
     description: 'Broadcast any signed OTC transaction on xGas (post, fill, release, reclaim, cancel).',
     inputSchema: {
       type: 'object',
-      properties: { signed_tx: { type: 'string' }, idempotency_key: { type: 'string' } },
+      properties: { ...submitFields },
       required: ['signed_tx', 'idempotency_key'],
       additionalProperties: false,
     },

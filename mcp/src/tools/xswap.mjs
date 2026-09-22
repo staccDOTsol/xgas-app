@@ -12,6 +12,18 @@ import { submitBatch, submitRaw } from '../idempotency.mjs';
  */
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const b32 = { type: 'string', pattern: '^0x[a-fA-F0-9]{64}$' };
+
+/**
+ * How-much-of-what, shared by every xswap tool. One copy, because these four fields
+ * drifted apart once already: quote_xswap described them and the two prepare_* tools,
+ * the ones that actually build the transaction, shipped them bare.
+ */
+const assetFields = {
+  amount: { type: 'string', description: 'How much to deliver, in whole units (e.g. "1.5"). For an ERC-20 this needs decimals alongside it; for an NFT use token_id instead.' },
+  decimals: { type: 'number', description: "Decimals of that ERC-20, required alongside amount. The connector never guesses a far chain's decimals." },
+  amount_base_units: { type: 'string', description: 'The amount as a base-units integer, instead of amount + decimals. Use this when you already know the exact integer.' },
+  token_id: { type: 'string', description: 'For an NFT: the token id to deliver. Use instead of amount.' },
+};
 const BPS = 10_000n;
 
 // The destinations the solver network already reaches, one dRPC key wide. Kept in lockstep with
@@ -166,10 +178,7 @@ export const tools = [
         xmoney_amount: { type: 'string', description: 'X Money you are willing to spend (the escrow, and your worst case).' },
         chain: { type: 'string', description: 'Destination chain: slug or id, e.g. "base" or 8453.' },
         asset: { type: 'string', description: '"native" or a token address on that chain. Default native.' },
-        amount: { type: 'string', description: 'How much of that asset to deliver.' },
-        decimals: { type: 'number', description: 'Decimals of that ERC-20 (required with amount for a token).' },
-        amount_base_units: { type: 'string', description: 'Amount in base units, instead of amount + decimals.' },
-        token_id: { type: 'string', description: 'For an NFT: the token id to deliver.' },
+        ...assetFields,
         to: addr,
       },
       required: ['xmoney_amount', 'chain'],
@@ -200,10 +209,7 @@ export const tools = [
         xmoney_amount: { type: 'string', description: 'X Money to escrow: your ceiling, not your price.' },
         chain: { type: 'string', description: 'Destination chain: slug or id.' },
         asset: { type: 'string', description: '"native" or a token address on that chain. Default native.' },
-        amount: { type: 'string' },
-        decimals: { type: 'number' },
-        amount_base_units: { type: 'string' },
-        token_id: { type: 'string' },
+        ...assetFields,
         to: { ...addr, description: 'Who receives it over there.' },
         deadline_minutes: { type: 'number', description: 'Refund is yours after this. Default 60.' },
         id: { ...b32, description: 'Reuse an id you were handed, to re-prepare the same intent.' },
@@ -267,10 +273,7 @@ export const tools = [
         want_xmoney: { type: 'string', description: 'The least X Money you will take. Bidding goes up from here.' },
         chain: { type: 'string', description: 'The chain your asset is on.' },
         asset: { type: 'string', description: '"native" or a token address. Default native.' },
-        amount: { type: 'string' },
-        decimals: { type: 'number' },
-        amount_base_units: { type: 'string' },
-        token_id: { type: 'string' },
+        ...assetFields,
         deadline_minutes: { type: 'number', description: 'Everything unwinds after this. Default 120.' },
         id: b32,
       },

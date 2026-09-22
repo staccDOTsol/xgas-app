@@ -69,3 +69,13 @@ export function reply(text, data) {
 }
 
 export const fail = (text) => ({ content: [{ type: 'text', text }], isError: true });
+
+/**
+ * The two fields every submit_* tool takes. Shared, because the wording drifted:
+ * xswap and wallet described them and bridge, otc and ngu shipped them bare, which
+ * left a foreign model guessing at the one argument that makes a retry safe.
+ */
+export const submitFields = {
+  signed_tx: { type: 'string', description: 'One raw signed transaction, hex, exactly as returned by your signer.' },
+  idempotency_key: { type: 'string', description: 'Your own key for this submission. Strongly recommended: a repeat with the same key returns the first result instead of sending the transaction twice.' },
+};

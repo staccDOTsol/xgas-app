@@ -2,7 +2,7 @@ import { encodeFunctionData, isAddress } from 'viem';
 import { XGAS_CHAIN_ID, xgas, nguLauncher, ZERO } from '../config.mjs';
 import { NGU_TOKEN_ABI, NGU_LAUNCHER_ABI, NGU_LIMITS } from '../abis.mjs';
 import { fmtXMoney, parseXMoney } from '../money.mjs';
-import { prepared, renderApproval, reply } from '../approval.mjs';
+import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitRaw } from '../idempotency.mjs';
 
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
@@ -348,7 +348,7 @@ export const tools = [
     description: 'Broadcast any signed NGU transaction on xGas (buy, sell, donate, launch).',
     inputSchema: {
       type: 'object',
-      properties: { signed_tx: { type: 'string' }, idempotency_key: { type: 'string' } },
+      properties: { ...submitFields },
       required: ['signed_tx', 'idempotency_key'],
       additionalProperties: false,
     },

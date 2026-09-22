@@ -5,7 +5,7 @@ import {
 } from '../config.mjs';
 import { ERC20_ABI, VAULT_ABI, ARBSYS_ABI, ROLLUP_ABI } from '../abis.mjs';
 import { fmtUsdg, fmtXMoney, parseUsdg, parseXMoney } from '../money.mjs';
-import { prepared, renderApproval, reply } from '../approval.mjs';
+import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitBatch, submitRaw } from '../idempotency.mjs';
 
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
@@ -346,7 +346,7 @@ export const tools = [
     description: 'Broadcast the signed ArbSys withdrawal on xGas.',
     inputSchema: {
       type: 'object',
-      properties: { signed_tx: { type: 'string' }, idempotency_key: { type: 'string' } },
+      properties: { ...submitFields },
       required: ['signed_tx', 'idempotency_key'],
       additionalProperties: false,
     },
@@ -463,7 +463,7 @@ export const tools = [
     description: 'Broadcast the signed exitRollup on the parent chain.',
     inputSchema: {
       type: 'object',
-      properties: { signed_tx: { type: 'string' }, idempotency_key: { type: 'string' } },
+      properties: { ...submitFields },
       required: ['signed_tx', 'idempotency_key'],
       additionalProperties: false,
     },
