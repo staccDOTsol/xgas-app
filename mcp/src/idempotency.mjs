@@ -11,6 +11,14 @@ let store = {};
 try { if (fs.existsSync(FILE)) store = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { store = {}; }
 const save = () => { try { fs.writeFileSync(FILE, JSON.stringify(store)); } catch { /* best effort */ } };
 
+/** Record a completed multi-step execution under a key, so a retry returns it instead of re-sending. */
+export function record(key, value) {
+  if (!key) return value;
+  store[key] = { ...value, at: new Date().toISOString() };
+  save();
+  return store[key];
+}
+
 export function recorded(key) {
   return key ? store[key] || null : null;
 }

@@ -40,5 +40,12 @@ export function createServer({ allow = () => true, name = 'xgas-mcp' } = {}) {
   return { server, tools };
 }
 
-/** What a public URL may serve: everything except the tool that spends the host's own gas. */
-export const isHostable = (name) => name !== 'claim_exit';
+/**
+ * What a public URL may serve. Two things stay off it by default:
+ *   claim_exit, which spends this host's own gas, and
+ *   wallet_*, which signs with the agent's Privy key — anything that can call those can spend that wallet.
+ * A request that presents the connector's bearer token gets the wallet tools as well, which is how the
+ * agent wallet reaches a hosted connector without being handed to the whole internet.
+ */
+export const isHostable = (name) => name !== 'claim_exit' && !name.startsWith('wallet_');
+export const hostableFor = (authed) => (authed ? (name) => name !== 'claim_exit' : isHostable);

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { createPublicClient, createWalletClient, http as viemHttp, parseAbi, formatEther, encodeFunctionData, decodeFunctionResult, decodeEventLog } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ALL_TOOLS, TOOLS_BY_NAME, isBrowserSafe, unwrap } from './mcp/src/registry.mjs';
-import { createServer as createMcpServer, isHostable, VERSION as MCP_VERSION } from './mcp/src/server.mjs';
+import { createServer as createMcpServer, isHostable, hostableFor, VERSION as MCP_VERSION } from './mcp/src/server.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -399,6 +399,15 @@ app.post('/api/connector/:tool', async (req, res) => {
 // the user has already signed.
 // ---------------------------------------------------------------------------
 const MCP_TOOL_COUNT = ALL_TOOLS.filter((t) => isHostable(t.name)).length;
+// The agent's Privy wallet reaches the hosted connector only behind this token. No token set on the host
+// means no wallet tools over HTTP at all, which is the safe default for a public URL.
+const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
+const authed = (req) => {
+  if (!MCP_AUTH_TOKEN) return false;
+  const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(req.headers['x-mcp-token'] || '');
+  const a = Buffer.from(given), b = Buffer.from(MCP_AUTH_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
 
 app.all('/mcp', async (req, res) => {
   if (req.method === 'GET' || req.method === 'DELETE') {
@@ -406,7 +415,7 @@ app.all('/mcp', async (req, res) => {
     return res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'This endpoint is stateless: POST JSON-RPC to it.' }, id: null });
   }
   if (req.method !== 'POST') return res.status(405).end();
-  const { server } = createMcpServer({ allow: isHostable });
+  const { server } = createMcpServer({ allow: hostableFor(authed(req)) });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
   try {
@@ -427,6 +436,9 @@ app.get('/api/mcp', (_req, res) => {
     npm: 'https://www.npmjs.com/package/xgas-mcp',
     tool_count: MCP_TOOL_COUNT,
     custodial: false,
+    // The wallet tools exist, and the hosted endpoint serves them only to a caller with the token.
+    wallet_tools: ALL_TOOLS.filter((t) => t.name.startsWith('wallet_')).map((t) => t.name),
+    wallet_tools_over_http: MCP_AUTH_TOKEN ? 'with an Authorization: Bearer token' : 'disabled on this host',
     tools: ALL_TOOLS.filter((t) => isHostable(t.name)).map(({ name, description }) => ({
       name,
       description,

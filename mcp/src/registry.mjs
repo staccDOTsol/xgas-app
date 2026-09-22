@@ -6,9 +6,10 @@ import { tools as bridgeTools } from './tools/bridge.mjs';
 import { tools as otcTools } from './tools/otc.mjs';
 import { tools as nguTools } from './tools/ngu.mjs';
 import { tools as rampTools } from './tools/ramps.mjs';
+import { tools as walletTools } from './tools/wallet.mjs';
 import { tools as xswapTools } from './tools/xswap.mjs';
 
-export const ALL_TOOLS = [...chainTools, ...bridgeTools, ...otcTools, ...nguTools, ...rampTools, ...xswapTools];
+export const ALL_TOOLS = [...chainTools, ...bridgeTools, ...otcTools, ...nguTools, ...rampTools, ...xswapTools, ...walletTools];
 
 const seen = new Set();
 const dupes = ALL_TOOLS.map((t) => t.name).filter((n) => (seen.has(n) ? true : (seen.add(n), false)));
@@ -21,7 +22,12 @@ export const TOOLS_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
  * inert until the user's wallet signs it, and the browser sends through the wallet,
  * so the submit relays stay off the public surface.
  */
-export const isBrowserSafe = (name) => !name.startsWith('submit_') && name !== 'claim_exit';
+export const isBrowserSafe = (name) =>
+  !name.startsWith('submit_')
+  && name !== 'claim_exit'
+  // The wallet tools sign with the agent's Privy key. Exposing them over HTTP would
+  // let anyone who can reach the site spend that wallet.
+  && !name.startsWith('wallet_');
 
 /** The JSON a caller gets back: readable text plus the structured payload, if any. */
 export function unwrap(result) {
