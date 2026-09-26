@@ -1,4 +1,4 @@
-app = "xgas-app"
+app = "xgas"
 primary_region = "iad"
 
 [build]
@@ -26,5 +26,5 @@ primary_region = "iad"
 # The Orbit L4 sequencer (anvil) keeps its chain state + bridge ledger here. Exactly ONE machine
 # may run this app: the L4 state is in-process, so a second machine would be a second, diverging chain.
 [mounts]
-  source = "xgas_l3_data"
+  source = "xgas_data"
   destination = "/data"

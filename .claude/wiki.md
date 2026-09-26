@@ -28,3 +28,7 @@ server.js tracks L2ToL1Tx events, computes sendCount from the latest confirmed a
 ## XMoney owner is a 24h TimelockController (0x70A0…B47B) — proposers: chain owner + 0x26E8…5158
 Any owner call on XMoney (setBridgeSystem, setL3RetryableParams) must be scheduled on the timelock and executed after 86400s; executor role is open (address(0)). Source, chain-info.json and RUN-A-NODE.md are served from /public on xgas.dev; /das/* proxies the AnyTrust REST server for third-party nodes.
 **Why:** closes the "owner can redirect deposits" vector raised in the Holder HQ review without freezing the retryable gas params.
+
+## Web app moved to Fly app `xgas` (personal org of jarett@dcssquared.com) on 2026-09-26
+Old `xgas-app` and `xgas-l3` live in a Fly account this machine's flyctl can't reach. New app `xgas` (volume `xgas_data`) talks to the L4 over the public https://xgas-l3.fly.dev since `.internal` DNS doesn't cross orgs (L4_RPC_INTERNAL/DAS_REST_INTERNAL secrets). The /das proxy is broken because :9877 isn't public on xgas-l3. xgas.dev DNS lives in Vercel (`vercel dns ls xgas.dev`) → 66.241.125.193 / 2a09:8280:1::19c:3fa5:0.
+**Why:** X sign-in needed X_CLIENT_SECRET set and the old account was unreachable.
