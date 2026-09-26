@@ -128,6 +128,14 @@ function fmtCents(c: bigint): string {
 /** Exact ETH, every significant digit kept. */
 const fmtEth = (wei: bigint) => formatEther(wei);
 
+// Percent buttons. Keep a little ETH back for gas, and round down to 6 decimals so the amount reads cleanly.
+const PCTS = [5, 10, 25, 50, 90] as const;
+const GAS_KEEP_WEI = 50_000_000_000_000n; // 0.00005 ETH, several Robinhood Chain transactions
+const pctOf = (base: bigint, pct: number) => {
+  const raw = (base * BigInt(pct)) / 100n;
+  return raw - (raw % 1_000_000_000_000n);
+};
+
 /** Dollars owed for `wei` at `priceCents` per ETH, rounded down to the cent (the contract stores the exact figure on the trade). */
 const centsFor = (wei: bigint, priceCents: bigint) => (wei * priceCents) / WEI_PER_ETH;
 
@@ -479,6 +487,32 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   // --- post order ----------------------------------------------------------------
   const [postSide, setPostSide] = useState<'sell' | 'buy'>('sell');
   const [postPrice, setPostPrice] = useState('');
+  // Fair ETH/USD reference (median of public spot tickers, via the host). Prefills an empty price once.
+  const [fair, setFair] = useState<{ usd: string; cents: bigint; method: string; at: number } | null>(null);
+  const [fairUsed, setFairUsed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const tick = async () => {
+      try {
+        const r = await fetch('/api/robinhood/eth-price');
+        if (!r.ok) return;
+        const j = await r.json();
+        if (live && j?.cents) setFair({ usd: j.usd, cents: BigInt(j.cents), method: j.method, at: Date.parse(j.at) || Date.now() });
+      } catch { /* keep the last value */ }
+    };
+    tick();
+    const t = setInterval(tick, 30_000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+  useEffect(() => {
+    if (fair && !fairUsed && postPrice === '') { setPostPrice(fair.usd); setFairUsed(true); }
+  }, [fair, fairUsed, postPrice]);
+  /** "+1.23% vs fair" for a price in cents, or null without a reference. */
+  const vsFair = (cents: bigint | null) => {
+    if (!fair || cents == null || fair.cents <= 0n) return null;
+    const bps = Number(((cents - fair.cents) * 10000n) / fair.cents);
+    return `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}% vs fair`;
+  };
   const [postAmt, setPostAmt] = useState('');
   const [postMin, setPostMin] = useState('');
   const [postMax, setPostMax] = useState('');
@@ -614,7 +648,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <div className="min-w-[88px]">
             <div className="text-white font-black text-sm">{fmtCents(o.priceCentsPerEth)}</div>
-            <div className="text-[10px] text-slate-500">per ETH</div>
+            <div className="text-[10px] text-slate-500">per ETH{vsFair(o.priceCentsPerEth) ? <>, {vsFair(o.priceCentsPerEth)}</> : null}</div>
           </div>
           <div className="flex-1 min-w-[140px]">
             <div className="text-slate-200">{fmtEth(o.remainingEth)} ETH <span className="text-slate-500">{isSell ? 'left' : 'still wanted'}</span></div>
@@ -1007,8 +1041,26 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
             <button onClick={() => setPostSide('buy')} className={`${btn} ${postSide === 'buy' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400'}`}>Buy ETH with X Money dollars</button>
           </div>
           <div className="grid sm:grid-cols-2 gap-3">
-            <label className="space-y-1"><span className="text-slate-400">Price, US dollars per 1 ETH</span><input className={input} inputMode="decimal" placeholder="3456.78" value={postPrice} onChange={e => setPostPrice(e.target.value)} /></label>
-            <label className="space-y-1"><span className="text-slate-400">{postSide === 'sell' ? 'ETH to sell (escrowed now)' : 'ETH wanted'}</span><input className={input} inputMode="decimal" placeholder="0.5" value={postAmt} onChange={e => setPostAmt(e.target.value)} /></label>
+            <label className="space-y-1"><span className="text-slate-400">Price, US dollars per 1 ETH</span><input className={input} inputMode="decimal" placeholder={fair ? fair.usd : '3456.78'} value={postPrice} onChange={e => setPostPrice(e.target.value)} />
+              {fair ? (
+                <span className="block text-[10px] text-slate-500">
+                  Fair price ${fair.usd} ({fair.method}, {Math.max(0, now - Math.floor(fair.at / 1000))} s ago){vsFair(parseUsdCents(postPrice)) ? <>. Yours: <span className="text-slate-300">{vsFair(parseUsdCents(postPrice))}</span></> : null}
+                  {' '}<button type="button" className="underline text-cyan-400" onClick={() => setPostPrice(fair.usd)}>use fair price</button>
+                </span>
+              ) : <span className="block text-[10px] text-slate-500">Loading a fair price reference…</span>}
+            </label>
+            <label className="space-y-1"><span className="text-slate-400">{postSide === 'sell' ? 'ETH to sell (escrowed now)' : 'ETH wanted'}</span><input className={input} inputMode="decimal" placeholder="0.5" value={postAmt} onChange={e => setPostAmt(e.target.value)} />
+              {postSide === 'sell' && ethBal != null && (
+                <span className="flex flex-wrap gap-1 pt-1">
+                  {PCTS.map(p => {
+                    const spendable = ethBal > GAS_KEEP_WEI ? ethBal - GAS_KEEP_WEI : 0n;
+                    const v = pctOf(spendable, p);
+                    return <button key={p} type="button" disabled={v <= 0n} onClick={() => setPostAmt(fmtEth(v))} className="px-2 py-0.5 rounded-md bg-[#121624] border border-[#1e2538] text-[10px] text-slate-300 hover:border-emerald-500 disabled:opacity-40">{p}%</button>;
+                  })}
+                  <span className="text-[10px] text-slate-500 self-center">of your ETH, keeping {fmtEth(GAS_KEEP_WEI)} for gas</span>
+                </span>
+              )}
+            </label>
             <label className="space-y-1"><span className="text-slate-400">Minimum per trade, ETH</span><input className={input} inputMode="decimal" placeholder={postAmt || '0.05'} value={postMin} onChange={e => setPostMin(e.target.value)} /></label>
             <label className="space-y-1"><span className="text-slate-400">Maximum per trade, ETH</span><input className={input} inputMode="decimal" placeholder={postAmt || '0.5'} value={postMax} onChange={e => setPostMax(e.target.value)} /></label>
           </div>
@@ -1065,6 +1117,17 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
             <label className="space-y-1 block">
               <span className="text-slate-400">ETH amount</span>
               <input className={input} inputMode="decimal" value={takeAmt} onChange={e => setTakeAmt(e.target.value)} />
+              <span className="flex flex-wrap gap-1 pt-1">
+                {PCTS.map(p => {
+                  const { lo, hi } = takeBounds(taking);
+                  const sellingEth = taking.side === ROBINHOOD_OTC_SIDE.BUY;
+                  const spendable = ethBal != null && ethBal > GAS_KEEP_WEI ? ethBal - GAS_KEEP_WEI : 0n;
+                  const base = sellingEth ? (spendable < hi ? spendable : hi) : hi;
+                  const v = pctOf(base, p);
+                  return <button key={p} type="button" disabled={v <= 0n || v < lo} onClick={() => setTakeAmt(fmtEth(v))} className="px-2 py-0.5 rounded-md bg-[#121624] border border-[#1e2538] text-[10px] text-slate-300 hover:border-emerald-500 disabled:opacity-40">{p}%</button>;
+                })}
+                <span className="text-[10px] text-slate-500 self-center">{taking.side === ROBINHOOD_OTC_SIDE.BUY ? 'of your ETH (keeping gas), up to the order max' : 'of the most you can take from this order'}</span>
+              </span>
             </label>
             {takeWei != null && !takeErr && (
               <div className="p-3 rounded-xl bg-[#0a0d16] border border-[#1a2133] space-y-1 text-[11px] text-slate-300">

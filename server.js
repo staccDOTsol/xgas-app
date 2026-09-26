@@ -1265,6 +1265,38 @@ async function otcInfoBody() {
   return body;
 }
 
+// Fair ETH/USD for prefilling desk prices: the median of three public spot tickers, cached 20 s.
+// It is a reference only; the desk trades at whatever price the maker posts.
+let ethPriceCache = { at: 0, body: null };
+async function fetchJson(url, ms = 4000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctl.signal, headers: { 'user-agent': 'xgas.dev' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+const ETH_PRICE_SOURCES = [
+  ['Coinbase', 'https://api.coinbase.com/v2/prices/ETH-USD/spot', j => Number(j?.data?.amount)],
+  ['Kraken', 'https://api.kraken.com/0/public/Ticker?pair=ETHUSD', j => Number(Object.values(j?.result || {})[0]?.c?.[0])],
+  ['Bitstamp', 'https://www.bitstamp.net/api/v2/ticker/ethusd/', j => Number(j?.last)],
+];
+app.get('/api/robinhood/eth-price', async (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=15');
+  if (ethPriceCache.body && Date.now() - ethPriceCache.at < 20_000) return res.json(ethPriceCache.body);
+  const got = await Promise.all(ETH_PRICE_SOURCES.map(async ([name, url, pick]) => {
+    try { const v = pick(await fetchJson(url)); return Number.isFinite(v) && v > 0 ? { name, usd: v } : null; } catch { return null; }
+  }));
+  const ok = got.filter(Boolean).sort((a, b) => a.usd - b.usd);
+  if (!ok.length) return res.status(503).json({ error: 'No price source answered. Enter your own price.' });
+  const mid = ok.length % 2 ? ok[(ok.length - 1) / 2].usd : (ok[ok.length / 2 - 1].usd + ok[ok.length / 2].usd) / 2;
+  const cents = Math.round(mid * 100);
+  const body = { usd: (cents / 100).toFixed(2), cents: String(cents), sources: ok.map(o => ({ name: o.name, usd: o.usd.toFixed(2) })), method: `median of ${ok.map(o => o.name).join(', ')}`, at: new Date().toISOString() };
+  ethPriceCache = { at: Date.now(), body };
+  res.json(body);
+});
+
 app.get('/api/robinhood/otc', async (req, res) => {
   try {
     const body = await otcInfoBody();
