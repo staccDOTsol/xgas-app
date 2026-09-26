@@ -22,24 +22,35 @@ export const CONTRACT_ADDRESSES = {
   CCFF00_WETH_POOL_ID: '0x49dced8013c9a66e1fc8e810832ae396aeec86331bba36f4effd9c8527286ca2',
   WETH: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', // NEXT_PUBLIC_WETH_ADDRESS
   USDG: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', // NEXT_PUBLIC_USDG_ADDRESS
-  // xgas Orbit L4 — a real Arbitrum Orbit (AnyTrust) chain settling on Robinhood Chain #4663.
+  // xgas Orbit L4: an Arbitrum Orbit rollup (every batch posted to Robinhood as calldata) settling on Robinhood Chain #4663.
   // Every address below comes from src/contracts/l4-deployment.json (written by the rollup deployment).
-  ORBIT_L4_CHAIN_ID: 466301,
+  ORBIT_L4_CHAIN_ID: 466302,
+  /** The retired chain. Only its Outbox claims are still served (by the host, from legacy466301 in the deployment file). */
+  ORBIT_L4_LEGACY_CHAIN_ID: 466301,
   ORBIT_L4_RPC: 'https://xgas.dev/rpc',
   ORBIT_L4_WS: '',
   /** The xMoney vault + gas token on Robinhood (tax token; USDG reserve; bridge-aware). */
   XMONEY_USD_L3: '0xa924C725B64cC346f275269EFA4Bd0538cfBa97E',
   XMONEY_LEGACY_L3: '0xa72Ab0874A57Ab0F950Bf61B096b01b183A3CB7c',
-  ORBIT_ROLLUP: '0x5Ba539b34b9F33036CC4788225149ce07Ba183a8',
-  ORBIT_INBOX: '0x67E524A7349ccB4a2d59D6256c51cf20586687b4',
-  ORBIT_OUTBOX: '0x4d4757f0cB643d97B779ee4DD5512C6c2383E78f',
-  ORBIT_BRIDGE: '0x8b58B2f893770E57e16D8c7551f2E405E9A94E5f',
-  ORBIT_SEQUENCER_INBOX: '0x16Daa2551d41243C82366c8b94Dc11418Ac0AeD7',
+  ORBIT_ROLLUP: '0x5868266C0c0663f4bc39329B525884f137BAD93E',
+  ORBIT_INBOX: '0xa7087693676F2Ca8e5e9563A6859952258688146',
+  ORBIT_OUTBOX: '0xA6f07dd42CFE78EC8D88484b238b3B05149Eb2b3',
+  ORBIT_BRIDGE: '0x2290f4505484f055B710e7Df37e2482c90B8B6fb',
+  ORBIT_SEQUENCER_INBOX: '0xCA038a032154d0091b019A9104b369F94FD5c75F',
+  ORBIT_UPGRADE_EXECUTOR: '0x43E881A831Ec5680aa6f63d2b48913050038b9F9',
+  /** 2-of-3 Safe owned by the three validators; the rollup's fast confirmer. */
+  ORBIT_FAST_CONFIRM_SAFE: '0x17fC7585A3c99ACC2A7CFC1842C119d7FBB12cBC',
+  /** On the L4 itself: ArbOS network + infra fee accounts point here; it splits L4 fees across the validators. */
+  VALIDATOR_FEE_SPLITTER_L4: '0xa924c725b64cc346f275269efa4bd0538cfba97e',
+  ORBIT_OWNER: '0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F',
   XMONEY_TIMELOCK: '0x70A0fBE369e7C390BddA7c55dFD8590F6C13B47B',
-  ORBIT_DEPLOY_TX: '0xa49321744d16391e315e4202f576768247c3f60bd79b64dc837ef61fb2f0afc5',
-  XMONEY_ESCROW_L4: '0xBCa24A0f7E43bCFa944c490D66470f3A03bbEcC8', // v4 (2026-09-26): 0.01% → FanoutSink 0x6521…9b4B, 0.02% → buyback sink 0xa924…a97E → XgasDevBuyback on Robinhood
-  FOMO_ATTRITION_L4: '0xec342a426c6CB512c75Fe34DaCE455e9cFeC6582',
-  XGAS_ROUTER: '0xfeb38ce50e1F49438acAa39b2Da513d2F1DE548f',
+  ORBIT_DEPLOY_TX: '0x79e5c8e5e762cfee50360c708e003346b3aef3861beb690500ddae2500d36a4d',
+  // PLACEHOLDER: the L4 app contracts are not deployed on 466302 yet. Fill these three from the deploy-l3-apps
+  // broadcast (same values as l4.escrow / l4.fomo / l4.router in l4-deployment.json) before the site switch.
+  // The live values also arrive from /api/l4-info at boot; these are only the compiled-in fallback.
+  XMONEY_ESCROW_L4: '',
+  FOMO_ATTRITION_L4: '',
+  XGAS_ROUTER: '',
   ARB_SYS: '0x0000000000000000000000000000000000000064',
   FEE_FANOUT: '0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e',
   /** XGAS.DEV on Robinhood: the 0.02% leg of every L4 fee path buys it and burns it (XgasDevBuyback). */

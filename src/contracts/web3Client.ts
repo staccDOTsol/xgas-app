@@ -64,7 +64,8 @@ function addChainParams(chainId: number) {
   if (chainId === L4_CHAIN_ID) {
     return {
       chainId: `0x${L4_CHAIN_ID.toString(16)}`,
-      chainName: 'xgas Orbit L4',
+      // The chain id in the name, so a wallet that still lists the retired #466301 shows two distinct entries.
+      chainName: `xgas Orbit L4 #${L4_CHAIN_ID}`,
       nativeCurrency: { name: 'X Money Gas', symbol: 'xMoney', decimals: 18 },
       rpcUrls: [orbitL4RpcUrl()],
     };
@@ -87,7 +88,8 @@ export interface L4Info {
   l3ChainId: number;
   vault: string;
   ready: boolean;
-  contracts: { escrow: string; fomo: string; router: string; nguLauncher?: string | null; legacy2bp?: { nguLauncher?: string | null } | null } | null;
+  // Null until the L4 apps are deployed on this chain (placeholders in l4-deployment.json).
+  contracts: { escrow: string | null; fomo: string | null; router: string | null; nguLauncher?: string | null; legacy2bp?: { nguLauncher?: string | null } | null } | null;
   bridge?: { lastScannedBlock: string | null; processedCount: number; pendingExits: number };
 }
 
@@ -117,9 +119,9 @@ export async function loadL4Info(force = false): Promise<L4Info | null> {
       }
       const info = (await res.json()) as L4Info;
       if (info.contracts) {
-        l4Addresses.escrow = info.contracts.escrow;
-        l4Addresses.fomo = info.contracts.fomo;
-        l4Addresses.router = info.contracts.router;
+        l4Addresses.escrow = info.contracts.escrow || '';
+        l4Addresses.fomo = info.contracts.fomo || '';
+        l4Addresses.router = info.contracts.router || '';
         l4Addresses.nguLauncher = info.contracts.nguLauncher || '';
         l4Addresses.legacyNguLauncher = info.contracts.legacy2bp?.nguLauncher || '';
         l4Addresses.ready = !!info.ready;
@@ -149,6 +151,8 @@ export async function waitForL4Credit(address: string, above: bigint, timeoutMs 
 export interface Withdrawal {
   txHash: string; caller: string; destination: string; position: string; callvalue: string; amount: string;
   arbBlockNum: string; timestamp: string; status: 'pending' | 'claimable' | 'executed'; executedTx?: string;
+  /** Which chain it was started on. legacy = the retired #466301, still claimable on its own Outbox. */
+  chainId?: number; legacy?: boolean;
 }
 
 /** L4 -> L3 withdrawals initiated by this address, with confirmation status from Robinhood. */
@@ -159,8 +163,8 @@ export async function fetchWithdrawals(address: string): Promise<{ withdrawals: 
 }
 
 /** Ask the host to execute a confirmed withdrawal on the Robinhood Outbox (permissionless; host pays gas). */
-export async function executeWithdrawal(txHash: string, position: string): Promise<{ ok: boolean; txHash?: string; alreadyExecuted?: boolean }> {
-  const res = await fetch('/api/withdrawals/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHash, position }) });
+export async function executeWithdrawal(txHash: string, position: string, chainId?: number): Promise<{ ok: boolean; txHash?: string; alreadyExecuted?: boolean }> {
+  const res = await fetch('/api/withdrawals/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHash, position, chainId }) });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'execute failed');
   return data;

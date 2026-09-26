@@ -1,26 +1,35 @@
-# Run your own xgas Orbit L4 node (chain 466301)
+# Run your own xgas Orbit L4 node (chain 466302)
 
-The xgas Orbit L4 is an Arbitrum Orbit (Nitro, AnyTrust) chain whose parent is Robinhood Chain (#4663).
-Anyone can run a full node and verify state independently of xgas.dev, as long as the node can fetch batch data.
-
-> **Status, 26 Sep 2026: the batch-data endpoint is down.** The rest-aggregator URL below
-> (https://xgas.dev/das) does not answer, because the DAS port is not exposed on the node host.
-> Until it is restored, a third-party node cannot fetch batch data and cannot sync past the
-> batches it already has. This note will be removed when the endpoint is back.
+The xgas Orbit L4 is an Arbitrum Orbit rollup whose parent is Robinhood Chain (#4663).
+Every batch is posted in full as calldata to the SequencerInbox on Robinhood, so a node needs nothing
+but a Robinhood RPC to rebuild the chain and verify its state. There is no data availability committee
+and no batch-data endpoint to depend on.
 
     docker run --rm -it -v $PWD/xgas-node:/home/user/.arbitrum -p 8547:8547 \
       offchainlabs/nitro-node:v3.11.4-7d5ac27 \
       --chain.info-json="$(curl -s https://xgas.dev/chain-info.json)" \
-      --chain.name="xgas Orbit L4" \
+      --chain.name=xgas \
       --parent-chain.connection.url=https://rpc.mainnet.chain.robinhood.com \
-      --node.da.anytrust.enable=true \
-      --node.da.anytrust.rest-aggregator.enable=true \
-      --node.da.anytrust.rest-aggregator.urls=https://xgas.dev/das \
       --execution.forwarding-target=https://xgas.dev/rpc \
       --http.api=net,web3,eth,arb --http.corsdomain=* --http.addr=0.0.0.0 --http.vhosts=*
 
-Sequencer (writes) is operated by xgas.dev; reads and state verification need no trust in it.
-Batches: SequencerInbox 0x16Daa2551d41243C82366c8b94Dc11418Ac0AeD7 on Robinhood.
-Assertions: Rollup 0x5Ba539b34b9F33036CC4788225149ce07Ba183a8 on Robinhood.
+`--chain.name` must match `chain-name` in chain-info.json, which is `xgas`.
+Any Robinhood RPC works; use your own provider if you can. The public one prunes old state, which only
+matters while the node catches up.
+
+Without a sequencer feed, your node sees new blocks when their batch lands on Robinhood (at most about
+5 minutes behind the sequencer). Transactions you send to it are forwarded to the sequencer.
+
+Sequencer (ordering and liveness) is operated by xgas.dev; reads and state verification need no trust in it.
+Validation is permissionless: to post or challenge assertions, see https://xgas.dev/run-a-validator.md.
+
+Batches: SequencerInbox 0xCA038a032154d0091b019A9104b369F94FD5c75F on Robinhood.
+Assertions: Rollup 0x5868266C0c0663f4bc39329B525884f137BAD93E on Robinhood (validator whitelist disabled).
+Deposits: Inbox 0xa7087693676F2Ca8e5e9563A6859952258688146. Withdrawals: Outbox 0xA6f07dd42CFE78EC8D88484b238b3B05149Eb2b3.
+Fast confirmation: 2-of-3 Safe 0x17fC7585A3c99ACC2A7CFC1842C119d7FBB12cBC, owned by the three validator keys.
+Chain owner: 0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F (UpgradeExecutor 0x43E881A831Ec5680aa6f63d2b48913050038b9F9; can upgrade the core contracts and force-confirm).
 Gas token: XMoney 0xa924C725B64cC346f275269EFA4Bd0538cfBa97E on Robinhood (owner: 24h timelock 0x70A0fBE369e7C390BddA7c55dFD8590F6C13B47B).
 Source: https://xgas.dev/source/
+
+The previous chain, 466301, is retired. It was an AnyTrust chain whose batch data lived only on its
+committee, so a new node cannot sync it.
