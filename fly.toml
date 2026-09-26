@@ -9,7 +9,7 @@ primary_region = "iad"
   NODE_ENV = "production"
   VITE_CHAIN_ID = "4663"
   VITE_ROBINHOOD_RPC_URL = "https://staccpad.fun/rpc"
-  BUNDLER_URL = "http://xgas-bundler.internal:4337"
+  BUNDLER_URL = "https://xgas-bundler.fly.dev"
   PAYMASTER_START_BLOCK = "25"
 
 [http_service]
