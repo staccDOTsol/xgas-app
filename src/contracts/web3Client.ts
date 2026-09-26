@@ -420,12 +420,33 @@ export async function sendOnChainTx(params: {
   // 3. Send
   const txHash: string = await ethereum.request({ method: 'eth_sendTransaction', params: [txPayload] });
 
-  // 4. Wait for confirmation on the same chain
+  // 4. Wait for confirmation on the same chain. A mined transaction can still have reverted (a deadline passed
+  //    between the estimate and the block, or someone else took the order first): that is a failure, never CONFIRMED.
   if (params.waitForConfirmation) {
-    await client.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+    let receipt;
+    try {
+      receipt = await client.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+    } catch (e: any) {
+      throw new TxError(
+        `Transaction ${txHash} was sent, but no receipt came back (${e?.shortMessage || e?.message || 'RPC error'}). It may still land: check it on the explorer before you try again.`,
+        txHash,
+        'unconfirmed'
+      );
+    }
+    if (receipt.status !== 'success') {
+      throw new TxError(`The transaction reverted on chain (${txHash}). Nothing changed except the gas it used.`, txHash, 'reverted');
+    }
     return { txHash, status: 'CONFIRMED' };
   }
   return { txHash, status: 'SUBMITTED' };
+}
+
+/** A transaction that reached the chain but did not succeed: it reverted, or its receipt never came back. */
+export class TxError extends Error {
+  constructor(message: string, public readonly txHash: string, public readonly kind: 'reverted' | 'unconfirmed') {
+    super(message);
+    this.name = 'TxError';
+  }
 }
 
 

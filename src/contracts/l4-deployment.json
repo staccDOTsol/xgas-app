@@ -52,7 +52,9 @@
     ],
     "xgasDevBuyback": "0x6067E608d1e0C4a67d406447FaA42a7C7452f7F8",
     "xgasDev": "0x006D2D9e65f847e8B5f5053C9eb3a7824ec7dFa3",
-    "earlyDepositor": "0x36e52831ba473e9374bad7cc22ed942a99b4d431"
+    "earlyDepositor": "0x36e52831ba473e9374bad7cc22ed942a99b4d431",
+    "otcArbitration": "0x16BCd95b5eB685DfaA04295462564d56979f35b4",
+    "robinhoodOtc": "0x534df478ea378C1B4A596a10f8d3b5659486a8Cb"
   },
   "l4": {
     "escrow": "0x842E6904e4eB64d5957CC2E9Eb640A9a8C006754",

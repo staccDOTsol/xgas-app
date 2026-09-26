@@ -3,9 +3,10 @@ import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
+import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createPublicClient, createWalletClient, http as viemHttp, parseAbi, formatEther, encodeFunctionData, decodeFunctionResult, decodeEventLog } from 'viem';
+import { createPublicClient, createWalletClient, http as viemHttp, parseAbi, formatEther, encodeFunctionData, decodeFunctionResult, decodeEventLog, defineChain, getAddress, isAddress, keccak256, RpcError, TransactionNotFoundError } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ALL_TOOLS, TOOLS_BY_NAME, isBrowserSafe, unwrap } from './mcp/src/registry.mjs';
 import { createServer as createMcpServer, isHostable, hostableFor, VERSION as MCP_VERSION } from './mcp/src/server.mjs';
@@ -41,12 +42,34 @@ const L4_RPC_PUBLIC = DEPLOY.publicRpcUrl; // https://xgas.dev/rpc — the only 
 // Accept either, so renaming the code does not silently switch the Outbox executor off.
 const L3_EXECUTOR_KEY = process.env.L3_EXECUTOR_KEY || process.env.L2_EXECUTOR_KEY || '';
 
-const DATA_DIR = fs.existsSync('/data') ? '/data' : path.join(__dirname, 'l4-data');
+// Off Fly only, XGAS_DATA_DIR_DEV points local test runs at a scratch directory so they never touch l4-data.
+const DATA_DIR = (!process.env.FLY_APP_NAME && process.env.XGAS_DATA_DIR_DEV)
+  ? path.resolve(process.env.XGAS_DATA_DIR_DEV)
+  : fs.existsSync('/data') ? '/data' : path.join(__dirname, 'l4-data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const l3Client = createPublicClient({ transport: viemHttp(L3_RPC) });
 const l4Client = createPublicClient({ transport: viemHttp(L4_RPC_INTERNAL, { timeout: 15_000 }) });
 
+// The Robinhood OTC routes parse their own bodies, each with its own limit, before the general 1mb JSON parser
+// below (which then skips them). A malformed or oversized body gets a JSON error, not an HTML page.
+const EVIDENCE_MAX_IMAGE_BYTES = 2 * 1024 * 1024; // one png / jpeg / webp
+const EVIDENCE_MAX_TEXT_BYTES = 20 * 1024;        // or plain text
+app.use('/api/robinhood/gas', express.json({ limit: '2kb' }));
+app.post('/api/robinhood/evidence',
+  express.json({ limit: '3mb' }), // { tradeId, text } or { tradeId, image: base64 }
+  express.raw({ type: ['image/png', 'image/jpeg', 'image/webp', 'application/octet-stream'], limit: EVIDENCE_MAX_IMAGE_BYTES }),
+  express.raw({ type: 'multipart/form-data', limit: EVIDENCE_MAX_IMAGE_BYTES + 64 * 1024 }),
+  express.raw({ type: 'text/plain', limit: EVIDENCE_MAX_TEXT_BYTES }),
+  (_req, _res, next) => next('route'));
+app.use('/api/robinhood', (err, req, res, next) => {
+  if (!err) return next();
+  const evidence = req.path.startsWith('/evidence');
+  if (err.status === 413 || err.type === 'entity.too.large') {
+    return res.status(413).json({ error: evidence ? 'Too large: images are limited to 2 MB and text to 20 KB.' : 'Request body too large.' });
+  }
+  res.status(400).json({ error: evidence ? 'Could not read the upload.' : 'Request body must be JSON like {"address":"0x..."}.' });
+});
 app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -756,6 +779,891 @@ app.get('/api/mcp', (_req, res) => {
     })),
   });
 });
+
+// ---------------------------------------------------------------------------
+// Robinhood OTC desk (xgas.dev/robinhood): dollars on X Money (paid inside the X app, X account to X account,
+// off-chain) <-> native ETH on Robinhood Chain #4663, both directions. The ETH leg is escrowed in RobinhoodEthOtc;
+// a dispute goes to OtcArbitration (staked arbiters, commit-reveal). Neither contract has an admin. This host only
+// reads them, pays a one-time gas drip and stores evidence files. It holds no role in either contract.
+//   GET  /api/robinhood/otc             addresses, live parameters, the relayer, the drip.
+//   POST /api/robinhood/gas/drip        { address }, signed in with X: a one-time drip of Robinhood ETH so a buyer
+//                                       with no gas can take an order, mark it paid and claim. Sent by
+//                                       DESK_RELAYER_KEY, a dedicated wallet that holds no role anywhere and only
+//                                       ever pays for these drips. Never the owner or executor key.
+//   POST /api/robinhood/evidence        signed in with X as one side of a trade that is in dispute: one png/jpeg/webp
+//                                       (2 MB max) or plain text (20 KB max) for a tradeId. Returns the uri to pass
+//                                       to OtcArbitration.submitEvidence. Capped per account, per trade, per day for
+//                                       everyone together, and by a free-space floor on the volume.
+//   GET  /api/robinhood/evidence/:file  a stored evidence file, read-only.
+// Addresses come from l3.robinhoodOtc and l3.otcArbitration in l4-deployment.json; '' (or missing) = not deployed.
+// ---------------------------------------------------------------------------
+const ROBINHOOD_CHAIN_ID = 4663;
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+const robinhoodChain = defineChain({
+  id: ROBINHOOD_CHAIN_ID,
+  name: 'Robinhood Chain',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: { default: { http: [L3_RPC] } },
+});
+// Off Fly only, ROBINHOOD_OTC_DEV / OTC_ARBITRATION_DEV may point at a local test deployment (anvil). On Fly the
+// committed deployment file is the only source, so a stray env var can never aim the site at another contract.
+function robinhoodAddress(key, devEnv) {
+  const dev = process.env.FLY_APP_NAME ? '' : String(process.env[devEnv] || '').trim();
+  const v = dev || DEPLOY.l3?.[key];
+  return typeof v === 'string' && ADDRESS_RE.test(v) && isAddress(v) ? getAddress(v) : '';
+}
+const ROBINHOOD_OTC = robinhoodAddress('robinhoodOtc', 'ROBINHOOD_OTC_DEV');
+const OTC_ARBITRATION = robinhoodAddress('otcArbitration', 'OTC_ARBITRATION_DEV');
+const OTC_DEPLOYED = !!(ROBINHOOD_OTC && OTC_ARBITRATION);
+const ROBINHOOD_WETH = getAddress(DEPLOY.l3?.weth || '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73');
+const ROBINHOOD_FEE_FANOUT = getAddress(DEPLOY.l3?.fanout || '0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e');
+const ROBINHOOD_PUBLIC_RPC = DEPLOY.parentRpcUrl || 'https://rpc.mainnet.chain.robinhood.com';
+if (!OTC_DEPLOYED) console.log('[robinhood] OTC desk not deployed yet (l3.robinhoodOtc / l3.otcArbitration are empty)');
+
+// The published interface, used until the contracts are deployed and whenever a read fails. Once deployed, the
+// chain's own values win.
+const OTC_SPEC = {
+  payWindowS: 30 * 60,
+  releaseWindowS: 12 * 3600,
+  feeBps: 10,                                 // 0.10% of the ETH paid to a buyer, all of it to the Fee Fanout
+  bondMinWei: 2_000_000_000_000_000n,         // 0.002 ETH
+  bondBps: 500,                               // 5% of the trade; the bond is exactly max(0.002 ETH, 5%)
+  minStakeWei: 10_000_000_000_000_000n,       // 0.01 ETH
+  stakeAgeS: 3 * 24 * 3600,                   // a stake counts on a dispute only if it was this old when it opened
+  commitS: 24 * 3600,
+  revealS: 24 * 3600,
+  longStopS: 14 * 24 * 3600,                  // no quorum by then: the ETH and the bond go back to the seller
+  slashBps: 1000,
+  unstakeDelayS: 7 * 24 * 3600,
+};
+// Server copies of the few views this host reads (the browser has the full ABIs in src/contracts/abis.ts).
+// Every number is decoded as uint256, which reads any narrower uint the contract may return.
+const OTC_VIEW_ABI = parseAbi([
+  'struct Trade { uint256 orderId; address seller; address buyer; string sellerXHandle; string buyerXHandle; uint256 ethAmount; uint256 expectedCents; uint64 openedAt; uint64 paidAt; uint8 status; string paymentNote; }',
+  'function PAY_WINDOW() view returns (uint256)',
+  'function RELEASE_WINDOW() view returns (uint256)',
+  'function FEE_BPS() view returns (uint256)',
+  'function bondFor(uint256 ethAmount) view returns (uint256)',
+  'function arbitration() view returns (address)',
+  'function ordersLength() view returns (uint256)',
+  'function tradesLength() view returns (uint256)',
+  'function getTrade(uint256 tradeId) view returns (Trade)',
+]);
+const ARBITRATION_VIEW_ABI = parseAbi([
+  'function MIN_STAKE() view returns (uint256)',
+  'function STAKE_AGE() view returns (uint256)',
+  'function COMMIT() view returns (uint256)',
+  'function REVEAL() view returns (uint256)',
+  'function LONG_STOP() view returns (uint256)',
+  'function SLASH_BPS() view returns (uint256)',
+  'function UNSTAKE_DELAY() view returns (uint256)',
+  'function escrow() view returns (address)',
+  'function openDisputeIds() view returns (uint256[])',
+]);
+const TRADE_STATUS = ['Open', 'Paid', 'Released', 'Claimed', 'CancelledUnpaid', 'Disputed', 'Resolved'];
+
+// --- the relayer ------------------------------------------------------------
+// The key is checked for shape before it goes anywhere near viem, and no error from loading it is printed, so a
+// malformed key cannot end up in the logs.
+function loadDeskRelayer() {
+  const raw = String(process.env.DESK_RELAYER_KEY || '').trim();
+  if (!raw) return null;
+  const key = raw.startsWith('0x') || raw.startsWith('0X') ? `0x${raw.slice(2)}` : `0x${raw}`;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
+    console.error('[robinhood] DESK_RELAYER_KEY is set but is not a 32-byte hex key; the gas drip stays off.');
+    return null;
+  }
+  let account;
+  try { account = privateKeyToAccount(key); } catch {
+    console.error('[robinhood] DESK_RELAYER_KEY could not be loaded; the gas drip stays off.');
+    return null;
+  }
+  // The drip wallet pays strangers. It must never be a key that holds a role.
+  const privileged = [DEPLOY.owner, ...(DEPLOY.l3?.timelockProposers || [])].filter(Boolean).map((a) => String(a).toLowerCase());
+  if (privileged.includes(account.address.toLowerCase())) {
+    console.error(`[robinhood] DESK_RELAYER_KEY is ${account.address}, a privileged key; refusing to use it for the gas drip.`);
+    return null;
+  }
+  // Sharing the Outbox executor's wallet would make drips and executor sends race for nonces.
+  try {
+    if (L3_EXECUTOR_KEY && privateKeyToAccount(L3_EXECUTOR_KEY).address === account.address) {
+      console.warn('[robinhood] DESK_RELAYER_KEY is the same wallet as the Outbox executor; give the drip its own wallet.');
+    }
+  } catch {}
+  return account;
+}
+const DESK_RELAYER = loadDeskRelayer();
+const deskRelayerWallet = DESK_RELAYER
+  ? createWalletClient({ account: DESK_RELAYER, chain: robinhoodChain, transport: viemHttp(L3_RPC, { timeout: 20_000 }) })
+  : null;
+if (DESK_RELAYER) {
+  console.log(`[robinhood] gas drip relayer ${DESK_RELAYER.address}`);
+  // Writes sign for chain 4663 (viem also asserts it per send). Say so at boot if the RPC is something else.
+  l3Client.getChainId().then((id) => {
+    if (id !== ROBINHOOD_CHAIN_ID) console.error(`[robinhood] ${L3_RPC} is chain ${id}, expected ${ROBINHOOD_CHAIN_ID}: every drip will be refused`);
+  }).catch((e) => console.warn('[robinhood] chainId check failed:', e.shortMessage || e.message));
+}
+
+// --- drip sizing -------------------------------------------------------------
+function envWei(name) {
+  const v = String(process.env[name] || '').trim();
+  if (!v) return null;
+  if (!/^\d{1,30}$/.test(v)) { console.warn(`[robinhood] ${name} must be a whole number of wei; ignoring it.`); return null; }
+  return BigInt(v);
+}
+const DRIP_FLOOR_WEI = 20_000_000_000_000n;                  // 0.00002 ETH
+const DRIP_WEI_FIXED = envWei('DRIP_WEI');                   // set = exactly this, every time
+const DRIP_MAX_WEI = (() => { const m = envWei('DRIP_MAX_WEI') ?? 200_000_000_000_000n; return m < DRIP_FLOOR_WEI ? DRIP_FLOOR_WEI : m; })(); // ceiling on the computed default (0.0002 ETH)
+const DRIP_DAILY_CAP = (() => { const n = Number(process.env.DRIP_DAILY_CAP ?? 50); return Number.isInteger(n) && n >= 0 ? n : 50; })();
+const DRIP_PER_IP_DAILY = 3;
+const DRIP_OWNER_MAX_WEI = 10_000_000_000_000n;              // a wallet below 0.00001 ETH cannot really transact
+const OTC_TX_GAS = 300_000n;                                 // generous for takeSell / markPaid / claim / submitEvidence
+const DRIP_SEND_GAS_RESERVE = 300_000n;                      // what the relayer keeps back to pay for the send itself
+
+let rhGasPrice = { wei: 0n, at: 0 };
+async function robinhoodGasPrice() {
+  if (rhGasPrice.wei > 0n && Date.now() - rhGasPrice.at < 60_000) return rhGasPrice.wei;
+  const wei = await l3Client.getGasPrice();
+  rhGasPrice = { wei, at: Date.now() };
+  return wei;
+}
+/** DRIP_WEI if set; else 4 desk transactions at the current gas price, times 3, never below 0.00002 ETH. */
+async function dripAmountWei() {
+  if (DRIP_WEI_FIXED != null) return DRIP_WEI_FIXED;
+  let gp = 0n;
+  try { gp = await robinhoodGasPrice(); } catch {}
+  let amt = gp * OTC_TX_GAS * 4n * 3n;
+  if (amt < DRIP_FLOOR_WEI) amt = DRIP_FLOOR_WEI;
+  if (amt > DRIP_MAX_WEI) amt = DRIP_MAX_WEI;
+  return amt;
+}
+
+// --- atomic JSON files -------------------------------------------------------
+// Temp file with a unique name, fsync, rename over the target, fsync the directory: a crash leaves either the old
+// file or the new one, never half of either.
+function writeJsonAtomic(file, obj) {
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try { fs.writeSync(fd, JSON.stringify(obj)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try { fs.renameSync(tmp, file); } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
+  try { const d = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch {}
+}
+/** A promise queue: fn runs only after every earlier fn on the same queue has settled. */
+function makeLock() {
+  let q = Promise.resolve();
+  return (fn) => { const run = q.then(fn, fn); q = run.then(() => {}, () => {}); return run; };
+}
+
+// --- the drip ledger (/data/robinhood-drips.json) -----------------------------
+// drips: one entry per address ever dripped. accounts: X account id -> the address it was dripped to. Written only
+// from inside withDripLock, and the slot is on disk before any ETH moves, so two requests can never both pass the
+// checks and a crash after the send can never allow a second drip. A ledger that exists but will not parse turns
+// the drip off instead of starting over, because starting over would hand everyone a second drip.
+const DRIP_LEDGER_FILE = path.join(DATA_DIR, 'robinhood-drips.json');
+let dripLedger = { version: 2, drips: {}, accounts: {} };
+let dripLedgerBroken = false;
+try {
+  if (fs.existsSync(DRIP_LEDGER_FILE)) {
+    const j = JSON.parse(fs.readFileSync(DRIP_LEDGER_FILE, 'utf8'));
+    if (!j || typeof j !== 'object' || !j.drips || typeof j.drips !== 'object') throw new Error('missing drips map');
+    const accounts = j.accounts && typeof j.accounts === 'object' ? j.accounts : {};
+    for (const [addr, d] of Object.entries(j.drips)) if (d && d.xId && !accounts[d.xId]) accounts[d.xId] = addr;
+    dripLedger = { version: 2, drips: j.drips, accounts };
+  }
+} catch (e) {
+  dripLedgerBroken = true;
+  console.error(`[robinhood] ${DRIP_LEDGER_FILE} is unreadable; the gas drip stays off until it is fixed:`, e.message);
+}
+function saveDripLedger(next) {
+  writeJsonAtomic(DRIP_LEDGER_FILE, next);
+  dripLedger = next;
+}
+/** Run fn with nobody else touching the ledger or the relayer's nonce. */
+const withDripLock = makeLock();
+const utcDay = (t = Date.now()) => new Date(t).toISOString().slice(0, 10);
+function dripCounts(ipKey) {
+  const today = utcDay();
+  let total = 0, ip = 0;
+  for (const d of Object.values(dripLedger.drips)) {
+    if (d.day !== today) continue;
+    total++;
+    if (ipKey && d.ip === ipKey) ip++;
+  }
+  return { total, ip };
+}
+function dripFor({ address, xId }) {
+  if (address && dripLedger.drips[address.toLowerCase()]) return { by: 'address', entry: dripLedger.drips[address.toLowerCase()] };
+  if (xId && dripLedger.accounts[String(xId)]) {
+    const addr = dripLedger.accounts[String(xId)];
+    return { by: 'account', address: addr, entry: dripLedger.drips[addr] || null };
+  }
+  return null;
+}
+// --- settling a drip ----------------------------------------------------------
+// Every drip is signed before it is sent, and its hash, nonce and signed bytes go into the ledger first. A slot is
+// freed only when the transaction provably cannot land: the node rejected it and does not have it, it reverted, or
+// its nonce was used by another transaction. Anything unclear keeps the slot and is settled here.
+/** true: the node has the transaction (pending or mined). false: it says it does not. null: could not tell. */
+async function nodeHasTx(hash) {
+  try { await l3Client.getTransaction({ hash }); return true; } catch (e) {
+    if (e instanceof TransactionNotFoundError || e?.name === 'TransactionNotFoundError') return false;
+    return null;
+  }
+}
+/** A JSON-RPC answer that refused the transaction, as opposed to a timeout or a lost connection. */
+function isRpcRejection(e) {
+  if (!e || typeof e.walk !== 'function') return false;
+  const rpc = e.walk((x) => x instanceof RpcError);
+  if (!rpc || rpc.code === -32603) return false; // "internal error" from a proxy says nothing about the node
+  return !/already known|known transaction|already imported/i.test(`${e.shortMessage || ''} ${e.details || ''} ${e.message || ''}`);
+}
+/** Call inside withDripLock. */
+function setDripStatus(key, txHash, status) {
+  const cur = dripLedger.drips[key];
+  if (!cur || cur.txHash !== txHash) return;
+  const next = { ...cur, status };
+  if (status === 'confirmed') delete next.raw; // the signed bytes are only kept while a rebroadcast may be needed
+  saveDripLedger({ ...dripLedger, drips: { ...dripLedger.drips, [key]: next } });
+}
+/** Give back both slots (the address and the X account). Call inside withDripLock. */
+function freeDripSlot(key, txHash, why) {
+  const cur = dripLedger.drips[key];
+  if (!cur || cur.txHash !== txHash) return;
+  const { [key]: _gone, ...drips } = dripLedger.drips;
+  const accounts = { ...dripLedger.accounts };
+  if (cur.xId && accounts[cur.xId] === key) delete accounts[cur.xId];
+  saveDripLedger({ ...dripLedger, drips, accounts });
+  console.warn(`[robinhood] drip slot for ${key} (@${cur.handle}) freed: ${why}`);
+}
+const DRIP_FOLLOW_TRIES = 12; // every 10 minutes after the first 3-minute wait: about 2 hours in all
+async function followDrip(key, txHash, nonce, attempt = 0) {
+  if (!DESK_RELAYER || !deskRelayerWallet || !txHash) return;
+  let rc = null;
+  try {
+    rc = await l3Client.waitForTransactionReceipt({ hash: txHash, timeout: attempt === 0 ? 180_000 : 20_000 });
+  } catch {
+    rc = await l3Client.getTransactionReceipt({ hash: txHash }).catch(() => null);
+  }
+  if (rc) {
+    return withDripLock(() => {
+      try {
+        if (rc.status === 'success') setDripStatus(key, txHash, 'confirmed');
+        else freeDripSlot(key, txHash, `${txHash} reverted`);
+      } catch (e) { console.error('[robinhood] could not update the drip ledger:', e.message); }
+    });
+  }
+  const done = await withDripLock(async () => {
+    const cur = dripLedger.drips[key];
+    if (!cur || cur.txHash !== txHash) return true;
+    const [latest, seen] = await Promise.all([
+      l3Client.getTransactionCount({ address: DESK_RELAYER.address, blockTag: 'latest' }).catch(() => null),
+      nodeHasTx(txHash),
+    ]);
+    if (Number.isInteger(nonce) && latest != null && latest > nonce && seen === false) {
+      try { freeDripSlot(key, txHash, `${txHash} can never land: nonce ${nonce} was used by another transaction`); } catch (e) { console.error('[robinhood] could not free a drip slot:', e.message); }
+      return true;
+    }
+    if (seen === false && cur.raw) {
+      // The node does not have it and its nonce is still free: send the same signed bytes again (same hash).
+      try {
+        await deskRelayerWallet.sendRawTransaction({ serializedTransaction: cur.raw });
+        console.log(`[robinhood] rebroadcast drip ${txHash}`);
+        return 'rebroadcast';
+      } catch (e) {
+        console.warn(`[robinhood] rebroadcast of drip ${txHash} failed:`, e.shortMessage || e.message);
+      }
+    }
+    return false;
+  });
+  if (done === true) return;
+  // Right after a rebroadcast, look again soon; otherwise every 10 minutes.
+  if (attempt + 1 < DRIP_FOLLOW_TRIES) setTimeout(() => { followDrip(key, txHash, nonce, attempt + 1); }, done === 'rebroadcast' ? 15_000 : 10 * 60_000).unref?.();
+  else console.warn(`[robinhood] drip ${txHash} still unsettled after ${DRIP_FOLLOW_TRIES} checks; its slot stays taken`);
+}
+// Anything left unsettled by a restart or a crash is picked up again at boot.
+if (DESK_RELAYER && !dripLedgerBroken) {
+  for (const [key, d] of Object.entries(dripLedger.drips)) {
+    if (d && d.txHash && d.status !== 'confirmed') followDrip(key, d.txHash, d.nonce).catch((e) => console.warn('[robinhood] followDrip:', e.message));
+  }
+}
+
+// Fly's edge sets Fly-Client-IP and overwrites anything a client sends under that name. X-Forwarded-For is
+// appendable by the client, so it is never read here. Off Fly the header means nothing, so the socket decides.
+function clientIp(req) {
+  if (process.env.FLY_APP_NAME) {
+    const fly = String(req.get('fly-client-ip') || '').trim();
+    if (fly) return fly;
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+/**
+ * The unit a per-IP limit counts. IPv4: the address. IPv6: its /64, because one line or VPS usually gets a whole
+ * /64 and can use a fresh address for every request. An IPv4-mapped IPv6 address (::ffff:1.2.3.4) counts as IPv4.
+ */
+function ipLimitKey(ip) {
+  let s = String(ip || '').trim().replace(/^\[|\]$/g, '');
+  const zone = s.indexOf('%');
+  if (zone >= 0) s = s.slice(0, zone);
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(s);
+  if (mapped) s = mapped[1];
+  if (net.isIPv4(s)) return s;
+  if (!net.isIPv6(s)) return s || 'unknown';
+  const toGroups = (part) => (part ? part.split(':') : []).flatMap((g) => {
+    if (!g.includes('.')) return [g];
+    const b = g.split('.').map(Number); // an embedded IPv4 tail is two groups
+    return [((b[0] << 8) | b[1]).toString(16), ((b[2] << 8) | b[3]).toString(16)];
+  });
+  const dbl = s.indexOf('::');
+  const head = toGroups(dbl >= 0 ? s.slice(0, dbl) : s);
+  const tail = dbl >= 0 ? toGroups(s.slice(dbl + 2)) : [];
+  const groups = dbl >= 0 ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail] : head;
+  return `${groups.slice(0, 4).map((g) => parseInt(g || '0', 16).toString(16)).join(':')}::/64`;
+}
+// The ledger keeps a keyed hash of the IP (or the IPv6 /64), not the IP.
+const dripIpKey = (ip) => crypto.createHmac('sha256', SESSION_SECRET).update(`robinhood-drip:${ipLimitKey(ip)}`).digest('hex').slice(0, 32);
+const SIGN_IN_HINT = 'Sign in with X first (/auth/x/login?returnTo=/robinhood).';
+
+// --- GET /api/robinhood/otc ----------------------------------------------------
+let otcImmutables = null; // constants read once from the deployed contracts
+async function readOtcImmutables() {
+  if (!OTC_DEPLOYED) return null;
+  if (otcImmutables) return otcImmutables;
+  const o = (functionName, args) => l3Client.readContract({ address: ROBINHOOD_OTC, abi: OTC_VIEW_ABI, functionName, args }).catch(() => null);
+  const a = (functionName) => l3Client.readContract({ address: OTC_ARBITRATION, abi: ARBITRATION_VIEW_ABI, functionName }).catch(() => null);
+  const BIG = 1_000_000_000_000_000_000_000n; // 1000 ETH: the percentage decides; bondFor(1 wei) is the floor
+  const [payWindow, releaseWindow, feeBps, bondMin, bondBig, otcArb, minStake, stakeAge, commit, reveal, longStop, slashBps, unstakeDelay, arbEscrow] = await Promise.all([
+    o('PAY_WINDOW'), o('RELEASE_WINDOW'), o('FEE_BPS'), o('bondFor', [1n]), o('bondFor', [BIG]), o('arbitration'),
+    a('MIN_STAKE'), a('STAKE_AGE'), a('COMMIT'), a('REVEAL'), a('LONG_STOP'), a('SLASH_BPS'), a('UNSTAKE_DELAY'), a('escrow'),
+  ]);
+  const got = { payWindow, releaseWindow, feeBps, bondMin, bondBig, otcArb, minStake, stakeAge, commit, reveal, longStop, slashBps, unstakeDelay, arbEscrow };
+  const values = {
+    payWindowS: payWindow != null ? Number(payWindow) : OTC_SPEC.payWindowS,
+    releaseWindowS: releaseWindow != null ? Number(releaseWindow) : OTC_SPEC.releaseWindowS,
+    feeBps: feeBps != null ? Number(feeBps) : OTC_SPEC.feeBps,
+    bondMinWei: bondMin != null ? bondMin : OTC_SPEC.bondMinWei,
+    bondBps: bondBig != null ? Number((bondBig * 10_000n) / BIG) : OTC_SPEC.bondBps,
+    minStakeWei: minStake != null ? minStake : OTC_SPEC.minStakeWei,
+    stakeAgeS: stakeAge != null ? Number(stakeAge) : OTC_SPEC.stakeAgeS,
+    commitS: commit != null ? Number(commit) : OTC_SPEC.commitS,
+    revealS: reveal != null ? Number(reveal) : OTC_SPEC.revealS,
+    longStopS: longStop != null ? Number(longStop) : OTC_SPEC.longStopS,
+    slashBps: slashBps != null ? Number(slashBps) : OTC_SPEC.slashBps,
+    unstakeDelayS: unstakeDelay != null ? Number(unstakeDelay) : OTC_SPEC.unstakeDelayS,
+  };
+  const complete = Object.values(got).every((v) => v != null);
+  const wired = otcArb != null && arbEscrow != null
+    ? getAddress(otcArb) === OTC_ARBITRATION && getAddress(arbEscrow) === ROBINHOOD_OTC
+    : null;
+  if (wired === false) console.error(`[robinhood] OTC wiring mismatch: escrow.arbitration()=${otcArb}, arbitration.escrow()=${arbEscrow}; disputes will fail until bind(escrow) is called`);
+  const out = { values, source: complete ? 'chain' : 'partial', wired };
+  if (complete && wired === true) otcImmutables = out; // cache only what the chain fully confirmed (bind is one-time)
+  return out;
+}
+function otcParams(values, source) {
+  const v = values || OTC_SPEC;
+  return {
+    source: source || 'spec',
+    payWindowS: v.payWindowS,
+    releaseWindowS: v.releaseWindowS,
+    feeBps: v.feeBps,
+    fee: `${(v.feeBps / 100).toFixed(2)}% of the ETH paid to the buyer, all of it as WETH to the Fee Fanout. The seller pays no fee.`,
+    bond: {
+      minWei: v.bondMinWei.toString(),
+      bps: v.bondBps,
+      rule: `A seller who disputes posts a bond of exactly ${formatEther(v.bondMinWei)} ETH or ${v.bondBps / 100}% of the trade, whichever is larger (no more, no less). It is the only thing arbiters are paid from (with the slashed stakes of losing or silent voters): all of it goes to the majority if they find the buyer paid; half goes to the majority and half back to the seller if they find the buyer did not pay. After the long-stop (no decision) all of it goes back to the seller.`,
+    },
+    arbitration: {
+      minStakeWei: v.minStakeWei.toString(),
+      stakeAgeS: v.stakeAgeS,
+      weight: 'The whole stake, no cap. It counts on a dispute only if it was last increased at least stakeAgeS before the dispute opened.',
+      commitS: v.commitS,
+      revealS: v.revealS,
+      extensions: 'Repeated: a tie or no quorum adds another commit and reveal round, until quorum or the long-stop.',
+      longStopS: v.longStopS,
+      longStop: 'No decision by longStopS after the dispute opened: the ETH goes back to the seller, the bond goes back to the seller, and the buyer is not flagged.',
+      quorumRevealers: 3,
+      slashBps: v.slashBps,
+      unstakeDelayS: v.unstakeDelayS,
+    },
+    limits: {
+      openTradesPerBuyer: 1,
+      flaggedBuyersCanTake: false,
+      unpaidTake: 'After the pay window anyone can cancel an unpaid trade. On a sell order the ETH goes back onto the order, which stays open unless the maker cancelled it.',
+    },
+  };
+}
+
+let otcInfoCache = { at: 0, body: null };
+async function otcInfoBody() {
+  if (otcInfoCache.body && Date.now() - otcInfoCache.at < 10_000) return otcInfoCache.body;
+  const o = (functionName) => l3Client.readContract({ address: ROBINHOOD_OTC, abi: OTC_VIEW_ABI, functionName }).catch(() => null);
+  const a = (functionName) => l3Client.readContract({ address: OTC_ARBITRATION, abi: ARBITRATION_VIEW_ABI, functionName }).catch(() => null);
+  const [imm, relayerBal, amountWei, gasPrice, ordersLength, tradesLength, openDisputeIds] = await Promise.all([
+    readOtcImmutables().catch(() => null),
+    DESK_RELAYER ? l3Client.getBalance({ address: DESK_RELAYER.address }).catch(() => null) : null,
+    dripAmountWei(),
+    robinhoodGasPrice().catch(() => 0n),
+    OTC_DEPLOYED ? o('ordersLength') : null,
+    OTC_DEPLOYED ? o('tradesLength') : null,
+    OTC_DEPLOYED ? a('openDisputeIds') : null,
+  ]);
+  const remainingToday = Math.max(0, DRIP_DAILY_CAP - dripCounts(null).total);
+  const funded = relayerBal != null && relayerBal >= amountWei + gasPrice * DRIP_SEND_GAS_RESERVE;
+  const reason = !OTC_DEPLOYED ? 'The desk is not deployed yet.'
+    : !DESK_RELAYER ? 'The gas drip is not set up on this host.'
+    : dripLedgerBroken ? 'The gas drip is paused while its ledger is repaired.'
+    : remainingToday === 0 ? `Today's ${DRIP_DAILY_CAP} drips are used up. It resets at 00:00 UTC.`
+    : relayerBal == null ? 'Could not read the relayer balance on Robinhood Chain.'
+    : !funded ? 'The relayer is out of ETH for now.'
+    : null;
+  const body = {
+    chainId: ROBINHOOD_CHAIN_ID,
+    otc: ROBINHOOD_OTC,
+    arbitration: OTC_ARBITRATION,
+    deployed: OTC_DEPLOYED,
+    status: OTC_DEPLOYED ? 'live' : 'not deployed yet',
+    rpcUrl: ROBINHOOD_PUBLIC_RPC,
+    weth: ROBINHOOD_WETH,
+    feeFanout: ROBINHOOD_FEE_FANOUT,
+    params: otcParams(imm?.values, imm?.source),
+    state: OTC_DEPLOYED ? {
+      wired: imm ? imm.wired : null,
+      ordersLength: ordersLength != null ? Number(ordersLength) : null,
+      tradesLength: tradesLength != null ? Number(tradesLength) : null,
+      openDisputes: Array.isArray(openDisputeIds) ? openDisputeIds.map((x) => x.toString()) : null,
+    } : null,
+    relayer: {
+      configured: !!DESK_RELAYER,
+      address: DESK_RELAYER ? DESK_RELAYER.address : null,
+      ethBalance: relayerBal != null ? formatEther(relayerBal) : null,
+    },
+    drip: {
+      available: reason === null,
+      amountWei: amountWei.toString(),
+      amountEth: formatEther(amountWei),
+      remainingToday,
+      dailyCap: DRIP_DAILY_CAP,
+      perIpPerDay: DRIP_PER_IP_DAILY,
+      requiresSignIn: true,
+      eligibility: 'Once per X account and once per address, ever, for a wallet with under 0.00001 ETH on Robinhood Chain. Free: it covers gas for about 4 desk transactions.',
+      reason,
+    },
+    evidence: {
+      upload: 'POST /api/robinhood/evidence',
+      types: ['image/png', 'image/jpeg', 'image/webp', 'text/plain'],
+      maxImageBytes: EVIDENCE_MAX_IMAGE_BYTES,
+      maxTextBytes: EVIDENCE_MAX_TEXT_BYTES,
+      onlyForDisputedTrades: true,
+      perTradePerAccount: EVIDENCE_PER_TRADE_PER_ACCOUNT,
+      perAccountPerDay: EVIDENCE_PER_ACCOUNT_DAILY,
+      allAccountsBytesPerDay: EVIDENCE_DAILY_BYTES,
+      note: 'Only for a trade in dispute, and only by its buyer or seller (the X account whose handle is on the trade). Files are public to anyone with the link, so arbiters can read them. Do not upload anything you would not show a stranger.',
+    },
+  };
+  otcInfoCache = { at: Date.now(), body };
+  return body;
+}
+
+app.get('/api/robinhood/otc', async (req, res) => {
+  try {
+    const body = await otcInfoBody();
+    // Per-viewer, so never cached with the rest.
+    const user = currentUser(req);
+    const mine = user ? dripFor({ xId: user.id }) : null;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ...body,
+      you: {
+        signedIn: !!user,
+        handle: user ? user.handle : null,
+        drip: mine ? { address: mine.address || null, txHash: mine.entry?.txHash || null, status: mine.entry?.status || null } : null,
+      },
+    });
+  } catch (e) {
+    res.status(502).json({ error: `Could not read Robinhood Chain: ${e.shortMessage || e.message}` });
+  }
+});
+
+// --- POST /api/robinhood/gas/drip ----------------------------------------------
+app.post('/api/robinhood/gas/drip', async (req, res) => {
+  const user = currentUser(req);
+  if (!user || !user.id) return res.status(401).json({ error: `The gas drip needs your X account. ${SIGN_IN_HINT}` });
+  const xId = String(user.id);
+  const raw = req.body && typeof req.body.address === 'string' ? req.body.address.trim() : '';
+  if (!ADDRESS_RE.test(raw) || !isAddress(raw)) {
+    return res.status(400).json({ error: 'Send {"address":"0x..."} with a valid address (40 hex characters; a mixed-case address must have a correct checksum).' });
+  }
+  const address = getAddress(raw);
+  const key = address.toLowerCase();
+  if (!OTC_DEPLOYED) return res.status(503).json({ error: 'The Robinhood OTC desk is not deployed yet, so there is nothing to drip gas for.' });
+  if (!DESK_RELAYER || !deskRelayerWallet) {
+    return res.status(503).json({ error: 'The gas drip is not set up on this host (no relayer key configured). You need a little ETH on Robinhood Chain from somewhere else to trade.' });
+  }
+  if (dripLedgerBroken) return res.status(503).json({ error: 'The gas drip is paused while its ledger is repaired. Try again later.' });
+  const already = () => {
+    const d = dripFor({ address: key, xId });
+    if (!d) return null;
+    return {
+      status: 409,
+      body: d.by === 'address'
+        ? { error: 'This address already got its one drip.', txHash: d.entry?.txHash || null }
+        : { error: `@${user.handle} already got its one drip (to ${d.address ? getAddress(d.address) : 'another address'}).`, txHash: d.entry?.txHash || null },
+    };
+  };
+  const first = already();
+  if (first) return res.status(first.status).json(first.body);
+
+  const ipKey = dripIpKey(clientIp(req));
+  try {
+    // Reads first (no lock needed), then every ledger check again under the lock right before sending.
+    const [ethBal, code] = await Promise.all([l3Client.getBalance({ address }), l3Client.getCode({ address })]);
+    // A contract cannot use a drip to sign anything. EIP-7702 wallets (code 0xef0100...) can.
+    if (code && code !== '0x' && !code.toLowerCase().startsWith('0xef0100')) {
+      return res.status(400).json({ error: 'That address is a contract. The drip is for wallets.' });
+    }
+    if (ethBal >= DRIP_OWNER_MAX_WEI) {
+      return res.status(409).json({ error: `This wallet already has ${formatEther(ethBal)} ETH on Robinhood Chain, enough for gas. The drip is for wallets under 0.00001 ETH.` });
+    }
+
+    const out = await withDripLock(async () => {
+      const again = already();
+      if (again) return again;
+      const counts = dripCounts(ipKey);
+      if (counts.total >= DRIP_DAILY_CAP) return { status: 429, body: { error: `Today's ${DRIP_DAILY_CAP} drips are used up. It resets at 00:00 UTC.` } };
+      if (counts.ip >= DRIP_PER_IP_DAILY) return { status: 429, body: { error: `This connection already used its ${DRIP_PER_IP_DAILY} drips today. It resets at 00:00 UTC.` } };
+
+      const [amountWei, gasPrice, relayerBal] = await Promise.all([
+        dripAmountWei(),
+        robinhoodGasPrice(),
+        l3Client.getBalance({ address: DESK_RELAYER.address }),
+      ]);
+      if (relayerBal < amountWei + gasPrice * DRIP_SEND_GAS_RESERVE) {
+        return { status: 503, body: { error: 'The relayer is out of ETH for now. Try again later.' } };
+      }
+
+      // Sign first, so the hash is known before anything leaves this host. The slot goes on disk with that hash
+      // before the send: a crash after the send can never allow a second drip, and a send that fails in an unclear
+      // way (a timeout, a lost response) keeps the slot under a hash that followDrip can settle later.
+      let serialized, txHash, nonce;
+      try {
+        const request = await deskRelayerWallet.prepareTransactionRequest({ account: DESK_RELAYER, chain: robinhoodChain, to: address, value: amountWei });
+        nonce = Number(request.nonce);
+        serialized = await deskRelayerWallet.signTransaction(request);
+        txHash = keccak256(serialized);
+      } catch (e) {
+        console.warn(`[robinhood] drip to ${address} could not be prepared:`, e.shortMessage || e.message);
+        return { status: 502, body: { error: `The drip could not be prepared: ${e.shortMessage || 'Robinhood Chain RPC error'}. Nothing was sent; try again.` } };
+      }
+      const now = Date.now();
+      const entry = { xId, handle: user.handle, amountWei: amountWei.toString(), ip: ipKey, at: now, day: utcDay(now), status: 'sending', txHash, nonce, raw: serialized };
+      const before = dripLedger;
+      try {
+        saveDripLedger({ ...dripLedger, drips: { ...dripLedger.drips, [key]: entry }, accounts: { ...dripLedger.accounts, [xId]: key } });
+      } catch (e) {
+        console.error('[robinhood] could not write the drip ledger:', e.message);
+        return { status: 500, body: { error: 'Could not record the drip, so nothing was sent. Try again.' } };
+      }
+
+      let sendErr = null;
+      try {
+        await deskRelayerWallet.sendRawTransaction({ serializedTransaction: serialized });
+      } catch (e) {
+        sendErr = e;
+      }
+      if (sendErr) {
+        const seen = await nodeHasTx(txHash);
+        if (seen === false && isRpcRejection(sendErr)) {
+          // The node answered with a rejection and does not have the transaction: nothing can land. Free both slots.
+          try { saveDripLedger(before); } catch (w) { console.error('[robinhood] could not release a failed drip slot:', w.message); }
+          const why = String(sendErr.details || sendErr.shortMessage || 'RPC error').split('\n')[0].slice(0, 200);
+          console.warn(`[robinhood] drip to ${address} was rejected:`, why);
+          return { status: 502, body: { error: `Robinhood Chain rejected the drip (${why}). Nothing was spent; try again later.` } };
+        }
+        if (seen !== true) {
+          // Unclear: the node may have taken it. Keep the slot; followDrip rebroadcasts or settles it.
+          try { setDripStatus(key, txHash, 'unknown'); } catch (w) { console.error('[robinhood] could not mark a drip unknown:', w.message); }
+          console.warn(`[robinhood] drip ${txHash} to ${address}: send outcome unclear:`, sendErr.shortMessage || sendErr.message);
+          return {
+            status: 202,
+            body: {
+              txHash, amountWei: amountWei.toString(), amountEth: formatEther(amountWei), to: address, uncertain: true,
+              message: 'The drip was signed and handed to Robinhood Chain, but the node did not confirm it took it. Do not ask again: this host keeps retrying the same transaction, and it lands at this hash or not at all.',
+            },
+            txHash, nonce,
+          };
+        }
+      }
+      try {
+        setDripStatus(key, txHash, 'sent');
+      } catch (e) {
+        // The reservation (with the hash) is already on disk, so neither the address nor the X account can be dripped twice.
+        console.error('[robinhood] could not save a drip status:', e.message);
+      }
+      return { status: 200, body: { txHash, amountWei: amountWei.toString(), amountEth: formatEther(amountWei), to: address }, txHash, nonce };
+    });
+
+    otcInfoCache = { at: 0, body: null };
+    if (out.status !== 200 && out.status !== 202) return res.status(out.status).json(out.body);
+    console.log(`[robinhood] drip of ${formatEther(BigInt(out.body.amountWei))} ETH to ${address} for @${user.handle}: ${out.txHash}${out.status === 202 ? ' (outcome unclear)' : ''}`);
+    res.status(out.status).json(out.body);
+
+    // Settle in the background: confirmed, reverted (slot freed), or never able to land (slot freed).
+    followDrip(key, out.txHash, out.nonce).catch((e) => console.warn('[robinhood] followDrip:', e.message));
+  } catch (e) {
+    console.error('[robinhood/gas/drip]', e.shortMessage || e.message);
+    if (!res.headersSent) res.status(502).json({ error: `Could not read Robinhood Chain: ${e.shortMessage || e.message}` });
+  }
+});
+
+// --- evidence: POST /api/robinhood/evidence, GET /api/robinhood/evidence/:file -----
+// Accepted shapes (the bodies are parsed near the top of this file, before the general JSON parser):
+//   multipart/form-data   fields tradeId and file (one png/jpeg/webp) or text
+//   application/json      { tradeId, text } or { tradeId, image: "<base64 or data:image/...;base64,...>" }
+//   raw body              Content-Type image/png | image/jpeg | image/webp | application/octet-stream | text/plain,
+//                         with ?tradeId=N (or an X-Trade-Id header)
+// The file type is decided by its magic bytes, never by what the client claims. Names are random, so a stored file
+// can only be found through the uri this returns (which the uploader then puts on chain).
+const EVIDENCE_DIR = path.join(DATA_DIR, 'robinhood-evidence');
+fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
+const EVIDENCE_INDEX_FILE = path.join(EVIDENCE_DIR, 'index.json');
+const EVIDENCE_PER_TRADE_PER_ACCOUNT = 10;
+const EVIDENCE_PER_ACCOUNT_DAILY = 30;
+// Everyone together, per UTC day, and a floor of free space that uploads never eat into, so evidence can never
+// fill /data (the drip ledger, the session key and the withdrawal records live there too).
+const EVIDENCE_DAILY_BYTES = (() => { const n = Number(process.env.EVIDENCE_DAILY_BYTES ?? 100 * 1024 * 1024); return Number.isSafeInteger(n) && n >= 0 ? n : 100 * 1024 * 1024; })();
+const EVIDENCE_MIN_FREE_BYTES = 256 * 1024 * 1024; // or 10% of the volume, whichever is larger
+const TRADE_STATUS_DISPUTED = 5;
+/** Bytes still free for evidence on the volume, after the floor; null when the filesystem will not say. */
+function evidenceRoomBytes() {
+  try {
+    const st = fs.statfsSync(EVIDENCE_DIR);
+    const total = Number(st.blocks) * Number(st.bsize);
+    const free = Number(st.bavail) * Number(st.bsize);
+    return free - Math.max(EVIDENCE_MIN_FREE_BYTES, Math.floor(total * 0.1));
+  } catch {
+    return null;
+  }
+}
+const EVIDENCE_FILE_RE = /^[0-9a-f]{32}\.(png|jpg|webp|txt)$/;
+const EVIDENCE_TYPES = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', txt: 'text/plain; charset=utf-8' };
+let evidenceIndex = { version: 1, files: {} };
+let evidenceIndexBroken = false;
+try {
+  if (fs.existsSync(EVIDENCE_INDEX_FILE)) {
+    const j = JSON.parse(fs.readFileSync(EVIDENCE_INDEX_FILE, 'utf8'));
+    if (!j || typeof j !== 'object' || !j.files || typeof j.files !== 'object') throw new Error('missing files map');
+    evidenceIndex = j;
+  }
+} catch (e) {
+  evidenceIndexBroken = true;
+  console.error(`[robinhood] ${EVIDENCE_INDEX_FILE} is unreadable; evidence uploads are off until it is fixed:`, e.message);
+}
+const withEvidenceLock = makeLock();
+
+function sniffImage(buf) {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf.toString('latin1', 1, 4) === 'PNG' && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) return 'png';
+  if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 16 && buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+/** Strict UTF-8 with no control characters other than tab, newline and carriage return; null if it is not. */
+function plainText(buf) {
+  let s;
+  try { s = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return null; }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(s)) return null;
+  s = s.replace(/^﻿/, '').replace(/\r\n?/g, '\n').trim();
+  return s ? s : null;
+}
+/** A minimal multipart/form-data reader: enough for one file and a couple of short fields. */
+function parseMultipart(buf, contentType) {
+  const m = /boundary=(?:"([^"]{1,70})"|([^;\s]{1,70}))/i.exec(contentType || '');
+  if (!m) return null;
+  const delim = Buffer.from(`--${m[1] || m[2]}`);
+  const parts = [];
+  let pos = buf.indexOf(delim);
+  if (pos < 0) return null;
+  while (pos >= 0) {
+    pos += delim.length;
+    if (buf[pos] === 0x2d && buf[pos + 1] === 0x2d) break; // closing --boundary--
+    if (buf[pos] === 0x0d && buf[pos + 1] === 0x0a) pos += 2;
+    const headEnd = buf.indexOf('\r\n\r\n', pos);
+    if (headEnd < 0) return null;
+    const head = buf.toString('utf8', pos, headEnd);
+    const next = buf.indexOf(Buffer.concat([Buffer.from('\r\n'), delim]), headEnd + 4);
+    if (next < 0) return null;
+    const cd = /content-disposition:[^\r\n]*/i.exec(head)?.[0] || '';
+    const name = /\bname="([^"]*)"/i.exec(cd)?.[1];
+    const isFile = /\bfilename="/i.test(cd);
+    const image = /content-type:\s*image\//i.test(head);
+    if (name) parts.push({ name, isFile, image, data: buf.subarray(headEnd + 4, next) });
+    if (parts.length > 8) return null;
+    pos = next + 2;
+  }
+  return parts;
+}
+/** { tradeId, bytes? , text? } from any accepted shape, or { error }. */
+function readEvidenceUpload(req) {
+  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  let tradeId = req.query.tradeId ?? req.get('x-trade-id');
+  let bytes = null, text = null, claimedImage = false;
+  if (ct.startsWith('multipart/form-data')) {
+    if (!Buffer.isBuffer(req.body)) return { error: 'Could not read the upload.' };
+    const parts = parseMultipart(req.body, req.headers['content-type']);
+    if (!parts) return { error: 'Could not read the multipart upload.' };
+    for (const p of parts) {
+      if (p.name === 'tradeId' && !p.isFile) tradeId = p.data.toString('utf8').trim();
+      else if (p.isFile || p.name === 'file' || p.name === 'image') {
+        if (bytes) return { error: 'Send one file per upload.' };
+        bytes = p.data; claimedImage = p.image;
+      }
+      else if (p.name === 'text') text = p.data;
+    }
+  } else if (ct.startsWith('application/json')) {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    if (b.tradeId != null) tradeId = b.tradeId;
+    if (typeof b.image === 'string' && b.image) {
+      const m = /^(?:data:image\/[a-z0-9.+-]+;base64,)?([A-Za-z0-9+/=\s]+)$/i.exec(b.image);
+      if (!m) return { error: 'image must be base64 or a data:image/...;base64 URL.' };
+      bytes = Buffer.from(m[1].replace(/\s+/g, ''), 'base64');
+      claimedImage = true;
+    } else if (typeof b.text === 'string') {
+      text = Buffer.from(b.text, 'utf8');
+    }
+  } else if (Buffer.isBuffer(req.body)) {
+    if (ct.startsWith('text/plain')) text = req.body;
+    else { bytes = req.body; claimedImage = ct.startsWith('image/'); }
+  } else {
+    return { error: 'Send one png, jpeg or webp image, or plain text: multipart/form-data (tradeId + file or text), JSON {"tradeId":N,"text":"..."}, or the raw bytes with ?tradeId=N.' };
+  }
+  tradeId = typeof tradeId === 'number' && Number.isSafeInteger(tradeId) ? String(tradeId) : String(tradeId ?? '').trim();
+  if (!/^\d{1,19}$/.test(tradeId)) return { error: 'Send tradeId, the trade number (a whole number).' };
+  if (bytes && bytes.length && text && text.length) return { error: 'Send one file or some text per upload, not both.' };
+  if (bytes && bytes.length) {
+    const ext = sniffImage(bytes);
+    if (ext) {
+      if (bytes.length > EVIDENCE_MAX_IMAGE_BYTES) return { status: 413, error: 'Images are limited to 2 MB.' };
+      return { tradeId: BigInt(tradeId), ext, data: bytes };
+    }
+    // A file that is really plain text (a .txt, or text sent as octet-stream) is fine; anything else is not.
+    const t = claimedImage ? null : plainText(bytes);
+    if (t == null) return { error: 'That file is not a png, jpeg or webp image, or plain text.' };
+    text = Buffer.from(t, 'utf8');
+  }
+  if (text) {
+    const t = plainText(text);
+    if (t == null) return { error: 'Text evidence must be plain UTF-8 text.' };
+    const data = Buffer.from(t, 'utf8');
+    if (data.length > EVIDENCE_MAX_TEXT_BYTES) return { status: 413, error: 'Text evidence is limited to 20 KB.' };
+    return { tradeId: BigInt(tradeId), ext: 'txt', data };
+  }
+  return { error: 'Nothing to store: send one png, jpeg or webp image, or some text.' };
+}
+const normHandle = (h) => String(h || '').trim().replace(/^@/, '').toLowerCase();
+
+app.post('/api/robinhood/evidence', async (req, res) => {
+  const user = currentUser(req);
+  if (!user || !user.id) return res.status(401).json({ error: `Evidence uploads need your X account. ${SIGN_IN_HINT}` });
+  const up = readEvidenceUpload(req);
+  if (up.error) return res.status(up.status || 400).json({ error: up.error });
+  if (!ROBINHOOD_OTC) return res.status(503).json({ error: 'The Robinhood OTC desk is not deployed yet, so there are no trades to add evidence to.' });
+  if (evidenceIndexBroken) return res.status(503).json({ error: 'Evidence uploads are paused while their index is repaired. Try again later.' });
+
+  let trade;
+  try {
+    trade = await l3Client.readContract({ address: ROBINHOOD_OTC, abi: OTC_VIEW_ABI, functionName: 'getTrade', args: [up.tradeId] });
+  } catch (e) {
+    const reverted = /revert|execution reverted|returned no data/i.test(`${e.shortMessage || ''} ${e.message || ''}`);
+    if (reverted) return res.status(404).json({ error: `There is no trade #${up.tradeId} on the desk.` });
+    return res.status(502).json({ error: `Could not read Robinhood Chain: ${e.shortMessage || e.message}` });
+  }
+  if (!trade || trade.seller === ZERO_ADDRESS) return res.status(404).json({ error: `There is no trade #${up.tradeId} on the desk.` });
+  // OtcArbitration.submitEvidence only takes evidence for an open dispute, so nothing else is worth storing.
+  if (Number(trade.status) !== TRADE_STATUS_DISPUTED) {
+    return res.status(409).json({ error: `Evidence is only taken for a trade in dispute. Trade #${up.tradeId} is ${TRADE_STATUS[Number(trade.status)] || `in status ${trade.status}`}.` });
+  }
+  const me = normHandle(user.handle);
+  const side = me && me === normHandle(trade.sellerXHandle) ? 'seller' : me && me === normHandle(trade.buyerXHandle) ? 'buyer' : null;
+  if (!side) {
+    return res.status(403).json({ error: `Only the two X accounts on trade #${up.tradeId} (@${normHandle(trade.sellerXHandle)} and @${normHandle(trade.buyerXHandle)}) can add evidence. You are signed in as @${user.handle}.` });
+  }
+
+  const xId = String(user.id);
+  const tradeKey = up.tradeId.toString();
+  const sha256 = crypto.createHash('sha256').update(up.data).digest('hex');
+  try {
+    const out = await withEvidenceLock(async () => {
+      const today = utcDay();
+      let mineToday = 0, mineThisTrade = 0, bytesToday = 0;
+      for (const [file, f] of Object.entries(evidenceIndex.files)) {
+        if (f.day === today) bytesToday += Number(f.bytes) || 0;
+        if (f.xId !== xId) continue;
+        if (f.day === today) mineToday++;
+        if (f.tradeId === tradeKey) {
+          mineThisTrade++;
+          if (f.sha256 === sha256) return { status: 200, body: { file, deduped: true, contentType: EVIDENCE_TYPES[file.split('.')[1]], bytes: f.bytes, sha256 } };
+        }
+      }
+      if (mineThisTrade >= EVIDENCE_PER_TRADE_PER_ACCOUNT) return { status: 429, body: { error: `You already added ${EVIDENCE_PER_TRADE_PER_ACCOUNT} files to trade #${tradeKey}, the most one account can.` } };
+      if (mineToday >= EVIDENCE_PER_ACCOUNT_DAILY) return { status: 429, body: { error: `You already uploaded ${EVIDENCE_PER_ACCOUNT_DAILY} files today. It resets at 00:00 UTC.` } };
+      if (bytesToday + up.data.length > EVIDENCE_DAILY_BYTES) {
+        return { status: 429, body: { error: 'The desk has taken all the evidence uploads it stores in one day. It resets at 00:00 UTC. You can still paste a link as evidence.' } };
+      }
+      const room = evidenceRoomBytes();
+      if (room == null || room < up.data.length) {
+        if (room != null) console.error(`[robinhood] evidence refused: the volume is at its free-space floor (${room} bytes of room)`);
+        return { status: 507, body: { error: 'The host is short of disk space, so it is not storing evidence files right now. You can still paste a link as evidence.' } };
+      }
+
+      const file = `${crypto.randomBytes(16).toString('hex')}.${up.ext}`;
+      const full = path.join(EVIDENCE_DIR, file);
+      const fd = fs.openSync(full, 'wx', 0o644);
+      try { fs.writeSync(fd, up.data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      const now = Date.now();
+      const next = { ...evidenceIndex, files: { ...evidenceIndex.files, [file]: { tradeId: tradeKey, xId, handle: user.handle, side, at: now, day: utcDay(now), bytes: up.data.length, sha256 } } };
+      try { writeJsonAtomic(EVIDENCE_INDEX_FILE, next); } catch (e) {
+        try { fs.unlinkSync(full); } catch {}
+        throw e;
+      }
+      evidenceIndex = next;
+      return { status: 200, body: { file, deduped: false, contentType: EVIDENCE_TYPES[up.ext], bytes: up.data.length, sha256 } };
+    });
+    if (out.status !== 200) return res.status(out.status).json(out.body);
+    const p = `/api/robinhood/evidence/${out.body.file}`;
+    if (!out.body.deduped) console.log(`[robinhood] evidence for trade #${tradeKey} from @${user.handle} (${side}): ${out.body.file}, ${out.body.bytes} bytes`);
+    res.json({ ok: true, tradeId: tradeKey, side, path: p, uri: `${PUBLIC_ORIGIN}${p}`, ...out.body });
+  } catch (e) {
+    console.error('[robinhood/evidence] could not store an upload:', e.message);
+    res.status(500).json({ error: 'Could not store the file. Nothing was saved; try again.' });
+  }
+});
+
+app.get('/api/robinhood/evidence/:file', (req, res) => {
+  const file = String(req.params.file || '');
+  // The name must be one this host generated: 32 hex characters and a known extension, nothing else. That rules
+  // out every path trick (slashes, dots, encoded separators) before the filesystem is touched.
+  if (!EVIDENCE_FILE_RE.test(file) || !evidenceIndex.files[file]) return res.status(404).json({ error: 'No such evidence file.' });
+  const full = path.join(EVIDENCE_DIR, file);
+  if (path.dirname(full) !== EVIDENCE_DIR) return res.status(404).json({ error: 'No such evidence file.' });
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) return res.status(404).json({ error: 'No such evidence file.' });
+    res.set({
+      'Content-Type': EVIDENCE_TYPES[file.split('.')[1]],
+      'Content-Length': String(st.size),
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+      'Content-Disposition': `inline; filename="evidence-${file}"`,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'Referrer-Policy': 'no-referrer',
+    });
+    if (req.method === 'HEAD') return res.end();
+    const s = fs.createReadStream(full);
+    s.on('error', () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
+    s.pipe(res);
+  });
+});
+app.all('/api/robinhood/evidence/:file', (_req, res) => res.status(405).set('Allow', 'GET, HEAD').json({ error: 'Evidence files are read-only.' }));
 
 // ---------------------------------------------------------------------------
 // Frontend + per-order / per-trade link previews.

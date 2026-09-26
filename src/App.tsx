@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { OrbitXMoneyOtc } from './components/OrbitXMoneyOtc';
 import { NguLaunchpad } from './components/NguLaunchpad';
 import { McpConnector } from './components/McpConnector';
+import { RobinhoodOtc } from './components/RobinhoodOtc';
 import { Hero } from './components/Hero';
 import { UserWallet } from './types';
 import { connectInjectedWallet, switchNetwork, addXMoneyTokenToWallet, addOrbitL4ToWallet, loadL4Info, fetchL4XMoneyBalance, orbitL4RpcUrl, fetchXSession, xLoginUrl, xLogout, type XUser, L3_CHAIN_ID, L4_CHAIN_ID } from './contracts/web3Client';
@@ -12,6 +13,11 @@ import { Layers, Wallet, Volume2, VolumeX, AlertTriangle, Check, Plus, LogOut } 
 const KNOWN_CHAINS = new Set<number>([L3_CHAIN_ID, L4_CHAIN_ID]);
 // The retired chain. A wallet still on it gets told why, not just that it is on the wrong network.
 const LEGACY_L4_CHAIN_ID = CONTRACT_ADDRESSES.ORBIT_L4_LEGACY_CHAIN_ID;
+
+type AppTab = 'mcp' | 'otc' | 'ngu' | 'robinhood';
+// /robinhood (and anything under it) is the X Money dollars <-> ETH desk on Robinhood Chain. The Express catch-all
+// serves index.html for it, so the path alone decides the tab on load and on back/forward.
+const isRobinhoodPath = () => typeof window !== 'undefined' && /^\/robinhood(\/|$)/i.test(window.location.pathname);
 
 function shortChainLabel(id: number): string {
   if (id === L4_CHAIN_ID) return 'L4';
@@ -37,7 +43,44 @@ export default function App() {
   const [rpcMismatch, setRpcMismatch] = useState<{ wallet: number; sequencer: number } | null>(null);
   const [xUser, setXUser] = useState<XUser | null>(null);
   const [xConfigured, setXConfigured] = useState<boolean>(false);
-  const [tab, setTab] = useState<'mcp' | 'otc' | 'ngu'>('otc');
+  const [tab, setTabState] = useState<AppTab>(() => (isRobinhoodPath() ? 'robinhood' : 'otc'));
+  // The desk tab owns /robinhood; every other tab lives under '/' (the OTC desk then writes its own sub-path).
+  // The tab is also kept in history.state (appTab) so back/forward returns to MCP or NGU, not just the OTC desk.
+  const setTab = (next: AppTab) => {
+    if (next === tab) return;
+    if (next === 'robinhood') {
+      if (!isRobinhoodPath()) {
+        window.history.replaceState({ ...(window.history.state || {}), appTab: tab }, '');
+        window.history.pushState({ appTab: 'robinhood' }, '', '/robinhood');
+      }
+    } else if (isRobinhoodPath()) {
+      window.history.pushState({ appTab: next }, '', '/');
+    } else {
+      window.history.replaceState({ ...(window.history.state || {}), appTab: next }, '');
+    }
+    setTabState(next);
+  };
+  // A direct visit to /robinhood lands on the desk, not on the hero above it.
+  useEffect(() => {
+    if (!isRobinhoodPath()) return;
+    requestAnimationFrame(() => {
+      const el = document.getElementById('play');
+      if (!el) return;
+      // Clear the sticky header, which is two rows tall on phones.
+      const headerH = document.querySelector('header')?.getBoundingClientRect().height ?? 0;
+      window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - headerH - 8 });
+    });
+  }, []);
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      if (isRobinhoodPath()) { setTabState('robinhood'); return; }
+      const saved = e.state?.appTab as AppTab | undefined;
+      if (saved && saved !== 'robinhood') setTabState(saved);
+      else setTabState(prev => (prev === 'robinhood' ? 'otc' : prev));
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   // Sign in with X session
   useEffect(() => {
@@ -240,7 +283,7 @@ export default function App() {
 
       {l4Ready === false && (
         <div className="bg-amber-500/15 border-b border-amber-500/40 px-4 py-1.5 text-center text-[11px] font-mono text-amber-300">
-          xgas Orbit L4 sequencer is booting — L4 reads and trades will resume automatically.
+          xgas Orbit L4 sequencer is booting. L4 reads and trades will resume automatically.
         </div>
       )}
 
@@ -372,8 +415,14 @@ export default function App() {
             className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'ngu' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
             NGU launchpad
           </button>
+          <button onClick={() => setTab('robinhood')}
+            className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'robinhood' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
+            Robinhood desk
+          </button>
         </div>
-        {tab === 'mcp' ? (
+        {tab === 'robinhood' ? (
+          <RobinhoodOtc wallet={wallet} onConnectWallet={handleConnectWallet} xHandle={xUser?.handle ?? null} xConfigured={xConfigured} />
+        ) : tab === 'mcp' ? (
           <McpConnector />
         ) : tab === 'otc' ? (
           <OrbitXMoneyOtc
