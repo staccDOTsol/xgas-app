@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { OrbitXMoneyOtc } from './components/OrbitXMoneyOtc';
 import { NguLaunchpad } from './components/NguLaunchpad';
 import { McpConnector } from './components/McpConnector';
-import { RobinhoodOtc } from './components/RobinhoodOtc';
+import { RobinhoodOtc, rememberRobinhoodReturn, restoreRobinhoodReturn } from './components/RobinhoodOtc';
 import { Hero } from './components/Hero';
 import { UserWallet } from './types';
 import { connectInjectedWallet, switchNetwork, addXMoneyTokenToWallet, addOrbitL4ToWallet, loadL4Info, fetchL4XMoneyBalance, orbitL4RpcUrl, fetchXSession, xLoginUrl, xLogout, type XUser, L3_CHAIN_ID, L4_CHAIN_ID } from './contracts/web3Client';
@@ -43,7 +43,11 @@ export default function App() {
   const [rpcMismatch, setRpcMismatch] = useState<{ wallet: number; sequencer: number } | null>(null);
   const [xUser, setXUser] = useState<XUser | null>(null);
   const [xConfigured, setXConfigured] = useState<boolean>(false);
-  const [tab, setTabState] = useState<AppTab>(() => (isRobinhoodPath() ? 'robinhood' : 'otc'));
+  const [tab, setTabState] = useState<AppTab>(() => {
+    // Back from Sign in with X: put a parked /robinhood/order/:id or /robinhood/trade/:id link back before anything reads the path.
+    restoreRobinhoodReturn();
+    return isRobinhoodPath() ? 'robinhood' : 'otc';
+  });
   // The desk tab owns /robinhood; every other tab lives under '/' (the OTC desk then writes its own sub-path).
   // The tab is also kept in history.state (appTab) so back/forward returns to MCP or NGU, not just the OTC desk.
   const setTab = (next: AppTab) => {
@@ -358,7 +362,7 @@ export default function App() {
             ) : (
               <a
                 href={xConfigured ? xLoginUrl() : undefined}
-                onClick={xConfigured ? undefined : (e) => { e.preventDefault(); alert('Sign in with X is not configured yet (X_CLIENT_ID secret missing on the host).'); }}
+                onClick={xConfigured ? rememberRobinhoodReturn : (e) => { e.preventDefault(); alert('Sign in with X is not configured yet (X_CLIENT_ID secret missing on the host).'); }}
                 className={`px-3 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${xConfigured ? 'bg-white text-black border-white hover:bg-slate-200' : 'bg-[#121624] border-[#1e2538] text-slate-500'}`}
                 title={xConfigured ? 'Verify your X handle for orders, trades and the game' : 'X OAuth not configured on the host yet'}
               >

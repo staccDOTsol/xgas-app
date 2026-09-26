@@ -12,6 +12,7 @@ import { ALL_TOOLS, TOOLS_BY_NAME, isBrowserSafe, unwrap } from './mcp/src/regis
 import { createServer as createMcpServer, isHostable, hostableFor, VERSION as MCP_VERSION } from './mcp/src/server.mjs';
 import { runAs, OPERATOR } from './mcp/src/actor.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createRobinhoodOg } from './server/og/robinhood.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -511,8 +512,12 @@ function setCookie(req, res, name, value, maxAgeS) {
 function clearCookie(req, res, name) {
   setCookie(req, res, name, '', 0);
 }
+// A same-site path to land on after Sign in with X: one segment, or a Robinhood desk deep link.
 function safeReturnTo(v) {
-  return typeof v === 'string' && /^\/[a-z0-9_-]*$/i.test(v) ? v : '/';
+  if (typeof v !== 'string') return '/';
+  if (/^\/[a-z0-9_-]*$/i.test(v)) return v;
+  if (/^\/robinhood\/(?:post|trades|arbiters|(?:order|trade)\/\d{1,20})$/i.test(v)) return v;
+  return '/';
 }
 function currentUser(req) {
   const sess = verify(parseCookies(req)[SESSION_COOKIE]);
@@ -1282,19 +1287,68 @@ const ETH_PRICE_SOURCES = [
   ['Kraken', 'https://api.kraken.com/0/public/Ticker?pair=ETHUSD', j => Number(Object.values(j?.result || {})[0]?.c?.[0])],
   ['Bitstamp', 'https://www.bitstamp.net/api/v2/ticker/ethusd/', j => Number(j?.last)],
 ];
+// The fair price itself, shared by the endpoint and the link-preview cards (server/og). null when no source answered.
+let ethPriceInflight = null;
+async function ethFairPrice() {
+  if (ethPriceCache.body && Date.now() - ethPriceCache.at < 20_000) return ethPriceCache.body;
+  if (ethPriceInflight) return ethPriceInflight;
+  ethPriceInflight = (async () => {
+    const got = await Promise.all(ETH_PRICE_SOURCES.map(async ([name, url, pick]) => {
+      try { const v = pick(await fetchJson(url)); return Number.isFinite(v) && v > 0 ? { name, usd: v } : null; } catch { return null; }
+    }));
+    const ok = got.filter(Boolean).sort((a, b) => a.usd - b.usd);
+    if (!ok.length) return null;
+    const mid = ok.length % 2 ? ok[(ok.length - 1) / 2].usd : (ok[ok.length / 2 - 1].usd + ok[ok.length / 2].usd) / 2;
+    const cents = Math.round(mid * 100);
+    const body = { usd: (cents / 100).toFixed(2), cents: String(cents), sources: ok.map(o => ({ name: o.name, usd: o.usd.toFixed(2) })), method: `median of ${ok.map(o => o.name).join(', ')}`, at: new Date().toISOString() };
+    ethPriceCache = { at: Date.now(), body };
+    return body;
+  })().finally(() => { ethPriceInflight = null; });
+  return ethPriceInflight;
+}
 app.get('/api/robinhood/eth-price', async (_req, res) => {
   res.set('Cache-Control', 'public, max-age=15');
-  if (ethPriceCache.body && Date.now() - ethPriceCache.at < 20_000) return res.json(ethPriceCache.body);
-  const got = await Promise.all(ETH_PRICE_SOURCES.map(async ([name, url, pick]) => {
-    try { const v = pick(await fetchJson(url)); return Number.isFinite(v) && v > 0 ? { name, usd: v } : null; } catch { return null; }
-  }));
-  const ok = got.filter(Boolean).sort((a, b) => a.usd - b.usd);
-  if (!ok.length) return res.status(503).json({ error: 'No price source answered. Enter your own price.' });
-  const mid = ok.length % 2 ? ok[(ok.length - 1) / 2].usd : (ok[ok.length / 2 - 1].usd + ok[ok.length / 2].usd) / 2;
-  const cents = Math.round(mid * 100);
-  const body = { usd: (cents / 100).toFixed(2), cents: String(cents), sources: ok.map(o => ({ name: o.name, usd: o.usd.toFixed(2) })), method: `median of ${ok.map(o => o.name).join(', ')}`, at: new Date().toISOString() };
-  ethPriceCache = { at: Date.now(), body };
+  const body = await ethFairPrice().catch(() => null);
+  if (!body) return res.status(503).json({ error: 'No price source answered. Enter your own price.' });
   res.json(body);
+});
+
+// Live desk updates: one chain watcher on the server, fanned out to browsers over Server-Sent Events, so pages
+// refresh within a couple of seconds of any escrow or arbitration event instead of polling the RPC themselves.
+const otcSubscribers = new Set();
+const OTC_MAX_SUBSCRIBERS = 1000;
+let otcLastBlock = null;
+function otcBroadcast(event, data) {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of otcSubscribers) { try { res.write(msg); } catch { otcSubscribers.delete(res); } }
+}
+let otcWatchBusy = false;
+async function otcWatchTick() {
+  if (!OTC_DEPLOYED || otcWatchBusy) return;
+  if (!otcSubscribers.size) { otcLastBlock = null; return; }
+  otcWatchBusy = true;
+  try {
+    const head = await l3Client.getBlockNumber();
+    if (otcLastBlock == null || head < otcLastBlock) { otcLastBlock = head; return; }
+    if (head === otcLastBlock) return;
+    const from = otcLastBlock + 1n;
+    const to = head - from > 2000n ? from + 2000n : head;
+    const logs = await l3Client.getLogs({ address: [ROBINHOOD_OTC, OTC_ARBITRATION], fromBlock: from, toBlock: to });
+    otcLastBlock = to;
+    if (logs.length) otcBroadcast('change', { block: Number(to), events: logs.length, txs: [...new Set(logs.map(l => l.transactionHash))].slice(0, 20) });
+  } catch { /* transient RPC error: retry next tick from the same block */ } finally { otcWatchBusy = false; }
+}
+setInterval(() => { otcWatchTick(); }, 1500);
+app.get('/api/robinhood/stream', (req, res) => {
+  if (!OTC_DEPLOYED) return res.status(503).json({ error: 'The OTC desk is not deployed yet.' });
+  if (otcSubscribers.size >= OTC_MAX_SUBSCRIBERS) return res.status(503).json({ error: 'Too many live connections; the page falls back to polling.' });
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders();
+  res.write('retry: 3000\n\n');
+  res.write(`event: hello\ndata: ${JSON.stringify({ otc: ROBINHOOD_OTC, arbitration: OTC_ARBITRATION })}\n\n`);
+  otcSubscribers.add(res);
+  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 20_000);
+  req.on('close', () => { clearInterval(ping); otcSubscribers.delete(res); });
 });
 
 app.get('/api/robinhood/otc', async (req, res) => {
@@ -1724,17 +1778,41 @@ function indexHtml() {
   return indexHtmlCache;
 }
 
-function withMeta(html, { title, description, url }) {
-  const t = escapeHtml(title), d = escapeHtml(description), u = escapeHtml(url);
-  return html
-    .replace(/<title>[^<]*<\/title>/, `<title>${t}</title>`)
-    .replace(/(<meta name="description" content=")[^"]*(")/, `$1${d}$2`)
-    .replace(/(<meta property="og:title" content=")[^"]*(")/, `$1${t}$2`)
-    .replace(/(<meta property="og:description" content=")[^"]*(")/, `$1${d}$2`)
-    .replace(/(<meta property="og:url" content=")[^"]*(")/, `$1${u}$2`)
-    .replace(/(<link rel="canonical" href=")[^"]*(")/, `$1${u}$2`)
-    .replace(/(<meta name="twitter:title" content=")[^"]*(")/, `$1${t}$2`)
-    .replace(/(<meta name="twitter:description" content=")[^"]*(")/, `$1${d}$2`);
+// Replaces the content of <meta {attr}="{key}" content="..."> or, when the tag is missing, adds it before </head>.
+// Replacements go through functions, never replacement strings, so a "$2,690.00" in a title stays literal.
+function setMetaTag(html, attr, key, value) {
+  const v = escapeHtml(value);
+  const re = new RegExp(`(<meta ${attr}="${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}" content=")[^"]*(")`);
+  if (re.test(html)) return html.replace(re, (_m, a, b) => a + v + b);
+  return html.replace('</head>', () => `  <meta ${attr}="${key}" content="${v}" />\n  </head>`);
+}
+
+// image (absolute URL of a 1200x630 PNG) and imageAlt are optional; without them the page keeps its default card.
+function withMeta(html, { title, description, url, image, imageAlt }) {
+  const t = escapeHtml(title), u = escapeHtml(url);
+  let out = html.replace(/<title>[^<]*<\/title>/, () => `<title>${t}</title>`);
+  out = setMetaTag(out, 'name', 'description', description);
+  out = setMetaTag(out, 'property', 'og:title', title);
+  out = setMetaTag(out, 'property', 'og:description', description);
+  out = setMetaTag(out, 'property', 'og:url', url);
+  out = /<link rel="canonical" href="/.test(out)
+    ? out.replace(/(<link rel="canonical" href=")[^"]*(")/, (_m, a, b) => a + u + b)
+    : out.replace('</head>', () => `  <link rel="canonical" href="${u}" />\n  </head>`);
+  out = setMetaTag(out, 'name', 'twitter:title', title);
+  out = setMetaTag(out, 'name', 'twitter:description', description);
+  if (image) {
+    const alt = imageAlt || title;
+    out = setMetaTag(out, 'property', 'og:image', image);
+    out = setMetaTag(out, 'property', 'og:image:secure_url', image);
+    out = setMetaTag(out, 'property', 'og:image:type', 'image/png');
+    out = setMetaTag(out, 'property', 'og:image:width', '1200');
+    out = setMetaTag(out, 'property', 'og:image:height', '630');
+    out = setMetaTag(out, 'property', 'og:image:alt', alt);
+    out = setMetaTag(out, 'name', 'twitter:card', 'summary_large_image');
+    out = setMetaTag(out, 'name', 'twitter:image', image);
+    out = setMetaTag(out, 'name', 'twitter:image:alt', alt);
+  }
+  return out;
 }
 
 const fmtX = (wei) => Number(formatEther(wei)).toLocaleString('en-US', { maximumFractionDigits: 4 });
@@ -1783,6 +1861,37 @@ app.get(['/trade/:id', '/settlement/:id'], async (req, res) => {
     }
   } catch (e) {
     console.warn('[OG] trade preview failed:', e?.message || e);
+  }
+  res.type('html').send(html);
+});
+
+// ---------------------------------------------------------------------------
+// Robinhood desk deep links and link previews (server/og/robinhood.mjs):
+//   /robinhood, /robinhood/post, /robinhood/arbiters, /robinhood/order/:id, /robinhood/trade/:id  the SPA, with
+//   title, description, canonical and og/twitter image tags describing that page from live chain state.
+//   /og/robinhood.png, /og/robinhood/order/:id.png, /og/robinhood/trade/:id.png  the 1200x630 cards.
+// Any failure falls back to the desk's card and text; these pages never answer with an error.
+// ---------------------------------------------------------------------------
+const robinhoodOg = createRobinhoodOg({
+  client: l3Client,
+  otc: ROBINHOOD_OTC,
+  fairPrice: ethFairPrice,
+  origin: PUBLIC_ORIGIN.replace(/\/+$/, ''),
+  ipKey: (req) => ipLimitKey(clientIp(req)),
+  fallbackPng: path.join(__dirname, 'dist', 'og.png'),
+});
+robinhoodOg.mountImages(app);
+const ROBINHOOD_PAGES = { '/robinhood': 'desk', '/robinhood/post': 'post', '/robinhood/trades': 'trades', '/robinhood/arbiters': 'arbiters' };
+app.get(['/robinhood', '/robinhood/post', '/robinhood/trades', '/robinhood/arbiters', '/robinhood/order/:id', '/robinhood/offer/:id', '/robinhood/trade/:id'], async (req, res, next) => {
+  let html;
+  try { html = indexHtml(); } catch { return next(); } // no build yet: let the static handler answer
+  try {
+    const p = req.path.toLowerCase().replace(/\/+$/, '') || '/';
+    // /robinhood/offer/:id is an alias the page rewrites to /robinhood/order/:id; its preview is the order's.
+    const page = ROBINHOOD_PAGES[p] || (/^\/robinhood\/(order|offer)\//.test(p) ? 'order' : p.startsWith('/robinhood/trade/') ? 'trade' : 'desk');
+    html = withMeta(html, await robinhoodOg.meta(page, req.params.id));
+  } catch (e) {
+    console.warn('[og] robinhood page meta failed:', e?.message || e);
   }
   res.type('html').send(html);
 });

@@ -845,7 +845,20 @@ export function RobinhoodArbiters(props: { account: string | null; otcAddress: s
                   <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#1b2234]">
                     <div className="flex items-center gap-2 min-w-0">
                       <Gavel className="w-4 h-4 text-amber-400 shrink-0" />
-                      <span className="text-sm font-bold text-white font-display">Trade #{key}</span>
+                      <a
+                        href={`/robinhood/trade/${key}`}
+                        onClick={(e) => {
+                          // Same-page hop to the trade's own page (the desk listens for popstate); modified clicks open a tab.
+                          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                          e.preventDefault();
+                          window.history.pushState({ appTab: 'robinhood', rhSub: 'trades' }, '', `/robinhood/trade/${key}`);
+                          window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
+                        }}
+                        className="text-sm font-bold text-white font-display hover:underline"
+                        title="Open this trade's own page (shareable link)"
+                      >
+                        Trade #{key}
+                      </a>
                       {d.extensions > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">Extended {d.extensions}x</span>}
                     </div>
                     <div className={`text-[11px] font-mono px-2 py-1 rounded-lg border flex items-center gap-1.5 ${phaseTone}`}>

@@ -13,6 +13,10 @@ COPY package*.json ./
 RUN npm install --production --legacy-peer-deps
 COPY --from=builder /app/dist ./dist
 COPY server.js ./
+# Link-preview cards: server/og renders them (satori + @resvg/resvg-wasm, pure JS/WASM, installed above) with the
+# bundled fonts in assets/fonts.
+COPY server ./server
+COPY assets ./assets
 # server.js imports the connector's tool registry AND serves it at /mcp; only mcp/src is needed
 # at runtime (its deps, viem and the MCP SDK, are root dependencies).
 COPY mcp/src ./mcp/src

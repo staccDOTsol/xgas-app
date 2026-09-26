@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDownUp, CheckCircle, Clock, ExternalLink, Gavel, Link2, Lock, RefreshCw, ShieldCheck, Upload, Wallet, AlertTriangle, Droplet } from 'lucide-react';
-import { encodeFunctionData, formatEther, parseAbi, parseEther, type Abi } from 'viem';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDownUp, ArrowLeft, CheckCircle, Clock, ExternalLink, Gavel, Link2, Lock, RefreshCw, ShieldCheck, Upload, Wallet, AlertTriangle, Droplet } from 'lucide-react';
+import { encodeFunctionData, formatEther, parseAbi, parseEther, parseEventLogs, type Abi } from 'viem';
 import { UserWallet } from '../types';
 import { CONTRACT_ADDRESSES, ROBINHOOD_OTC_ABI, ROBINHOOD_OTC_SIDE, ROBINHOOD_OTC_STATUS } from '../contracts/abis';
 import { publicClient, sendOnChainTx, switchNetwork, xLoginUrl, L3_CHAIN_ID, TxError } from '../contracts/web3Client';
@@ -41,13 +41,69 @@ const SUB_TABS: { id: SubTab; label: string }[] = [
   { id: 'arbiters', label: 'Arbiters' },
 ];
 
-function parseSubRoute(): { sub: SubTab; tradeId: number | null } {
-  if (typeof window === 'undefined') return { sub: 'book', tradeId: null };
+// --- deep links ----------------------------------------------------------------
+// /robinhood (the book), /robinhood/post, /robinhood/trades, /robinhood/arbiters,
+// /robinhood/order/:id (one order, opens its take panel when takeable) and /robinhood/trade/:id (one trade).
+// The host renders a link preview (title, description, og:image) for each of these paths.
+interface RhRoute {
+  sub: SubTab;
+  /** Deep-linked order id; -1 for a malformed id (shown as not found). */
+  orderId: number | null;
+  /** Deep-linked trade id; -1 for a malformed id (shown as not found). */
+  tradeId: number | null;
+}
+const BOOK: RhRoute = { sub: 'book', orderId: null, tradeId: null };
+
+function parseSubRoute(): RhRoute {
+  if (typeof window === 'undefined') return BOOK;
   const rest = window.location.pathname.replace(/^\/robinhood\/?/i, '').replace(/\/+$/, '').toLowerCase();
-  const m = rest.match(/^trade\/(\d+)$/);
-  if (m) return { sub: 'trades', tradeId: parseInt(m[1], 10) };
-  if (rest === 'post' || rest === 'trades' || rest === 'arbiters') return { sub: rest, tradeId: null };
-  return { sub: 'book', tradeId: null };
+  const idOf = (s: string) => (/^\d{1,9}$/.test(s) ? parseInt(s, 10) : -1);
+  const o = rest.match(/^(?:order|offer)\/([^/]+)$/);
+  if (o) return { sub: 'book', orderId: idOf(o[1]), tradeId: null };
+  const t = rest.match(/^trade\/([^/]+)$/);
+  if (t) return { sub: 'trades', orderId: null, tradeId: idOf(t[1]) };
+  if (rest === 'post' || rest === 'trades' || rest === 'arbiters') return { sub: rest, orderId: null, tradeId: null };
+  return BOOK;
+}
+
+function routePath(r: RhRoute): string {
+  if (r.orderId != null) return `/robinhood/order/${r.orderId}`;
+  if (r.tradeId != null) return `/robinhood/trade/${r.tradeId}`;
+  return r.sub === 'book' ? '/robinhood' : `/robinhood/${r.sub}`;
+}
+
+const deepLink = (path: string) => `${typeof window !== 'undefined' ? window.location.origin : 'https://xgas.dev'}${path}`;
+const xIntentUrl = (text: string, url: string) => `https://x.com/intent/post?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
+
+// The document title to put back when the desk unmounts (another app tab). A deep-linked first load carries the
+// host's per-order title, so only a first load outside /robinhood is a usable baseline.
+const SITE_TITLE_FALLBACK = 'xgas-mcp: hand this chain to your model';
+const SITE_TITLE = typeof document !== 'undefined' && !/^\/robinhood(\/|$)/i.test(window.location.pathname) && document.title
+  ? document.title : SITE_TITLE_FALLBACK;
+
+// The host returns Sign in with X to the desk deep link itself (safeReturnTo). A link is also parked here across
+// the round trip for a host or button that returns to /robinhood (or /) instead. Only a fresh entry (15 minutes) is used.
+const RETURN_KEY = 'xgas.robinhood.returnTo';
+export function rememberRobinhoodReturn(): void {
+  try {
+    const p = window.location.pathname;
+    if (/^\/robinhood\/(order|offer|trade)\/\d{1,9}\/?$/i.test(p)) sessionStorage.setItem(RETURN_KEY, JSON.stringify({ p, at: Date.now() }));
+    else sessionStorage.removeItem(RETURN_KEY);
+  } catch { /* storage blocked: the sign-in still works, it just lands on the desk */ }
+}
+/** Call before the first render reads the path. Replaces /robinhood (or /) with the parked deep link, once. */
+export function restoreRobinhoodReturn(): void {
+  try {
+    const raw = sessionStorage.getItem(RETURN_KEY);
+    if (!raw) return;
+    sessionStorage.removeItem(RETURN_KEY);
+    const { p, at } = JSON.parse(raw) as { p?: string; at?: number };
+    const here = window.location.pathname.replace(/\/+$/, '') || '/';
+    if (typeof p !== 'string' || !/^\/robinhood\/(order|offer|trade)\/\d{1,9}\/?$/i.test(p)) return;
+    if (typeof at !== 'number' || Date.now() - at > 15 * 60 * 1000) return;
+    if (here !== '/' && here.toLowerCase() !== '/robinhood') return;
+    window.history.replaceState({ ...(window.history.state || {}), appTab: 'robinhood' }, '', p + window.location.search);
+  } catch { /* nothing to restore */ }
 }
 
 interface OtcOrder {
@@ -127,6 +183,13 @@ function fmtCents(c: bigint): string {
 
 /** Exact ETH, every significant digit kept. */
 const fmtEth = (wei: bigint) => formatEther(wei);
+/** ETH rounded down to 6 decimals, for share text and titles (exact below 0.000001). */
+const fmtEthShort = (wei: bigint) => {
+  const t = wei - (wei % 1_000_000_000_000n);
+  return formatEther(t === 0n ? wei : t);
+};
+/** "$2,690" for whole dollars, "$2,690.50" otherwise. For share text. */
+const fmtUsdShort = (c: bigint) => (c % 100n === 0n ? fmtCents(c).replace(/\.00$/, '') : fmtCents(c));
 
 // Percent buttons. Keep a little ETH back for gas, and round down to 6 decimals so the amount reads cleanly.
 const PCTS = [5, 10, 25, 50, 90] as const;
@@ -183,6 +246,48 @@ const STATUS_LABEL: Record<number, string> = {
   [ROBINHOOD_OTC_STATUS.RESOLVED]: 'Resolved by arbiters',
 };
 
+const STATUS_SHORT: Record<number, string> = {
+  [ROBINHOOD_OTC_STATUS.OPEN]: 'Open',
+  [ROBINHOOD_OTC_STATUS.PAID]: 'Paid',
+  [ROBINHOOD_OTC_STATUS.RELEASED]: 'Released',
+  [ROBINHOOD_OTC_STATUS.CLAIMED]: 'Claimed',
+  [ROBINHOOD_OTC_STATUS.CANCELLED_UNPAID]: 'Cancelled',
+  [ROBINHOOD_OTC_STATUS.DISPUTED]: 'Disputed',
+  [ROBINHOOD_OTC_STATUS.RESOLVED]: 'Resolved',
+};
+
+type OrderState = 'OPEN' | 'FILLED' | 'CANCELLED' | 'BELOW MIN';
+function orderState(o: { active: boolean; cancelled: boolean; remainingEth: bigint }): OrderState {
+  if (o.cancelled) return 'CANCELLED';
+  if (o.remainingEth === 0n) return 'FILLED';
+  return o.active ? 'OPEN' : 'BELOW MIN';
+}
+const ORDER_STATE_TONE: Record<OrderState, string> = {
+  OPEN: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+  FILLED: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40',
+  CANCELLED: 'bg-slate-500/15 text-slate-300 border-slate-500/40',
+  'BELOW MIN': 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+};
+
+/** "SELL 0.5 ETH at $2,690.00 by @handle", or "SELL ETH at $2,690.00 by @handle (FILLED)" once nothing is left. */
+function orderHeadline(o: OtcOrder): string {
+  const side = o.side === ROBINHOOD_OTC_SIDE.SELL ? 'SELL' : 'BUY';
+  const st = orderState(o);
+  return st === 'OPEN' || st === 'BELOW MIN'
+    ? `${side} ${fmtEthShort(o.remainingEth)} ETH at ${fmtCents(o.priceCentsPerEth)} by @${o.makerXHandle}`
+    : `${side} ETH at ${fmtCents(o.priceCentsPerEth)} by @${o.makerXHandle} (${st})`;
+}
+/** Share text for X: "SELL 0.5 ETH at $2,690 for X Money dollars, no admin escrow". */
+function orderShareText(o: OtcOrder): string {
+  const sell = o.side === ROBINHOOD_OTC_SIDE.SELL;
+  const amt = o.remainingEth > 0n ? `${fmtEthShort(o.remainingEth)} ETH` : 'ETH';
+  return `${sell ? 'SELL' : 'BUY'} ${amt} at ${fmtUsdShort(o.priceCentsPerEth)} ${sell ? 'for' : 'with'} X Money dollars on Robinhood Chain, no admin escrow`;
+}
+function tradeShareText(t: OtcTrade): string {
+  return `Trade #${t.id}: ${fmtEthShort(t.ethAmount)} ETH for ${fmtCents(t.expectedCents)} in X Money dollars (${(STATUS_SHORT[t.status] || 'Open').toLowerCase()}) on Robinhood Chain. No admin escrow, staked arbiters.`;
+}
+const DESK_SHARE_TEXT = 'X Money dollars for ETH on Robinhood Chain, peer to peer. No admin escrow, staked arbiters.';
+
 const OUTCOME_LABEL: Record<number, string> = {
   1: 'Arbiters found the buyer paid. The ETH, minus the fee, went to the buyer. The seller\'s whole bond went to the arbiters who voted with the majority.',
   2: 'Arbiters found the buyer did not pay. The ETH went back to the seller (onto the sell order if the maker had not cancelled it), half the bond went to the majority arbiters and half back to the seller, and the buyer\'s address is now flagged.',
@@ -201,24 +306,90 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   const account = wallet.connected && wallet.address ? wallet.address : null;
   const handle = xHandle ? cleanHandle(xHandle) : '';
 
-  const [sub, setSubState] = useState<SubTab>(() => parseSubRoute().sub);
-  const [focusTradeId, setFocusTradeId] = useState<number | null>(() => parseSubRoute().tradeId);
-  const setSub = (next: SubTab) => {
-    setSubState(next);
-    setFocusTradeId(null);
-    const path = next === 'book' ? '/robinhood' : `/robinhood/${next}`;
-    if (window.location.pathname !== path) window.history.pushState({ appTab: 'robinhood', rhSub: next }, '', path);
+  const [initialRoute] = useState<RhRoute>(parseSubRoute);
+  const [sub, setSubState] = useState<SubTab>(initialRoute.sub);
+  const [focusOrderId, setFocusOrderId] = useState<number | null>(initialRoute.orderId);
+  const [focusTradeId, setFocusTradeId] = useState<number | null>(initialRoute.tradeId);
+  // One scroll per navigation, and one automatic take panel per order per visit to the site, so closing
+  // the panel (or coming back to the order with back/forward) does not reopen it.
+  const scrolledFor = useRef<string | null>(null);
+  const autoOpened = useRef<Set<number>>(new Set());
+  const applyRoute = (r: RhRoute) => {
+    setSubState(r.sub);
+    setFocusOrderId(r.orderId);
+    setFocusTradeId(r.tradeId);
+    setTaking(null);
+    scrolledFor.current = null;
   };
+  /** Every tab and deep link goes through here: state first, then one history entry (back/forward replay it). */
+  const go = (r: RhRoute) => {
+    applyRoute(r);
+    const path = routePath(r);
+    if (window.location.pathname !== path) window.history.pushState({ appTab: 'robinhood', rhSub: r.sub }, '', path);
+  };
+  const setSub = (next: SubTab) => go({ sub: next, orderId: null, tradeId: null });
+  const openOrderLink = (id: number) => go({ sub: 'book', orderId: id, tradeId: null });
+  /** In-app click on an order number: show its page without popping the take panel (that is for arriving by link). */
+  const viewOrder = (id: number) => { autoOpened.current.add(id); openOrderLink(id); };
+  const openTradeLink = (id: number) => go({ sub: 'trades', orderId: null, tradeId: id });
   useEffect(() => {
+    // Canonical path on first load (/robinhood/offer/3 -> /robinhood/order/3, /robinhood/typo -> /robinhood).
+    const bad = initialRoute.orderId === -1 || initialRoute.tradeId === -1;
+    if (!bad && window.location.pathname !== routePath(initialRoute)) {
+      window.history.replaceState({ ...(window.history.state || {}), appTab: 'robinhood', rhSub: initialRoute.sub }, '', routePath(initialRoute) + window.location.search);
+    }
     const onPop = () => {
       if (!/^\/robinhood(\/|$)/i.test(window.location.pathname)) return;
-      const r = parseSubRoute();
-      setSubState(r.sub);
-      setFocusTradeId(r.tradeId);
+      applyRoute(parseSubRoute());
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
+  /** Plain left clicks on a deep link stay in the app; modified clicks (new tab, copy link) keep the real href. */
+  const linkClick = (fn: () => void) => (e: React.MouseEvent) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    fn();
+  };
+
+  // --- share -------------------------------------------------------------------
+  const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const showToast = (text: string, ok = true) => {
+    setToast({ text, ok });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), ok ? 2200 : 6000);
+  };
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  const copyLink = async (url: string, what: string) => {
+    let ok = false;
+    try { await navigator.clipboard.writeText(url); ok = true; } catch {
+      // Clipboard API missing or refused (plain http, embedded webview): fall back to a hidden textarea.
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = url; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select(); ok = document.execCommand('copy'); document.body.removeChild(ta);
+      } catch { ok = false; }
+    }
+    showToast(ok ? `Link to ${what} copied` : `Could not copy. The link is ${url}`, ok);
+  };
+  /** Copy link + Share on X. `icon` for dense book rows, `sm` for cards, `md` where sharing is the point. */
+  const shareBar = (path: string, text: string, what: string, size: 'icon' | 'sm' | 'md' = 'sm') => {
+    const url = deepLink(path);
+    const cls = size === 'md'
+      ? `${btnGhost} inline-flex items-center gap-1.5`
+      : `inline-flex items-center gap-1 ${size === 'icon' ? 'px-1.5' : 'px-2'} py-1 rounded-lg bg-[#121624] border border-[#1e2538] text-[10px] font-mono font-bold text-slate-300 hover:text-white hover:border-slate-500 cursor-pointer transition-colors`;
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <button type="button" className={cls} title={`Copy link: ${url}`} aria-label={`Copy link to ${what}`} onClick={e => { e.stopPropagation(); copyLink(url, what); }}>
+          <Link2 className={size === 'md' ? 'w-3.5 h-3.5' : 'w-3 h-3'} />{size === 'icon' ? null : ' Copy link'}
+        </button>
+        <a className={cls} href={xIntentUrl(text, url)} target="_blank" rel="noopener noreferrer" title="Share on X" aria-label={`Share ${what} on X`} onClick={e => e.stopPropagation()}>
+          <span className="font-black leading-none">𝕏</span>{size === 'icon' ? null : ' Share'}
+        </a>
+      </span>
+    );
+  };
 
   // --- addresses -------------------------------------------------------------
   const [otcAddr, setOtcAddr] = useState<string>(CONTRACT_ADDRESSES.ROBINHOOD_OTC);
@@ -267,6 +438,11 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   const [disputes, setDisputes] = useState<Record<number, DisputeInfo>>({});
   const [loading, setLoading] = useState(false);
   const [readErr, setReadErr] = useState<string | null>(null);
+  // True after the first complete read (orders, trades and flags), so a deep link can tell "not loaded yet" from "no such id".
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  // A deep-linked trade gets its dispute and its parties' flags read too, even when this wallet is not a party.
+  const focusTradeRef = useRef<number | null>(focusTradeId);
+  useEffect(() => { focusTradeRef.current = focusTradeId; }, [focusTradeId]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => { const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000); return () => clearInterval(t); }, []);
 
@@ -308,9 +484,11 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
       setTrades(ts);
 
       const mine = account ? ts.filter(t => same(t.seller, account) || same(t.buyer, account)) : [];
+      const focusT = focusTradeRef.current != null && focusTradeRef.current >= 0 ? ts[focusTradeRef.current] : undefined;
+      const watched = focusT && !mine.includes(focusT) ? [...mine, focusT] : mine;
       const people = new Set<string>();
       os.filter(o => o.active).forEach(o => people.add(o.maker.toLowerCase()));
-      mine.forEach(t => { people.add(t.buyer.toLowerCase()); people.add(t.seller.toLowerCase()); });
+      watched.forEach(t => { people.add(t.buyer.toLowerCase()); people.add(t.seller.toLowerCase()); });
       if (account) people.add(account.toLowerCase());
       const flagEntries = await Promise.all([...people].map(async p => [p, !!(await read('flagged', [p]).catch(() => false))] as const));
       const f: Record<string, boolean> = {};
@@ -329,31 +507,33 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
         const b: Record<number, bigint> = {};
         bondPairs.forEach(([id, v]) => { b[id] = v; });
         setBonds(b);
-
-        const arb = (ADDR_RE.test(arbAddr) ? arbAddr : (typeof arbOnChain === 'string' ? arbOnChain : '')) as `0x${string}`;
-        if (ADDR_RE.test(arb)) {
-          publicClient.readContract({ address: arb, abi: ARB_MIN_ABI, functionName: 'LONG_STOP' }).then(v => setLongStop(Number(v))).catch(() => {});
-          const dPairs = await Promise.all(mine.filter(t => t.status === ROBINHOOD_OTC_STATUS.DISPUTED || t.status === ROBINHOOD_OTC_STATUS.RESOLVED)
-            .map(async t => {
-              const [d, ev] = await Promise.all([
-                publicClient.readContract({ address: arb, abi: ARB_MIN_ABI, functionName: 'disputeOf', args: [BigInt(t.id)] }),
-                publicClient.readContract({ address: arb, abi: ARB_MIN_ABI, functionName: 'evidenceOf', args: [BigInt(t.id)] }).catch(() => [[], []] as readonly [readonly string[], readonly `0x${string}`[]]),
-              ]);
-              const info: DisputeInfo = {
-                bond: d[2], openedAt: Number(d[3]), commitEnd: Number(d[4]), revealEnd: Number(d[5]), extensions: Number(d[6]), resolved: d[7],
-                outcome: Number(d[8]), weightBuyerPaid: d[9], weightDidNotPay: d[10], revealers: Number(d[11]),
-                evidence: ev[0].map((uri, i) => ({ uri, by: ev[1][i] || '' })),
-              };
-              return [t.id, info] as const;
-            }).map(p => p.catch(() => null)));
-          const d: Record<number, DisputeInfo> = {};
-          dPairs.forEach(p => { if (p) d[p[0]] = p[1]; });
-          setDisputes(d);
-        }
       } else {
         setEthBal(null); setOwed(0n); setMeFlagged(false);
       }
+
+      // Disputes: this wallet's trades plus a deep-linked one (public data, read for anyone).
+      const arb = (ADDR_RE.test(arbAddr) ? arbAddr : (typeof arbOnChain === 'string' ? arbOnChain : '')) as `0x${string}`;
+      if (ADDR_RE.test(arb)) {
+        publicClient.readContract({ address: arb, abi: ARB_MIN_ABI, functionName: 'LONG_STOP' }).then(v => setLongStop(Number(v))).catch(() => {});
+        const dPairs = await Promise.all(watched.filter(t => t.status === ROBINHOOD_OTC_STATUS.DISPUTED || t.status === ROBINHOOD_OTC_STATUS.RESOLVED)
+          .map(async t => {
+            const [d, ev] = await Promise.all([
+              publicClient.readContract({ address: arb, abi: ARB_MIN_ABI, functionName: 'disputeOf', args: [BigInt(t.id)] }),
+              publicClient.readContract({ address: arb, abi: ARB_MIN_ABI, functionName: 'evidenceOf', args: [BigInt(t.id)] }).catch(() => [[], []] as readonly [readonly string[], readonly `0x${string}`[]]),
+            ]);
+            const info: DisputeInfo = {
+              bond: d[2], openedAt: Number(d[3]), commitEnd: Number(d[4]), revealEnd: Number(d[5]), extensions: Number(d[6]), resolved: d[7],
+              outcome: Number(d[8]), weightBuyerPaid: d[9], weightDidNotPay: d[10], revealers: Number(d[11]),
+              evidence: ev[0].map((uri, i) => ({ uri, by: ev[1][i] || '' })),
+            };
+            return [t.id, info] as const;
+          }).map(p => p.catch(() => null)));
+        const d: Record<number, DisputeInfo> = {};
+        dPairs.forEach(p => { if (p) d[p[0]] = p[1]; });
+        setDisputes(d);
+      }
       setReadErr(null);
+      setLoadedOnce(true);
     } catch (e: any) {
       setReadErr(`Could not read the desk on Robinhood Chain: ${errMsg(e)}`);
     } finally {
@@ -364,33 +544,79 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   useEffect(() => {
     if (!deployed) return;
     refresh();
-    const t = setInterval(refresh, 12000);
+    const t = setInterval(refresh, 30000); // fallback; the live stream below does the real-time work
     return () => clearInterval(t);
   }, [deployed, refresh]);
+
+  // Real time: the host watches the chain and pushes an event on every escrow or arbitration log.
+  const [live, setLive] = useState(false);
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+  useEffect(() => {
+    if (!deployed || typeof EventSource === 'undefined') return;
+    let debounce: ReturnType<typeof setTimeout> | undefined;
+    const es = new EventSource('/api/robinhood/stream');
+    es.onopen = () => setLive(true);
+    es.onerror = () => setLive(false);
+    es.addEventListener('change', () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => refreshRef.current(), 250);
+    });
+    return () => { clearTimeout(debounce); es.close(); setLive(false); };
+  }, [deployed]);
 
   // --- tx plumbing -------------------------------------------------------------
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; hash?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const send = async (label: string, to: string, abi: Abi | readonly unknown[], functionName: string, args: any[], valueWei?: bigint) => {
-    if (!account) { onConnectWallet(); return false; }
+  /** Sends and waits for confirmation. Returns the tx hash on success (truthy), null otherwise. */
+  const send = async (label: string, to: string, abi: Abi | readonly unknown[], functionName: string, args: any[], valueWei?: bigint): Promise<string | null> => {
+    if (!account) { onConnectWallet(); return null; }
     setBusy(label); setError(null); setNotice(null);
     try {
       const data = encodeFunctionData({ abi: abi as Abi, functionName, args });
       const { txHash } = await sendOnChainTx({ to, data, valueWei: valueWei ?? 0n, from: account, chainId: L3_CHAIN_ID, waitForConfirmation: true });
       setNotice({ text: `${label}: confirmed on Robinhood Chain.`, hash: txHash });
       await refresh();
-      return true;
+      return txHash;
     } catch (e: any) {
       setError(`${label} failed: ${errMsg(e)}`);
-      return false;
+      return null;
     } finally {
       setBusy(null);
     }
   };
   const sendOtc = (label: string, fn: string, args: any[], valueWei?: bigint) => send(label, otcAddr, ROBINHOOD_OTC_ABI as unknown as Abi, fn, args, valueWei);
   const sendArb = (label: string, fn: string, args: any[]) => send(label, arbAddr, ARB_MIN_ABI, fn, args);
+
+  /** The id an OrderPosted / TradeOpened event in this tx carries, read from the receipt of the escrow's own log. */
+  const idFromReceipt = async (hash: string, eventName: 'OrderPosted' | 'TradeOpened'): Promise<number | null> => {
+    try {
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as `0x${string}`, timeout: 30_000 });
+      const logs = receipt.logs.filter(l => same(l.address, otcAddr));
+      if (eventName === 'OrderPosted') {
+        const ev = parseEventLogs({ abi: ROBINHOOD_OTC_ABI, eventName: 'OrderPosted', logs })[0];
+        return ev ? Number(ev.args.orderId) : null;
+      }
+      const ev = parseEventLogs({ abi: ROBINHOOD_OTC_ABI, eventName: 'TradeOpened', logs })[0];
+      return ev ? Number(ev.args.tradeId) : null;
+    } catch {
+      return null;
+    }
+  };
+  /** Fallback when the receipt can not be read: the newest order this wallet made, from ordersLength - 1 down. */
+  const newestOrderOf = async (maker: string): Promise<number | null> => {
+    try {
+      const address = otcAddr as `0x${string}`;
+      const len = Number(await publicClient.readContract({ address, abi: ROBINHOOD_OTC_ABI, functionName: 'ordersLength' }));
+      for (let i = len - 1; i >= 0 && i >= len - 20; i--) {
+        const o = await publicClient.readContract({ address, abi: ROBINHOOD_OTC_ABI, functionName: 'getOrder', args: [BigInt(i)] }) as { maker: string };
+        if (same(o.maker, maker)) return i;
+      }
+    } catch { /* fall through */ }
+    return null;
+  };
 
   // --- gas drip ------------------------------------------------------------------
   const [dripState, setDripState] = useState<{ busy: boolean; msg: string | null; hash?: string }>({ busy: false, msg: null });
@@ -466,6 +692,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   const takingLive = taking ? (orders[taking.id] ?? taking) : null;
   const takeErr = (() => {
     if (!takingLive) return null;
+    if (account && same(takingLive.maker, account)) return 'This is your own order. Share its link so someone else can take it.';
     const blocked = takeBlock(takingLive);
     if (blocked) return blocked;
     if (takeWei == null || takeWei <= 0n) return 'Enter an ETH amount (up to 18 decimals).';
@@ -478,10 +705,14 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   const submitTake = async () => {
     const o = takingLive;
     if (!o || takeWei == null || takeErr || !handle) return;
-    const ok = o.side === ROBINHOOD_OTC_SIDE.SELL
+    const hash = o.side === ROBINHOOD_OTC_SIDE.SELL
       ? await sendOtc(`Take sell order #${o.id}`, 'takeSell', [BigInt(o.id), takeWei, handle])
       : await sendOtc(`Take buy order #${o.id}`, 'takeBuy', [BigInt(o.id), handle], takeWei);
-    if (ok) { setTaking(null); setSub('trades'); }
+    if (!hash) return;
+    setTaking(null);
+    // Land on the new trade's own page (its link is the one to send the counterparty).
+    const tradeId = await idFromReceipt(hash, 'TradeOpened');
+    if (tradeId != null) openTradeLink(tradeId); else setSub('trades');
   };
 
   // --- post order ----------------------------------------------------------------
@@ -532,12 +763,22 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
     if (postSide === 'sell' && ethBal != null && pAmt > ethBal) return `You have ${fmtEth(ethBal)} ETH on Robinhood Chain, less than ${fmtEth(pAmt)} ETH plus gas.`;
     return null;
   })();
+  // The order this browser just posted: its page shows a "your order is live, share it" panel.
+  const [justPosted, setJustPosted] = useState<number | null>(null);
   const submitPost = async () => {
     if (postErr || !handle || pPrice == null || pAmt == null || pMin == null || pMax == null) return;
-    const ok = postSide === 'sell'
+    const hash = postSide === 'sell'
       ? await sendOtc('Post sell order', 'postSell', [handle, pPrice, pMin, pMax], pAmt)
       : await sendOtc('Post buy order', 'postBuy', [handle, pAmt, pPrice, pMin, pMax]);
-    if (ok) { setPostAmt(''); setPostMin(''); setPostMax(''); setSub('book'); }
+    if (!hash) return;
+    setPostAmt(''); setPostMin(''); setPostMax('');
+    // Open the new order's page with its link, copy and share up front.
+    const id = (await idFromReceipt(hash, 'OrderPosted')) ?? (account ? await newestOrderOf(account) : null);
+    if (id == null) { setSub('book'); return; }
+    setJustPosted(id);
+    openOrderLink(id);
+    // The read inside send() may have run before the node served the new order; read again if it is missing.
+    setTimeout(() => refreshRef.current(), 1500);
   };
 
   // --- per-trade inputs ------------------------------------------------------------
@@ -546,7 +787,6 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   const [evText, setEvText] = useState<Record<number, string>>({});
   const [evLink, setEvLink] = useState<Record<number, string>>({});
   const [evFile, setEvFile] = useState<Record<number, File | null>>({});
-  const [copied, setCopied] = useState<number | null>(null);
 
   // The host takes one item per upload: JSON { tradeId, text } or { tradeId, image } (png, jpeg or webp, 2 MB max),
   // only for a trade in dispute, checks the signed-in X account is one side of it, and returns the uri for the chain.
@@ -608,12 +848,60 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
     setEvText(p => ({ ...p, [t.id]: '' })); setEvLink(p => ({ ...p, [t.id]: '' })); setEvFile(p => ({ ...p, [t.id]: null }));
   };
 
-  // Scroll a deep-linked trade into view once it is loaded.
+  // --- deep-link effects -------------------------------------------------------------
+  // Scroll the linked order or trade into view once per navigation, after the first full read.
   useEffect(() => {
-    if (sub !== 'trades' || focusTradeId == null) return;
-    const el = document.getElementById(`rh-trade-${focusTradeId}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, [sub, focusTradeId, trades.length]);
+    if (!loadedOnce) return;
+    const key = focusOrderId != null ? `o${focusOrderId}` : focusTradeId != null ? `t${focusTradeId}` : null;
+    if (!key || scrolledFor.current === key) return;
+    const el = document.getElementById(focusOrderId != null ? 'rh-order-focus' : focusTradeId != null && focusTradeId >= 0 && trades[focusTradeId] ? `rh-trade-${focusTradeId}` : 'rh-trade-focus');
+    if (!el) return;
+    scrolledFor.current = key;
+    requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }, [loadedOnce, focusOrderId, focusTradeId, sub, orders.length, trades.length, account]);
+
+  // A linked order that this wallet can take opens its take panel, once per order per visit.
+  useEffect(() => {
+    if (focusOrderId == null || focusOrderId < 0 || !loadedOnce || !deployed || autoOpened.current.has(focusOrderId)) return;
+    const o = orders[focusOrderId];
+    if (!o) return;
+    autoOpened.current.add(focusOrderId);
+    if (orderState(o) === 'OPEN' && !(account && same(o.maker, account)) && !takeBlock(o)) openTake(o);
+    // takeBlock/openTake read the same state listed here.
+  }, [focusOrderId, loadedOnce, deployed, orders, account]);
+
+  // A linked trade that is not this wallet's: read its dispute and its parties' flags now, not at the next poll.
+  const focusReadFor = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (!loadedOnce || focusTradeId == null || focusTradeId < 0 || focusReadFor.current.has(focusTradeId)) return;
+    const t = trades[focusTradeId];
+    if (!t) return;
+    const disputed = t.status === ROBINHOOD_OTC_STATUS.DISPUTED || t.status === ROBINHOOD_OTC_STATUS.RESOLVED;
+    const needFlags = flags[t.buyer.toLowerCase()] === undefined || flags[t.seller.toLowerCase()] === undefined;
+    if ((disputed && !disputes[t.id]) || needFlags) {
+      focusReadFor.current.add(focusTradeId);
+      refreshRef.current();
+    }
+  }, [loadedOnce, focusTradeId, trades, disputes, flags]);
+
+  // The tab title follows the page (the host already sent the right one for the first load).
+  useEffect(() => {
+    const site = 'xgas.dev/robinhood';
+    let title = `X Money dollars for Robinhood ETH | ${site}`;
+    if (focusOrderId != null) {
+      const o = focusOrderId >= 0 ? orders[focusOrderId] : undefined;
+      title = o ? `${orderHeadline(o)} on ${site}` : focusOrderId >= 0 ? `Order #${focusOrderId}${loadedOnce ? ' not found' : ''} | ${site}` : `Order not found | ${site}`;
+    } else if (focusTradeId != null) {
+      const t = focusTradeId >= 0 ? trades[focusTradeId] : undefined;
+      title = t
+        ? `Trade #${t.id}: ${fmtEthShort(t.ethAmount)} ETH for ${fmtCents(t.expectedCents)} (${STATUS_SHORT[t.status] || 'Open'}) on ${site}`
+        : focusTradeId >= 0 ? `Trade #${focusTradeId}${loadedOnce ? ' not found' : ''} | ${site}` : `Trade not found | ${site}`;
+    } else if (sub === 'post') title = `Post an order | ${site}`;
+    else if (sub === 'trades') title = `My trades | ${site}`;
+    else if (sub === 'arbiters') title = `Arbiters | ${site}`;
+    document.title = title;
+  }, [sub, focusOrderId, focusTradeId, orders, trades, loadedOnce]);
+  useEffect(() => () => { document.title = SITE_TITLE; }, []);
 
   // --- render helpers ---------------------------------------------------------------
   const txLink = (hash: string) => (
@@ -630,7 +918,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
 
   const signInX = (
     xConfigured ? (
-      <a href={xLoginUrl('/robinhood')} className={`${btn} bg-white text-black hover:bg-slate-200 inline-flex items-center gap-1.5`}>
+      <a href={xLoginUrl((focusOrderId ?? 0) < 0 || (focusTradeId ?? 0) < 0 ? '/robinhood' : routePath({ sub, orderId: focusOrderId, tradeId: focusTradeId }))} onClick={rememberRobinhoodReturn} className={`${btn} bg-white text-black hover:bg-slate-200 inline-flex items-center gap-1.5`}>
         <span className="font-black">𝕏</span> Sign in with X
       </a>
     ) : (
@@ -643,8 +931,9 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
     const mine = !!account && same(o.maker, account);
     const block = !mine ? takeBlock(o) : null;
     const isSell = o.side === ROBINHOOD_OTC_SIDE.SELL;
+    const linked = focusOrderId === o.id;
     return (
-      <div key={o.id} className="px-3 py-2.5 rounded-xl bg-[#0a0d16] border border-[#1a2133] font-mono text-xs space-y-1.5">
+      <div key={o.id} id={`rh-order-${o.id}`} className={`px-3 py-2.5 rounded-xl bg-[#0a0d16] border font-mono text-xs space-y-1.5 ${linked ? 'border-cyan-400/60 ring-1 ring-cyan-400/40' : 'border-[#1a2133]'}`}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <div className="min-w-[88px]">
             <div className="text-white font-black text-sm">{fmtCents(o.priceCentsPerEth)}</div>
@@ -656,7 +945,10 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
           </div>
           <div className="min-w-[110px] text-[11px]">
             <div className="text-cyan-300">@{o.makerXHandle}{flagBadge(o.maker)}</div>
-            <div className="text-[10px]">#{o.id} {addrLink(o.maker)}</div>
+            <div className="text-[10px]">
+              <a href={`/robinhood/order/${o.id}`} onClick={linkClick(() => viewOrder(o.id))} className="text-slate-300 hover:text-white hover:underline" title="Open this order's own page">#{o.id}</a> {addrLink(o.maker)}
+            </div>
+            <div className="pt-1">{shareBar(`/robinhood/order/${o.id}`, orderShareText(o), `order #${o.id}`, 'icon')}</div>
           </div>
           {mine ? (
             <button className={btnGhost} disabled={!!busy}
@@ -684,6 +976,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
   const tradeCard = (t: OtcTrade) => {
     const iAmBuyer = same(t.buyer, account);
     const iAmSeller = same(t.seller, account);
+    const viewer = !iAmBuyer && !iAmSeller; // a deep link opened by someone who is not a party: read-only
     const payDeadline = t.openedAt + payWindow;
     const releaseDeadline = t.paidAt + releaseWindow;
     const fee = feeOf(t.ethAmount, feeBps);
@@ -705,16 +998,17 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
     const tone = t.status === ROBINHOOD_OTC_STATUS.DISPUTED ? 'border-amber-500/50'
       : t.status <= ROBINHOOD_OTC_STATUS.PAID ? 'border-emerald-500/40' : 'border-[#1e2538]';
     return (
-      <div key={t.id} id={`rh-trade-${t.id}`} className={`${card} ${tone} ${focused ? 'ring-2 ring-cyan-400/60' : ''} space-y-3 font-mono text-xs`}>
+      <div key={t.id} id={`rh-trade-${t.id}`} className={`${card} ${tone} ${focused ? 'ring-2 ring-cyan-400/60' : ''} scroll-mt-32 space-y-3 font-mono text-xs`}>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-white font-black text-sm">Trade #{t.id}</span>
           <span className="px-2 py-0.5 rounded-lg bg-[#121624] border border-[#1e2538] text-[10px] text-slate-300">{STATUS_LABEL[t.status] || `Status ${t.status}`}</span>
-          <span className="text-[10px] text-slate-500">order #{t.orderId}</span>
-          <span className="ml-auto text-[10px] text-slate-400">You are the {iAmBuyer ? 'buyer (you pay dollars, get ETH)' : 'seller (you get dollars, your ETH is escrowed)'}</span>
-          <button className="p-1 rounded hover:bg-[#1a2033] text-slate-400 hover:text-white cursor-pointer" title="Copy a link to this trade"
-            onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/robinhood/trade/${t.id}`).catch(() => {}); setCopied(t.id); setTimeout(() => setCopied(null), 1500); }}>
-            {copied === t.id ? <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> : <Link2 className="w-3.5 h-3.5" />}
-          </button>
+          <a href={`/robinhood/order/${t.orderId}`} onClick={linkClick(() => viewOrder(t.orderId))} className="text-[10px] text-slate-500 hover:text-white hover:underline">order #{t.orderId}</a>
+          <span className="ml-auto text-[10px] text-slate-400">
+            {viewer
+              ? (account ? 'Read-only: this wallet is not the buyer or the seller' : 'Read-only: connect the buyer or seller wallet to act on it')
+              : <>You are the {iAmBuyer ? 'buyer (you pay dollars, get ETH)' : 'seller (you get dollars, your ETH is escrowed)'}</>}
+          </span>
+          {shareBar(`/robinhood/trade/${t.id}`, tradeShareText(t), `trade #${t.id}`)}
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -725,7 +1019,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
         </div>
         {t.status <= ROBINHOOD_OTC_STATUS.PAID && (
           <div className="text-[10px] text-slate-500">
-            The contract does not verify these handles: whoever opened the order or the trade typed them. {iAmSeller ? `Release only for a payment from exactly @${t.buyerXHandle} with the memo ${memo}. A payment from anyone else, even for the right amount, is not this trade.` : `Pay exactly @${t.sellerXHandle} with the memo ${memo}.`}
+            The contract does not verify these handles: whoever opened the order or the trade typed them.{!viewer && <> {iAmSeller ? `Release only for a payment from exactly @${t.buyerXHandle} with the memo ${memo}. A payment from anyone else, even for the right amount, is not this trade.` : `Pay exactly @${t.sellerXHandle} with the memo ${memo}.`}</>}
           </div>
         )}
 
@@ -734,6 +1028,8 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
             <div className={`p-3 rounded-xl border ${payOpen ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-rose-500/10 border-rose-500/30'}`}>
               {iAmBuyer ? (
                 <div className="text-sm text-white font-bold">Send {dollars} on X Money to @{t.sellerXHandle}, memo {memo}</div>
+              ) : viewer ? (
+                <div className="text-sm text-white font-bold">@{t.buyerXHandle} owes {dollars} on X Money to @{t.sellerXHandle}, memo {memo}</div>
               ) : (
                 <div className="text-sm text-white font-bold">Wait for {dollars} on X Money from @{t.buyerXHandle}, memo {memo}</div>
               )}
@@ -903,6 +1199,143 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
     );
   };
 
+  // One order on its own (/robinhood/order/:id): open or not, with what the viewer can do and its link.
+  const backToBook = (
+    <a href="/robinhood" onClick={linkClick(() => setSub('book'))} className={`${btnGhost} inline-flex items-center gap-1.5`}>
+      <ArrowLeft className="w-3.5 h-3.5" /> Back to the book
+    </a>
+  );
+  const orderFocusPanel = () => {
+    if (focusOrderId == null) return null;
+    const o = focusOrderId >= 0 ? orders[focusOrderId] : undefined;
+    if (!o) {
+      const reading = !loadedOnce || justPosted === focusOrderId;
+      return (
+        <div id="rh-order-focus" className={`${card} scroll-mt-32 font-mono text-xs space-y-3`}>
+          {reading ? (
+            <div className="flex items-center gap-2 text-slate-300"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Reading order #{focusOrderId} from Robinhood Chain...</div>
+          ) : (
+            <div className="space-y-1">
+              <div className="text-white font-black text-sm">{focusOrderId >= 0 ? `No order #${focusOrderId} on the desk` : 'That order link is not valid'}</div>
+              <p className="text-slate-400">
+                {orders.length > 1 ? `Orders so far run from #0 to #${orders.length - 1}. ` : orders.length === 1 ? 'The only order so far is #0. ' : 'Nobody has posted an order yet. '}
+                Check the link, or pick an order from the book below.
+              </p>
+            </div>
+          )}
+          {backToBook}
+        </div>
+      );
+    }
+    const st = orderState(o);
+    const isSell = o.side === ROBINHOOD_OTC_SIDE.SELL;
+    const mine = !!account && same(o.maker, account);
+    const block = !mine ? takeBlock(o) : null;
+    const { lo, hi } = takeBounds(o);
+    const path = `/robinhood/order/${o.id}`;
+    const fairTxt = vsFair(o.priceCentsPerEth);
+    const stat = (label: string, value: React.ReactNode, note?: React.ReactNode) => (
+      <div className="p-2 rounded-lg bg-[#0a0d16] border border-[#1a2133] min-w-0">
+        <div className="text-[10px] text-slate-500">{label}</div>
+        <div className="text-white break-words">{value}</div>
+        {note ? <div className="text-[10px] text-slate-500 break-words">{note}</div> : null}
+      </div>
+    );
+    return (
+      <div id="rh-order-focus" className={`${card} scroll-mt-32 border-cyan-400/40 font-mono text-xs space-y-3`}>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`text-lg font-black font-display tracking-tight ${isSell ? 'text-emerald-300' : 'text-cyan-300'}`}>{isSell ? 'SELL ETH' : 'BUY ETH'}</span>
+          <span className={`px-2 py-0.5 rounded-lg border text-[10px] font-black ${ORDER_STATE_TONE[st]}`}>{st}</span>
+          <span className="text-slate-400">order #{o.id} by <span className="text-cyan-300">@{o.makerXHandle}</span>{flagBadge(o.maker)}</span>
+          <span className="sm:ml-auto">{shareBar(path, orderShareText(o), `order #${o.id}`)}</span>
+        </div>
+        <p className="text-slate-300">
+          {isSell
+            ? <>@{o.makerXHandle} escrowed ETH and wants X Money dollars. Take it to <span className="text-white">buy ETH with X Money dollars</span>.</>
+            : <>@{o.makerXHandle} pays X Money dollars and wants ETH. Take it to <span className="text-white">sell ETH for X Money dollars</span>.</>}
+        </p>
+
+        {justPosted === o.id && mine && (
+          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-2">
+            <div className="text-emerald-200 font-bold flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" /> Your order is live. Share its link so people can take it.</div>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <input readOnly value={deepLink(path)} onFocus={e => e.currentTarget.select()} className={`${input} sm:max-w-md`} aria-label="Link to your order" />
+              {shareBar(path, orderShareText(o), `order #${o.id}`, 'md')}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {stat('Price per ETH', fmtCents(o.priceCentsPerEth), fairTxt)}
+          {stat(isSell ? 'ETH left' : 'ETH still wanted', `${fmtEth(o.remainingEth)} ETH`, o.remainingEth > 0n ? `${fmtCents(centsFor(o.remainingEth, o.priceCentsPerEth))} in dollars` : undefined)}
+          {stat('Per trade', `${fmtEth(o.minEth)} to ${fmtEth(o.maxEth)} ETH`, st === 'OPEN' ? `now ${fmtEth(lo)} to ${fmtEth(hi)}` : undefined)}
+          {stat('Maker', <span className="text-cyan-300">@{o.makerXHandle}</span>, addrLink(o.maker))}
+        </div>
+
+        {st === 'OPEN' ? (
+          mine ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-400">This is your order.</span>
+              <button className={btnGhost} disabled={!!busy}
+                onClick={() => sendOtc(`Cancel order #${o.id}`, 'cancelOrder', [BigInt(o.id)])}>
+                {isSell ? `Cancel (${fmtEth(o.remainingEth)} ETH back)` : 'Cancel'}
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button className={btnPrimary} disabled={!!busy || !deployed || !!block} title={block || undefined} onClick={() => openTake(o)}>
+                {isSell ? 'Buy ETH with X Money dollars' : 'Sell ETH for X Money dollars'}
+              </button>
+              {block && <span className="text-[11px] text-amber-300">{block}</span>}
+            </div>
+          )
+        ) : (
+          <div className="p-3 rounded-xl bg-[#0a0d16] border border-[#1a2133] text-[11px] text-slate-300 space-y-2">
+            <div>
+              {st === 'CANCELLED' && <>The maker cancelled this order{isSell ? ', and the ETH not in open trades went back to them' : ''}. Nothing can be taken from it.</>}
+              {st === 'FILLED' && <>Fully taken: nothing is left to take right now. If an open trade on it is cancelled unpaid, that ETH comes back onto the order and it reopens.</>}
+              {st === 'BELOW MIN' && <>What is left ({fmtEth(o.remainingEth)} ETH) is below the {fmtEth(o.minEth)} ETH minimum per trade, so nobody can take it right now.</>}
+            </div>
+            {mine && st === 'BELOW MIN' && (
+              <button className={btnGhost} disabled={!!busy} onClick={() => sendOtc(`Cancel order #${o.id}`, 'cancelOrder', [BigInt(o.id)])}>
+                {isSell ? `Cancel (${fmtEth(o.remainingEth)} ETH back)` : 'Cancel'}
+              </button>
+            )}
+            <div className="text-slate-400">
+              {(isSell ? sellOrders : buyOrders).length > 0
+                ? `${(isSell ? sellOrders : buyOrders).length} other ${isSell ? 'sell' : 'buy'} order${(isSell ? sellOrders : buyOrders).length === 1 ? ' is' : 's are'} open on the book.`
+                : `No ${isSell ? 'sell' : 'buy'} orders are open right now.`}
+            </div>
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">{backToBook}</div>
+      </div>
+    );
+  };
+
+  // One trade on its own (/robinhood/trade/:id) when it is not one of this wallet's (those show in the list).
+  const tradeFocusPanel = () => {
+    if (focusTradeId == null) return null;
+    const t = focusTradeId >= 0 ? trades[focusTradeId] : undefined;
+    if (t && account && (same(t.buyer, account) || same(t.seller, account))) return null;
+    if (t) return tradeCard(t);
+    return (
+      <div id="rh-trade-focus" className={`${card} scroll-mt-32 font-mono text-xs space-y-3`}>
+        {!loadedOnce ? (
+          <div className="flex items-center gap-2 text-slate-300"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Reading trade #{focusTradeId} from Robinhood Chain...</div>
+        ) : (
+          <div className="space-y-1">
+            <div className="text-white font-black text-sm">{focusTradeId >= 0 ? `No trade #${focusTradeId} on the desk` : 'That trade link is not valid'}</div>
+            <p className="text-slate-400">{trades.length > 1 ? `Trades so far run from #0 to #${trades.length - 1}. ` : trades.length === 1 ? 'The only trade so far is #0. ' : 'No trades have opened yet. '}Check the link, or take an order from the book.</p>
+          </div>
+        )}
+        {backToBook}
+      </div>
+    );
+  };
+
+  const tradeFocusEl = sub === 'trades' ? tradeFocusPanel() : null;
+
   // --- render ------------------------------------------------------------------
   return (
     <div className="space-y-4">
@@ -911,6 +1344,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
           <ArrowDownUp className="w-5 h-5 text-emerald-400" />
           <h2 className="text-lg sm:text-xl font-black text-white font-display tracking-tight">Robinhood desk: X Money dollars for ETH</h2>
           <span className="px-1.5 py-0.5 rounded text-[10px] font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-mono">Robinhood Chain #{L3_CHAIN_ID}</span>
+          <span className="sm:ml-auto">{shareBar('/robinhood', DESK_SHARE_TEXT, 'the desk')}</span>
         </div>
         <p className="text-xs sm:text-sm text-slate-300 max-w-3xl">
           Trade US dollars on X Money (payments inside the X app, X account to X account) for native ETH on Robinhood Chain, peer to peer, either direction.
@@ -963,7 +1397,10 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
         {myOpenBuy && !meFlagged && (
           <div className="basis-full flex items-start gap-1.5 text-amber-200 text-[11px]"><Clock className="w-3.5 h-3.5 shrink-0 mt-0.5" /> You have an open trade as the buyer (#{myOpenBuy.id}). The contract allows one per buyer address, so you cannot buy on another order until it is marked paid, released or cancelled.</div>
         )}
-        <button className={`${btnGhost} ml-auto inline-flex items-center gap-1`} onClick={() => { loadAddrs(); refresh(); }} disabled={loading}>
+        <span className={`ml-auto inline-flex items-center gap-1.5 text-[10px] font-mono ${live ? 'text-emerald-400' : 'text-slate-500'}`} title={live ? 'Updates arrive within about 2 seconds of each on-chain event' : 'Live updates unavailable; refreshing every 30 s'}>
+          <span className={`w-1.5 h-1.5 rounded-full ${live ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />{live ? 'LIVE' : 'POLLING'}
+        </span>
+        <button className={`${btnGhost} inline-flex items-center gap-1`} onClick={() => { loadAddrs(); refresh(); }} disabled={loading}>
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
         </button>
       </div>
@@ -998,6 +1435,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
       ) : sub === 'book' ? (
         <div className="space-y-4">
           {readErr && <div className="text-[11px] font-mono text-amber-300">{readErr} Showing the last good read.</div>}
+          {orderFocusPanel()}
           <div className="grid lg:grid-cols-2 gap-4">
             <div className={`${card} space-y-2`}>
               <div className="flex items-baseline justify-between gap-2">
@@ -1097,6 +1535,10 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
         </div>
       ) : (
         <div className="space-y-3">
+          {tradeFocusEl}
+          {tradeFocusEl && (!account || myTrades.length > 0) && (
+            <h3 className="pt-2 text-sm font-black text-white font-mono">My trades</h3>
+          )}
           {!account ? (
             <div className={`${card} font-mono text-xs flex items-center gap-2`}><button className={btnPrimary} onClick={onConnectWallet}>Connect wallet</button><span className="text-slate-400">to see your trades.</span></div>
           ) : myTrades.length === 0 ? (
@@ -1110,7 +1552,11 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
         <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => setTaking(null)}>
           <div className="bg-[#0e121d] border border-emerald-500/40 rounded-t-2xl sm:rounded-2xl max-w-md w-full p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-2xl space-y-3 font-mono text-xs max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="text-white font-black text-sm">
-              {taking.side === ROBINHOOD_OTC_SIDE.SELL ? `Buy ETH from @${taking.makerXHandle}` : `Sell ETH to @${taking.makerXHandle}`} <span className="text-slate-500">order #{taking.id}</span>
+              {taking.side === ROBINHOOD_OTC_SIDE.SELL ? `Buy ETH from @${taking.makerXHandle}` : `Sell ETH to @${taking.makerXHandle}`}{' '}
+              <a href={`/robinhood/order/${taking.id}`} onClick={linkClick(() => viewOrder(taking.id))} className="text-slate-500 hover:text-white hover:underline">order #{taking.id}</a>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {shareBar(`/robinhood/order/${taking.id}`, orderShareText(takingLive ?? taking), `order #${taking.id}`)}
             </div>
             {flags[taking.maker.toLowerCase()] && <div className="text-rose-300 text-[11px]">This maker's address is flagged: arbiters once found it did not pay as a buyer.{taking.side === ROBINHOOD_OTC_SIDE.BUY ? ' The contract does not let anyone sell ETH to it.' : ''}</div>}
             <div className="text-slate-300">Price {fmtCents(taking.priceCentsPerEth)} per ETH. Range {fmtEth(takeBounds(taking).lo)} to {fmtEth(takeBounds(taking).hi)} ETH.</div>
@@ -1157,6 +1603,12 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
               <button className={btnGhost} onClick={() => setTaking(null)}>Close</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {toast && (
+        <div role="status" aria-live="polite" className={`fixed z-[60] left-1/2 -translate-x-1/2 bottom-[max(1.25rem,env(safe-area-inset-bottom))] max-w-[calc(100vw-2rem)] px-3 py-2 rounded-xl bg-[#0e121d] border shadow-2xl font-mono text-xs flex items-center gap-1.5 break-all ${toast.ok ? 'border-emerald-500/40 text-emerald-200' : 'border-amber-500/40 text-amber-200'}`}>
+          {toast.ok ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />} <span className="select-all">{toast.text}</span>
         </div>
       )}
     </div>
