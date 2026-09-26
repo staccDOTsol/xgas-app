@@ -55,9 +55,13 @@ export const L4 = DEPLOY.l4;
 export const DEAD = '0x000000000000000000000000000000000000dEaD';
 export const ZERO = '0x0000000000000000000000000000000000000000';
 
-// Fee constants, mirrored from XMoney.sol / XMoneyEscrow.sol / NguToken.sol. All 1 bp.
+// Fee constants, mirrored from XMoney.sol / XMoneyEscrow.sol / NguToken.sol. Burn and rake are 1 bp;
+// the L4 fee paths (escrow, FOMO, router, NGU curves from the current launcher) add a 2 bp XGAS.DEV buyback.
 export const BURN_BPS = 1n;
 export const FANOUT_RAKE_BPS = 1n;
+export const BUYBACK_BPS = 2n;
+// XGAS.DEV on Robinhood: XgasDevBuyback buys it with the buyback leg and burns it.
+export const XGAS_DEV = '0x006D2D9e65f847e8B5f5053C9eb3a7824ec7dFa3';
 export const USDG_DECIMALS = 6;            // SCALE_FACTOR 1e12 in XMoney.sol fixes this at 6
 export const SCALE_FACTOR = 10n ** 12n;    // USDG 6dp -> xMoney 18dp
 export const TRADE_TIMEOUT_S = 15 * 60;

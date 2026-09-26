@@ -53,6 +53,7 @@ export const ESCROW_ABI = parseAbi([
   'function nextTradeId() view returns (uint256)',
   'function totalXMoneyBurned() view returns (uint256)',
   'function totalXMoneyRakedToFanout() view returns (uint256)',
+  'function totalXMoneyToBuyback() view returns (uint256)',
   'function totalSettledVolumeXMoney() view returns (uint256)',
   'function TRADE_TIMEOUT() view returns (uint256)',
   'function createSellAsk(string makerXHandle, uint256 xMoneyAmount, uint256 fiatRateBps, uint256 minAmount, uint256 maxAmount) payable returns (uint256 orderId)',
@@ -81,6 +82,7 @@ export const NGU_TOKEN_ABI = parseAbi([
   'function minted() view returns (uint256)',
   'function maxSupply() view returns (uint256)',
   'function maxLossBps() view returns (uint256)',
+  'function BUYBACK_BPS() view returns (uint16)', // reverts on curves launched before the XGAS.DEV buyback
   'function seedQty() view returns (uint256)',
   'function quoteBuy(uint256 qty) view returns (uint256 cost)',
   'function quoteSell(uint256 qty) view returns (uint256 payout)',
@@ -93,6 +95,7 @@ export const NGU_LAUNCHER_ABI = parseAbi([
   'function allTokens(uint256) view returns (address)',
   'function allTokensLength() view returns (uint256)',
   'function fanoutSink() view returns (address)',
+  'function buybackSink() view returns (address)',
   'function isNguToken(address) view returns (bool)',
   'function launch(string name, string symbol, uint256 maxSupply, uint256 basePrice, uint16 stepBps, uint16 betaBps, uint256 seedQty) payable returns (address token)',
 ]);

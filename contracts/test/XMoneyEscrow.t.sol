@@ -14,10 +14,12 @@ contract XMoneyEscrowTest is Test {
     // The L4 rake lands in a FanoutSink that bridges to the Robinhood fanout; the sink IS the fanout here.
     address public constant PARENT_FANOUT = 0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8;
     address public FANOUT;
+    address public BUYBACK;
 
     function setUp() public {
         FANOUT = address(new FanoutSink(PARENT_FANOUT));
-        escrow = new XMoneyEscrow(FANOUT);
+        BUYBACK = address(new FanoutSink(makeAddr("xgasDevBuyback")));
+        escrow = new XMoneyEscrow(FANOUT, BUYBACK);
         vm.deal(alice, 10_000 ether);
         vm.deal(bob, 10_000 ether);
     }
@@ -50,13 +52,16 @@ contract XMoneyEscrowTest is Test {
 
         uint256 expectedBurn = (200 ether * 1) / 10000;
         uint256 expectedRake = (200 ether * 1) / 10000;
-        uint256 expectedNet = 200 ether - expectedBurn - expectedRake;
+        uint256 expectedBuyback = (200 ether * 2) / 10000;
+        uint256 expectedNet = 200 ether - expectedBurn - expectedRake - expectedBuyback;
 
         assertEq(DEAD.balance - deadBalBefore, expectedBurn);
         assertEq(FANOUT.balance - fanoutBalBefore, expectedRake);
         assertEq(bob.balance - bobBalBefore, expectedNet);
         assertEq(escrow.totalXMoneyBurned(), expectedBurn);
         assertEq(escrow.totalXMoneyRakedToFanout(), expectedRake);
+        assertEq(BUYBACK.balance, expectedBuyback);
+        assertEq(escrow.totalXMoneyToBuyback(), expectedBuyback);
         assertEq(escrow.totalSettledVolumeXMoney(), 200 ether);
 
         // Alice cancels the rest and gets 800 back
@@ -110,7 +115,7 @@ contract XMoneyEscrowTest is Test {
 
         uint256 expectedBurn = (300 ether * 1) / 10000;
         uint256 expectedRake = (300 ether * 1) / 10000;
-        uint256 expectedNet = 300 ether - expectedBurn - expectedRake;
+        uint256 expectedNet = 300 ether - expectedBurn - expectedRake - (300 ether * 2) / 10000;
 
         assertEq(DEAD.balance - deadBalBefore, expectedBurn);
         assertEq(FANOUT.balance - fanoutBalBefore, expectedRake);

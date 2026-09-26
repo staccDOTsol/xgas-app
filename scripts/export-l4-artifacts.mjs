@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..', 'contracts');
-const names = ['FanoutSink', 'XMoneyEscrow', 'FomoAttritionL4', 'XGasRouter', 'NguToken', 'NguLauncher'];
+const names = ['FanoutSink', 'XMoneyEscrow', 'FomoAttritionL4', 'XGasRouter', 'NguToken', 'NguLauncher', 'XgasDevBuyback'];
 
 for (const name of names) {
   const src = path.join(root, 'out', `${name}.sol`, `${name}.json`);

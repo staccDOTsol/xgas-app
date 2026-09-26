@@ -1,11 +1,27 @@
-import React, { useState } from 'react';
-import { Copy, Check, ArrowDown } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Copy, Check, ArrowDown, Flame, FileText } from 'lucide-react';
 
 // XGAS.DEV token on Robinhood Chain (#4663).
 const XGAS_TOKEN = '0x006D2D9e65f847e8B5f5053C9eb3a7824ec7dFa3';
+// The litepaper: what xgas is, what's broken, and what gets fixed first.
+const LITEPAPER_URL = 'https://gist.github.com/staccDOTsol/e16868983742577cdee1eee90c5bc8bb';
+
+type BuybackStats = { live: boolean; xgasBurned?: string };
 
 export function Hero() {
   const [copied, setCopied] = useState(false);
+  const [burned, setBurned] = useState<number | null>(null);
+
+  // 0.02% of every xgas fee buys XGAS.DEV and burns it; show the running total once the flywheel is live.
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetch('/api/buyback').then(r => (r.ok ? r.json() : null)).then((b: BuybackStats | null) => {
+      if (alive && b?.live && b.xgasBurned !== undefined) setBurned(Number(b.xgasBurned));
+    }).catch(() => {});
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   const copy = async () => {
     try {
@@ -32,6 +48,13 @@ export function Hero() {
           {copied ? <Check className="w-4 h-4 shrink-0 text-emerald-400" /> : <Copy className="w-4 h-4 shrink-0 text-slate-500 group-hover:text-emerald-400" />}
         </button>
 
+        {burned !== null && (
+          <p className="mt-2 flex items-center gap-1.5 font-mono text-[11px] sm:text-xs text-slate-500" title="0.02% of every fee on the new xgas contracts is routed to buy XGAS.DEV on Robinhood Chain and burn it; the keeper can also seed it with ETH">
+            <Flame className="w-3.5 h-3.5 text-orange-400" />
+            <span className="text-orange-300">{burned.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span> XGAS.DEV bought &amp; burned by the xgas flywheel
+          </p>
+        )}
+
         <h1 className="mt-8 font-display font-black tracking-tight text-white text-4xl sm:text-6xl leading-[1.02]">
           but seriously, xgas.dev is <span className="whitespace-nowrap text-emerald-400">rl tekk</span>
           <br />
@@ -47,6 +70,14 @@ export function Hero() {
           className="mt-8 inline-flex items-center gap-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 px-5 py-3 text-sm font-black font-mono uppercase tracking-wide text-slate-950 shadow-lg shadow-emerald-500/20 transition-colors"
         >
           play around <ArrowDown className="w-4 h-4" />
+        </a>
+        <a
+          href={LITEPAPER_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-8 ml-3 inline-flex items-center gap-2 rounded-xl border border-[#1e2538] bg-[#121624] hover:border-emerald-500/50 px-5 py-3 text-sm font-black font-mono uppercase tracking-wide text-slate-300 hover:text-white transition-colors"
+        >
+          litepaper <FileText className="w-4 h-4" />
         </a>
       </div>
     </section>

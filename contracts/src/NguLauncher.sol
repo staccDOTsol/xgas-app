@@ -4,12 +4,15 @@ pragma solidity ^0.8.26;
 import {NguToken} from "./NguToken.sol";
 
 /// @title NGU launcher: permissionless factory for fungible number-go-up tokens.
-/// @notice Zero launch fee. Every launch, mint, and burn pays 0.01% burn + 0.01%
-///         FanoutSink — the money is in the flow, not the launch toll.
+/// @notice Zero launch fee: the seed payment goes to the reserve untouched. Every curve
+///         mint and burn pays 0.01% burn + 0.01% FanoutSink + 0.02% XGAS.DEV buyback;
+///         the money is in the flow, not the launch toll.
 ///         Economics are immutable per token once launched.
 contract NguLauncher {
     /// @notice Protocol fee sink for every NGU token (xGas FanoutSink).
     address public immutable fanoutSink;
+    /// @notice XGAS.DEV buyback sink for every NGU token (bridges to XgasDevBuyback on Robinhood).
+    address public immutable buybackSink;
 
     address[] public allTokens;
     mapping(address => bool) public isNguToken;
@@ -27,9 +30,10 @@ contract NguLauncher {
 
     error ZeroAddress();
 
-    constructor(address fanoutSink_) {
-        if (fanoutSink_ == address(0)) revert ZeroAddress();
+    constructor(address fanoutSink_, address buybackSink_) {
+        if (fanoutSink_ == address(0) || buybackSink_ == address(0)) revert ZeroAddress();
         fanoutSink = fanoutSink_;
+        buybackSink = buybackSink_;
     }
 
     function allTokensLength() external view returns (uint256) {
@@ -49,7 +53,7 @@ contract NguLauncher {
     ) external payable returns (address token) {
         token = address(
             new NguToken{value: msg.value}(
-                name, symbol, fanoutSink, maxSupply, basePrice, stepBps, betaBps, seedQty, msg.sender
+                name, symbol, maxSupply, basePrice, stepBps, betaBps, seedQty, msg.sender
             )
         );
         allTokens.push(token);

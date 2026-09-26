@@ -3,21 +3,31 @@ pragma solidity ^0.8.26;
 
 /**
  * @title XGasRouter
- * @notice L3 Native Gas Value Router.
+ * @notice L4 Native Gas Value Router.
  *         On every native transaction with value:
  *         - 0.01% (1 bp) is burned permanently to 0x000...dEaD
  *         - 0.01% (1 bp) protocol rake is sent to Stacc Wizards / Homecoming Fee Fanout on Robinhood Chain
- *         - 99.98% is delivered net to the recipient.
+ *         - 0.02% (2 bp) goes to the buyback sink, which bridges it to XgasDevBuyback on Robinhood (buys + burns XGAS.DEV)
+ *         - 99.96% is delivered net to the recipient.
  */
 contract XGasRouter {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
-    address payable public constant FANOUT = payable(0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e);
+    address payable public immutable FANOUT;
+    address payable public immutable BUYBACK;
+
+    constructor(address payable fanout_, address payable buyback_) {
+        if (fanout_ == address(0) || buyback_ == address(0)) revert ZeroAddress();
+        FANOUT = fanout_;
+        BUYBACK = buyback_;
+    }
 
     uint256 public constant BURN_BPS = 1;        // 0.01%
     uint256 public constant FANOUT_RAKE_BPS = 1; // 0.01%
+    uint256 public constant BUYBACK_BPS = 2;     // 0.02%
 
     uint256 public totalNativeBurned;
     uint256 public totalFanoutRaked;
+    uint256 public totalBuyback;
     uint256 public totalNativeRouted;
 
     event ValueTransferred(
@@ -33,19 +43,21 @@ contract XGasRouter {
     error ZeroAddress();
     error TransferFailed();
 
-    function sendValue(address payable to, string calldata memo) external payable returns (uint256 netAmount, uint256 burnAmount, uint256 rakeAmount) {
+    function sendValue(address payable to, string calldata memo) external payable returns (uint256 netAmount, uint256 burnAmount, uint256 rakeAmount, uint256 buybackAmount) {
         if (msg.value == 0) revert NoValueProvided();
         if (to == address(0)) revert ZeroAddress();
 
         burnAmount = (msg.value * BURN_BPS) / 10000;
         rakeAmount = (msg.value * FANOUT_RAKE_BPS) / 10000;
-        netAmount = msg.value - burnAmount - rakeAmount;
+        buybackAmount = (msg.value * BUYBACK_BPS) / 10000;
+        netAmount = msg.value - burnAmount - rakeAmount - buybackAmount;
 
         totalNativeBurned += burnAmount;
         totalFanoutRaked += rakeAmount;
+        totalBuyback += buybackAmount;
         totalNativeRouted += msg.value;
 
-        emit ValueTransferred(msg.sender, to, netAmount, burnAmount, rakeAmount, memo);
+        emit ValueTransferred(msg.sender, to, netAmount, burnAmount, rakeAmount, memo); // buyback = 2x burnAmount
 
         if (burnAmount > 0) {
             (bool burnOk, ) = DEAD.call{value: burnAmount}("");
@@ -57,6 +69,11 @@ contract XGasRouter {
             if (!rakeOk) revert TransferFailed();
         }
 
+        if (buybackAmount > 0) {
+            (bool buybackOk, ) = BUYBACK.call{value: buybackAmount}("");
+            if (!buybackOk) revert TransferFailed();
+        }
+
         (bool sendOk, ) = to.call{value: netAmount}("");
         if (!sendOk) revert TransferFailed();
     }
@@ -64,9 +81,11 @@ contract XGasRouter {
     receive() external payable {
         uint256 burnAmount = (msg.value * BURN_BPS) / 10000;
         uint256 rakeAmount = (msg.value * FANOUT_RAKE_BPS) / 10000;
+        uint256 buybackAmount = (msg.value * BUYBACK_BPS) / 10000;
 
         totalNativeBurned += burnAmount;
         totalFanoutRaked += rakeAmount;
+        totalBuyback += buybackAmount;
         totalNativeRouted += msg.value;
 
         if (burnAmount > 0) {
@@ -76,6 +95,10 @@ contract XGasRouter {
         if (rakeAmount > 0) {
             (bool rakeOk, ) = FANOUT.call{value: rakeAmount}("");
             require(rakeOk, "Rake failed");
+        }
+        if (buybackAmount > 0) {
+            (bool buybackOk, ) = BUYBACK.call{value: buybackAmount}("");
+            require(buybackOk, "Buyback failed");
         }
     }
 }

@@ -1,5 +1,5 @@
 import { isAddress } from 'viem';
-import { DEPLOY, L3, L4, PARENT_CHAIN_ID, XGAS_CHAIN_ID, parent, xgas, parentChain, xgasChain, nguLauncher, DEAD } from '../config.mjs';
+import { DEPLOY, L3, L4, PARENT_CHAIN_ID, XGAS_CHAIN_ID, parent, xgas, parentChain, xgasChain, nguLauncher, DEAD, XGAS_DEV } from '../config.mjs';
 import { ERC20_ABI, VAULT_ABI } from '../abis.mjs';
 import { fmtNav, fmtUsdg, fmtXMoney } from '../money.mjs';
 import { reply } from '../approval.mjs';
@@ -24,9 +24,23 @@ export const FEE_SCHEDULE = {
     burn_bps: 1,
     note: 'xMoney on the parent chain is a tax token: every transfer burns 0.01%. Transfers INTO the bridge system (Inbox/Bridge) are exempt; transfers OUT of it burn as usual.',
   },
-  otc_trade: { burn_bps: 1, fanout_rake_bps: 1, net_to_buyer_bps: 9998, fanout_sink: L4.fanoutSink },
+  otc_trade: { burn_bps: 1, fanout_rake_bps: 1, xgas_dev_buyback_bps: 2, net_to_buyer_bps: 9996, fanout_sink: L4.fanoutSink },
   exit: { usdg_rake_bps: 1, usdg_rake_to: L3.fanout },
-  ngu: { burn_bps: 1, fanout_bps: 1, applies_to: 'every buy and sell on the curve; launch and donate are free' },
+  ngu: {
+    burn_bps: 1, fanout_bps: 1, xgas_dev_buyback_bps: 2,
+    applies_to: 'every buy and sell on the curve; launch and donate are free',
+    note: 'Curves launched before the XGAS.DEV buyback keep 0.01% + 0.01% forever (no BUYBACK_BPS on the token). Quote the token to see its own fees.',
+  },
+  // The third leg of every L4 fee path. Sinks that are not deployed yet are left out rather than guessed.
+  xgas_dev_buyback: {
+    bps: 2,
+    token: XGAS_DEV,
+    token_chain_id: PARENT_CHAIN_ID,
+    ...(L4.buybackSink && { buyback_sink: L4.buybackSink }),
+    ...(L3.xgasDevBuyback && { buyback_contract: L3.xgasDevBuyback }),
+    applies_to: 'OTC release; FOMO key buys, dividend claims and jackpot; XGasRouter.sendValue; NGU curve buys and sells',
+    how: 'The L4 buyback sink bridges it to XgasDevBuyback on Robinhood, which redeems it for USDG, buys XGAS.DEV on Uniswap v4 and burns all of it.',
+  },
 };
 
 export const tools = [
@@ -122,16 +136,17 @@ export const tools = [
 
   {
     name: 'get_fee_schedule',
-    description: 'Every fee in the system, in one place: entry rake and burn, the transfer tax, OTC burn and rake, exit rake, NGU curve fees. Read-only.',
+    description: 'Every fee in the system, in one place: entry rake and burn, the transfer tax, OTC burn, rake and XGAS.DEV buyback, exit rake, NGU curve fees. Read-only.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
       return reply(
         [
           'Enter (USDG → $xMoney): 0.01% USDG to the Fanout + 0.01% xMoney entry burn (half dead, half bridge buffer).',
           'Parent xMoney transfers: 0.01% burn. Into the bridge system: exempt. Out of it: burned as usual.',
-          'OTC release: 0.01% burned + 0.01% to the FanoutSink; 99.98% net to the buyer.',
+          'OTC release: 0.01% burned + 0.01% to the FanoutSink + 0.02% XGAS.DEV buyback; 99.96% net to the buyer.',
           'Exit (xMoney → USDG): 0.01% USDG rake to the Fanout.',
-          'NGU curve: 0.01% burn + 0.01% FanoutSink on every buy and sell. Launch and donate pay neither.',
+          'NGU curve: 0.01% burn + 0.01% FanoutSink + 0.02% XGAS.DEV buyback on every buy and sell. Curves launched before the buyback pay 0.01% + 0.01% only. Launch and donate pay none of it.',
+          `XGAS.DEV buyback: the 0.02% on every L4 fee path (OTC, FOMO, router, NGU) is bridged to Robinhood, where it buys and burns XGAS.DEV (${XGAS_DEV}).`,
         ].join('\n'),
         FEE_SCHEDULE,
       );

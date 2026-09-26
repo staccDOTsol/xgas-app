@@ -54,9 +54,26 @@ contract XMoney is ERC20, Ownable {
     address public bridge;
     mapping(address => bool) public isBridgeSystem;
 
-    // Retryable params for the L4 leg of enterRollup (auto-redeemed on arrival; excess refunded to recipient)
+    // Retryable params for the L4 leg of enterRollup (auto-redeemed on arrival; excess refunded to recipient).
+    // The L4 gas prepay (l4GasLimit * l4MaxFeePerGas) is paid out of the depositor's own xMoney, never minted
+    // on top of it, so a deposit mints exactly the xMoney its USDG backs and can never lower NAV.
     uint256 public l4GasLimit = 100_000;
     uint256 public l4MaxFeePerGas = 1 gwei;
+
+    // Bounds on the retryable params. They exist to protect depositors from a fat-fingered or hostile owner
+    // setting that would eat a deposit in gas prepay (the vault itself is no longer exposed: see above).
+    //  - MIN_L4_GAS_LIMIT 21_000: the intrinsic cost of the plain value transfer the ticket performs. Below it
+    //    the auto-redeem can never succeed. It also keeps clear of Nitro's gasLimit == 1 estimation sentinel.
+    //  - MAX_L4_GAS_LIMIT 1_000_000: the ticket carries empty calldata and only credits the recipient; even a
+    //    contract recipient's receive hook fits in a small fraction of this. Unused gas is refunded on the L4.
+    //  - MIN_L4_MAX_FEE_PER_GAS 0.01 gwei: the lowest minimum base fee Nitro chains ship with (Arbitrum One).
+    //    Also keeps clear of Nitro's maxFeePerGas == 1 estimation sentinel.
+    //  - MAX_L4_MAX_FEE_PER_GAS 10 gwei: 100x the Orbit default minimum base fee of 0.1 gwei.
+    // Worst case prepay at the caps: 1_000_000 * 10 gwei = 0.01 xMoney per deposit, most of it refunded.
+    uint256 public constant MIN_L4_GAS_LIMIT = 21_000;
+    uint256 public constant MAX_L4_GAS_LIMIT = 1_000_000;
+    uint256 public constant MIN_L4_MAX_FEE_PER_GAS = 0.01 gwei;
+    uint256 public constant MAX_L4_MAX_FEE_PER_GAS = 10 gwei;
 
     uint256 public totalXMoneyBurned;
     uint256 public totalUsdgRakedToFanout;
@@ -69,10 +86,13 @@ contract XMoney is ERC20, Ownable {
     event SupplyBurn(address indexed from, uint256 xMoneyBurned);
     event BridgeSystemSet(address inbox, address bridge);
     event Migrated(address indexed user, uint256 legacyIn, uint256 usdgRecovered, uint256 xMoneyOut);
+    event L4RetryableParamsSet(uint256 gasLimit, uint256 maxFeePerGas);
 
     error InvalidAmount();
     error InsufficientBalance();
     error BridgeNotSet();
+    error L4ParamsOutOfBounds();
+    error DepositBelowL4Fee(uint256 xMoneyNet, uint256 l4Fee);
 
     constructor() ERC20("X Money", "xMoney") Ownable(msg.sender) {}
 
@@ -87,8 +107,13 @@ contract XMoney is ERC20, Ownable {
     }
 
     function setL4RetryableParams(uint256 gasLimit, uint256 maxFeePerGas) external onlyOwner {
+        if (
+            gasLimit < MIN_L4_GAS_LIMIT || gasLimit > MAX_L4_GAS_LIMIT ||
+            maxFeePerGas < MIN_L4_MAX_FEE_PER_GAS || maxFeePerGas > MAX_L4_MAX_FEE_PER_GAS
+        ) revert L4ParamsOutOfBounds();
         l4GasLimit = gasLimit;
         l4MaxFeePerGas = maxFeePerGas;
+        emit L4RetryableParamsSet(gasLimit, maxFeePerGas);
     }
 
     // ---------------------------------------------------------------- enter: USDG -> xMoney -> L4 native gas
@@ -98,19 +123,26 @@ contract XMoney is ERC20, Ownable {
         address recipient = l3Recipient == address(0) ? msg.sender : l3Recipient;
 
         (uint256 net, uint256 usdgRake, uint256 burnToDead, uint256 bufferToBridge) = _deposit(usdgAmount);
-        xMoneyBridged = net;
+        uint256 ticket;
+        (xMoneyBridged, ticket) = _sendToL4(recipient, net);
 
-        // The L4 leg: mint to ourselves, pre-fund the inbox (untaxed: bridge system), create the ticket.
+        emit RollupEntered(msg.sender, recipient, usdgAmount, xMoneyBridged, usdgRake, burnToDead + bufferToBridge, ticket);
+    }
+
+    /// @dev The L4 leg: mint the depositor's `net` to ourselves, pre-fund the inbox (untaxed: bridge system),
+    ///      and create the ticket. The L4 gas prepay comes OUT of `net`: the recipient gets `net - l4Fee` as
+    ///      call value plus whatever gas the auto-redeem does not use (excessFeeRefundAddress = recipient).
+    ///      Nothing is minted beyond `net`, so total supply grows only by what the deposited USDG backs.
+    function _sendToL4(address recipient, uint256 net) internal returns (uint256 callValue, uint256 ticket) {
         uint256 l4Fee = l4GasLimit * l4MaxFeePerGas;
-        uint256 total = net + l4Fee;
-        _mint(address(this), total);
-        _transfer(address(this), inbox, total);
-        uint256 ticket = IERC20Inbox(inbox).createRetryableTicket(
-            recipient, net, 0, recipient, recipient, l4GasLimit, l4MaxFeePerGas, total, ""
+        if (net <= l4Fee) revert DepositBelowL4Fee(net, l4Fee);
+        callValue = net - l4Fee;
+        _mint(address(this), net);
+        _transfer(address(this), inbox, net);
+        ticket = IERC20Inbox(inbox).createRetryableTicket(
+            recipient, callValue, 0, recipient, recipient, l4GasLimit, l4MaxFeePerGas, net, ""
         );
-        totalXMoneyBridgedToL4 += net;
-
-        emit RollupEntered(msg.sender, recipient, usdgAmount, net, usdgRake, burnToDead + bufferToBridge, ticket);
+        totalXMoneyBridgedToL4 += callValue;
     }
 
     /// @notice Same as enterRollup but keeps the xMoney on Robinhood Chain (bridge it yourself via the Inbox).
@@ -189,12 +221,7 @@ contract XMoney is ERC20, Ownable {
 
         address recipient = l3Recipient == address(0) ? msg.sender : l3Recipient;
         if (bridge != address(0)) {
-            uint256 l4Fee = l4GasLimit * l4MaxFeePerGas;
-            uint256 total = xMoneyOut + l4Fee;
-            _mint(address(this), total);
-            _transfer(address(this), inbox, total);
-            IERC20Inbox(inbox).createRetryableTicket(recipient, xMoneyOut, 0, recipient, recipient, l4GasLimit, l4MaxFeePerGas, total, "");
-            totalXMoneyBridgedToL4 += xMoneyOut;
+            (xMoneyOut,) = _sendToL4(recipient, xMoneyOut); // L4 gas prepay paid from the migrated amount
         } else {
             _mint(msg.sender, xMoneyOut);
         }

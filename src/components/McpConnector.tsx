@@ -7,7 +7,7 @@ import { Terminal, Copy, Check, Search, KeyRound, Zap, Globe, ArrowRight, Wallet
  * the server actually serves, never a list typed into a page.
  */
 interface McpTool { name: string; description: string; kind: 'read' | 'prepare' | 'submit' }
-interface McpInfo { name: string; version: string; transport: { http: string; stdio: string }; npm: string; tool_count: number; tools: McpTool[] }
+interface McpInfo { name: string; version: string; transport: { http: string; stdio: string }; npm: string; tool_count: number; custody?: string; tools: McpTool[] }
 
 const KIND_COPY: Record<McpTool['kind'], { label: string; hint: string; cls: string }> = {
   read: { label: 'read', hint: 'answers a question, touches nothing', cls: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' },
@@ -55,13 +55,36 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
   const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [shown, setShown] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeNote, setRevokeNote] = useState<string | null>(null);
 
   const mint = async () => {
-    setBusy(true);
+    setBusy(true); setRevokeNote(null);
     const r = await fetch('/api/connector/token', { method: 'POST', credentials: 'same-origin' }).then(res => res.json()).catch(() => null);
     setToken(r?.token ?? null);
     setBusy(false);
   };
+
+  // One switch for every token this person ever minted, including one pasted somewhere they have forgotten.
+  const revoke = async () => {
+    if (!window.confirm('Revoke every connector token you have minted? Any model using one loses access to this wallet right away.')) return;
+    setRevoking(true);
+    const r = await fetch('/api/connector/revoke', { method: 'POST', credentials: 'same-origin' }).then(res => res.json()).catch(() => null);
+    if (r?.ok) {
+      setToken(null); setShown(false);
+      setRevokeNote('Done. Every connector token you minted before now has stopped working. Mint a new one if you still want a model connected.');
+    } else {
+      setRevokeNote(r?.error ?? 'Could not revoke. Nothing changed; try again.');
+    }
+    setRevoking(false);
+  };
+
+  const revokeButton = (
+    <button onClick={revoke} disabled={revoking}
+      className="px-4 py-2 rounded-xl bg-[#121624] border border-rose-500/40 text-rose-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033] disabled:opacity-60">
+      {revoking ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3.5 h-3.5" />} {revoking ? 'revoking…' : 'Revoke all connector tokens'}
+    </button>
+  );
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://xgas.dev';
   const config = token
@@ -80,23 +103,29 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
             Your browser has a session; a model somewhere else does not. Mint a token and paste it into your host,
             and that model acts as @{handle} on this wallet, nothing more.
           </p>
-          <button onClick={mint} disabled={busy}
-            className="px-4 py-2 rounded-xl bg-[#121624] border border-cyan-500/40 text-cyan-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033]">
-            {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />} {busy ? 'minting…' : 'Mint my connector token'}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={mint} disabled={busy}
+              className="px-4 py-2 rounded-xl bg-[#121624] border border-cyan-500/40 text-cyan-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033]">
+              {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />} {busy ? 'minting…' : 'Mint my connector token'}
+            </button>
+            {revokeButton}
+          </div>
         </>
       ) : (
         <>
           <p className="text-xs text-slate-400 mb-2">
-            Paste this into your MCP host. Treat it like a key: anyone holding it can spend this wallet, and it lasts 180 days.
+            Paste this into your MCP host. Treat it like a key: anyone holding it can spend this wallet. It lasts 180 days,
+            or until you revoke it.
           </p>
           <CopyLine label="host config" text={config} mono />
           <button onClick={() => setShown(v => !v)} className="mt-2 text-[11px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer">
             {shown ? 'hide the raw token' : 'show the raw token'}
           </button>
           {shown && <div className="mt-1"><CopyLine label="token" text={token} /></div>}
+          <div className="mt-3">{revokeButton}</div>
         </>
       )}
+      {revokeNote && <p className="mt-2 text-[11px] font-mono text-slate-400">{revokeNote}</p>}
     </div>
   );
 };
@@ -168,7 +197,10 @@ const YourWallet: React.FC = () => {
         <div className="text-xs font-mono text-slate-400">Wallets are not switched on for this host yet.</div>
       ) : state.wallet ? (
         <>
-          <p className="text-xs text-slate-400 mb-2">This is your wallet on this connector. It is yours alone, and it signs when you ask a model to do something here.</p>
+          <p className="text-xs text-slate-400 mb-2">
+            This is your wallet on this connector. Only you can ask it to sign, signed in with X or through a connector token you minted.
+            It is custodial: this server signs for it through Privy, so keep in it only what you are willing to have an agent spend.
+          </p>
           <CopyLine label="your address" text={state.wallet.address} />
           {state.balances && (
             <div className="mt-2 grid gap-1.5 sm:grid-cols-3 text-[11px] font-mono">
@@ -231,10 +263,11 @@ export const McpConnector: React.FC = () => {
           Hand this chain to your model.
         </h1>
         <p className="mt-3 text-sm sm:text-base text-slate-400 max-w-3xl leading-relaxed">
-          {info ? info.tool_count : '48'} tools over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
+          {info ? `${info.tool_count} tools` : 'Tools'} over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
           and X Money swaps that land an asset on any of 39 EVM chains. Ask in words; it quotes, it prepares, and your own
-          wallet signs. Or sign in with X and it runs a wallet of your own, held by Privy: the one custodial part of this, and
-          the one part nobody reaches without being signed in as you.
+          wallet signs. That part is non-custodial. Or sign in with X and it runs a wallet of your own, held by Privy, which
+          this server signs for with its app secret: that wallet is custodial, it is opt-in, and nobody reaches it without
+          being signed in as you or holding a token you minted.
         </p>
 
         <div className="mt-6 grid gap-3 md:grid-cols-2">
