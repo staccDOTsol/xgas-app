@@ -1,0 +1,73 @@
+# xgas-rpc: one Robinhood Chain (4663) RPC for the xgas-l4 sequencer, both BoLD validators and the site, failing over
+# across dRPC, publicnode, staccpad and the official RPC. Private only: consumers use http://xgas-rpc.internal:8545
+# (Fly 6PN, IPv6; the server listens on "::", which also accepts IPv4). No [http_service], so no public IP and no Fly
+# proxy in the path.
+#
+# Run TWO machines in two regions (iad next to the sequencer, ord next to val2). xgas-rpc.internal resolves to every
+# started machine and Go's dialer (Nitro) moves to the next address when one refuses or times out, so a dead host is
+# not an outage for all three Nitro nodes at once. The proxy is stateless apart from eth_newFilter pins.
+#   fly apps create xgas-rpc --org personal
+#   fly secrets import -a xgas-rpc --stage     (stdin: DRPC_URL=https://...)
+#   fly deploy --ha=false
+#   fly scale count 2 --region iad,ord --max-per-region 1 -a xgas-rpc
+#
+# Restarts: [[restart]] always restarts a process that exits or crashes. The [checks] below are machine checks: they
+# gate `fly deploy` (a new version that can't reach any upstream stops the rollout) and show in `fly checks list`, but
+# Fly does not restart a machine for failing them.
+# Inspect: fly proxy 18545:8545 -a xgas-rpc, then curl localhost:18545/stats (per-minute stats are also in fly logs).
+app = "xgas-rpc"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "10s"       # server.mjs lets in-flight requests finish for 8s (SHUTDOWN_GRACE_MS) before exiting
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8545"
+  HOST = "::"
+  EXPECTED_CHAIN_ID = "4663"
+  # headroom for a large eth_getLogs answer (parsed, checked, re-serialized) on a 512MB VM
+  NODE_OPTIONS = "--max-old-space-size=320"
+  # [name=]url[|weight], comma separated. ${DRPC_URL} expands from the secret at runtime; unset, that entry is skipped.
+  # publicnode serves only the last ~64-100 blocks without a token (403 "Archive requests" otherwise), the official
+  # RPC 429s and keeps little state, staccpad is pruned and caps eth_getLogs at ~50k blocks: the proxy learns which
+  # upstream can't serve which kind of request and stops asking it for 5 minutes at a time.
+  RPC_UPSTREAMS = "drpc=${DRPC_URL}|4,publicnode=https://robinhood-rpc.publicnode.com|3,staccpad=https://staccpad.fun/rpc|2,official=https://rpc.mainnet.chain.robinhood.com|1"
+  STRATEGY = "weighted"
+  TIMEOUT_MS = "8000"
+  LOGS_TIMEOUT_MS = "20000"
+  # whole request with failovers: under Nitro's 60s parent-chain client timeout (viem's own is 10s; a caller that
+  # hangs up stops the failover chain)
+  REQUEST_DEADLINE_MS = "50000"
+  HEAD_POLL_MS = "2000"
+  # Robinhood Chain makes ~10 blocks/s, so 5 blocks is 0.5s. The official RPC and staccpad usually sit 5-40 blocks
+  # behind publicnode, so at 5 they mostly serve latest-tag reads as failover. Raise to ~50 to spread those reads too.
+  MAX_LAG_BLOCKS = "5"
+  # official and staccpad answer eth_getLogs past their head with [] (so may dRPC's backends): they only get ranges
+  # ending this many blocks below their own head, never as a last resort. Lower = more spread, more risk of a short [].
+  CLAMP_MARGIN_BLOCKS = "50"
+  # measured 2026-09-26: both answered [] past their head (staccpad only on some probes: it is a load balancer).
+  # Listed here so a lucky boot probe can't mark them safe. Others (dRPC) are probed at boot and every 3 minutes.
+  CLAMPING_UPSTREAMS = "staccpad,official"
+  BREAKER_FAILS = "5"
+  BREAKER_MS = "30000"
+  STATS_INTERVAL_MS = "60000"
+
+[[restart]]
+  policy = "always"
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 8545
+    method = "get"
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"   # boot checks every upstream (chain id, clamp probe, heads) before listening: up to ~17s
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

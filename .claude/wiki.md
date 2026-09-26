@@ -84,3 +84,7 @@ So a desk party can link their X Money wallet itself through Plaid Link, not onl
 ## Sequencer parent RPC is dRPC (xgas-l4 PARENT_CHAIN_RPC_URL), since 26 Sep 15:58 UTC
 The public Robinhood RPC started returning 429 to the sequencer's inbox reader; deposits (delayed messages) stopped being sequenced for ~70 min (bridge count 16 vs read 8, L4 head frozen). Switching the xgas-l4 secret PARENT_CHAIN_RPC_URL to the dRPC endpoint fixed it within a minute. Symptom to watch: "error reading inbox ... 429" in `fly logs -a xgas-l4`, or bridge.delayedMessageCount() > sequencerInbox.totalDelayedMessagesRead().
 **Why:** the site now polls Robinhood a lot (SSE watcher, paymaster price/debits, OG cards), which likely shares egress with the sequencer; never put the sequencer back on the public RPC.
+
+## xgas-rpc: Robinhood RPC failover proxy (Fly app xgas-rpc, http://xgas-rpc.internal:8545)
+Upstreams dRPC (w4), publicnode (w3, 403s anything older than ~64-100 blocks without a paid token), staccpad (w2), official (w1, 429s). The site server (VITE_ROBINHOOD_RPC_URL) and the hosted MCP (XGAS_PARENT_RPC) use it. The sequencer and both validators stay on dRPC DIRECTLY: a canary on xgas-l4-val2 through the proxy failed deep eth_getLogs history ("Archive requests require a personal token") and was rolled back.
+**Why:** site polling on the official RPC plausibly caused the 429s that stalled deposits; validators need archive-depth logs the proxy cannot guarantee yet.

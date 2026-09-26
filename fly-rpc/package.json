@@ -1,0 +1,15 @@
+{
+  "name": "xgas-rpc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Failover JSON-RPC proxy for Robinhood Chain (4663) in front of dRPC, publicnode, staccpad and the official RPC",
+  "type": "module",
+  "main": "server.mjs",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test --test-concurrency=1 test/unit.test.mjs test/proxy.test.mjs",
+    "smoke": "node --test test/live.test.mjs"
+  },
+  "dependencies": {}
+}
