@@ -16,7 +16,13 @@ pragma solidity ^0.8.26;
  *
  *         Key buy split: 55% dividends to every key in the round (the buyer's own keys included),
  *         35% to this round's jackpot, 4 bp fees, and the rest (9.96%) carried into the NEXT
- *         round's jackpot. Ledger: balance == jackpotPot + nextRoundSeed + dividendReserve.
+ *         round's jackpot. Ledger: balance == jackpotPot + nextRoundSeed + dividendReserve
+ *         + totalJackpotOwed.
+ *
+ *         A winner that cannot take a push (a contract that rejects $xMoney, an EIP-7702 account
+ *         whose delegate has no payable receive, a receive that burns gas) never stalls the game:
+ *         the net prize is booked to jackpotOwed[winner], the round advances, and the winner pulls
+ *         it to any address later with withdrawJackpot.
  */
 contract FomoAttritionL4 {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
@@ -29,6 +35,9 @@ contract FomoAttritionL4 {
     uint256 public constant BURN_BPS = 1;        // 0.01%
     uint256 public constant FANOUT_RAKE_BPS = 1; // 0.01%
     uint256 public constant BUYBACK_BPS = 2;     // 0.02%
+    /// @notice Gas forwarded when pushing a jackpot to its winner. Enough for an EOA, a Safe or a
+    ///         typical 7702 delegate; anything that needs more (or reverts) is paid by pull instead.
+    uint256 public constant WINNER_PUSH_GAS = 100_000;
 
     uint256 public roundId;
     uint256 public roundDeadline;
@@ -45,6 +54,12 @@ contract FomoAttritionL4 {
     /// @notice Dividends funded and not yet claimed, across all rounds. Every claimable balance
     ///         is paid from here; per-player rounding always leaves dust here, never a shortfall.
     uint256 public dividendReserve;
+    /// @notice Net jackpots won but not yet delivered, because the push to the winner failed.
+    mapping(address => uint256) public jackpotOwed;
+    /// @notice Sum of every jackpotOwed balance.
+    uint256 public totalJackpotOwed;
+
+    uint256 private _lock = 1;
 
     struct Player {
         uint256 keys;
@@ -73,12 +88,24 @@ contract FomoAttritionL4 {
     event JackpotAwarded(address indexed winner, string xHandle, uint256 jackpotAmountXMoney, uint256 newRoundId);
     event JackpotSeeded(uint256 indexed roundId, uint256 amountXMoney);
     event JackpotDonated(address indexed from, uint256 amountXMoney);
+    event JackpotDeferred(address indexed winner, uint256 roundId, uint256 netAmountXMoney);
+    event JackpotWithdrawn(address indexed winner, address indexed to, uint256 amountXMoney);
 
     error RoundExpired();
     error RoundNotExpired();
     error InsufficientPayment();
     error NoDividendsToClaim();
     error TransferFailed();
+    error NothingOwed();
+    error Reentrancy();
+    error ZeroAddress();
+
+    modifier nonReentrant() {
+        if (_lock != 1) revert Reentrancy();
+        _lock = 2;
+        _;
+        _lock = 1;
+    }
 
     constructor(address fanout_, address buyback_) {
         require(fanout_ != address(0), "fanout");
@@ -225,13 +252,14 @@ contract FomoAttritionL4 {
         _send(msg.sender, netPayout);
     }
 
-    function claimJackpot() external {
+    function claimJackpot() external nonReentrant {
         if (block.timestamp <= roundDeadline) revert RoundNotExpired();
         if (currentLeader == address(0)) revert RoundNotExpired();
 
         address winner = currentLeader;
         string memory winnerHandle = currentLeaderXHandle;
         uint256 prize = jackpotPot;
+        uint256 wonRound = roundId;
 
         jackpotPot = 0;
         _startNewRound();
@@ -250,7 +278,23 @@ contract FomoAttritionL4 {
         if (burnAmount > 0) _send(DEAD, burnAmount);
         if (rakeAmount > 0) _send(FANOUT, rakeAmount);
         if (buybackAmount > 0) _send(BUYBACK, buybackAmount);
-        if (netJackpot > 0) _send(winner, netJackpot);
+        if (netJackpot > 0 && !_trySend(winner, netJackpot, WINNER_PUSH_GAS)) {
+            // The winner could not take the push: hold the prize for them and let the game go on.
+            jackpotOwed[winner] += netJackpot;
+            totalJackpotOwed += netJackpot;
+            emit JackpotDeferred(winner, wonRound, netJackpot);
+        }
+    }
+
+    /// @notice Pull a jackpot whose push failed, to any address (fees were already taken at award).
+    function withdrawJackpot(address payable to) external nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 amount = jackpotOwed[msg.sender];
+        if (amount == 0) revert NothingOwed();
+        jackpotOwed[msg.sender] = 0;
+        totalJackpotOwed -= amount;
+        emit JackpotWithdrawn(msg.sender, to, amount);
+        _send(to, amount);
     }
 
     function _startNewRound() internal {
@@ -266,6 +310,13 @@ contract FomoAttritionL4 {
         currentLeader = address(0);
         currentLeaderXHandle = "";
         roundDeadline = block.timestamp + 1 hours;
+    }
+
+    /// @dev Bounded-gas push that ignores return data (no gas or returndata griefing).
+    function _trySend(address to, uint256 amount, uint256 gasLimit) internal returns (bool ok) {
+        assembly {
+            ok := call(gasLimit, to, amount, 0, 0, 0, 0)
+        }
     }
 
     function _send(address to, uint256 amount) internal {

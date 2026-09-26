@@ -148,7 +148,11 @@ const FOMO_ABI = parseAbi([
   'function buyKeys(string xHandle, uint256 keyCount) payable',
   'function claimDividends()',
   'function claimDividendsForRound(uint256 round)',
-  'function claimJackpot()'
+  'function claimJackpot()',
+  'function jackpotOwed(address) view returns (uint256)',
+  'function totalJackpotOwed() view returns (uint256)',
+  'function nextRoundSeed() view returns (uint256)',
+  'function withdrawJackpot(address to)'
 ]);
 
 type TabId = 'otc' | 'explorer' | 'fomo3d' | 'specs';
@@ -919,6 +923,32 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Claim jackpot error:', err);
+      alert(err?.shortMessage || err?.message || 'Transaction failed');
+    }
+  };
+
+  // A winner whose wallet couldn't take the jackpot push gets it held on-chain; they pull it with withdrawJackpot.
+  const [myJackpotOwed, setMyJackpotOwed] = useState(0n);
+  useEffect(() => {
+    if (!wallet.connected || !l4Addresses.fomo) { setMyJackpotOwed(0n); return; }
+    let alive = true;
+    const read = () => l4PublicClient.readContract({ address: l4Addresses.fomo as `0x${string}`, abi: FOMO_ABI, functionName: 'jackpotOwed', args: [wallet.address as `0x${string}`] })
+      .then((v) => { if (alive) setMyJackpotOwed(v as bigint); }).catch(() => {});
+    read();
+    const t = setInterval(read, 30_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [wallet.connected, wallet.address, l4Addresses.fomo]);
+
+  const handleWithdrawJackpotOnChain = async () => {
+    try {
+      const call = encodeAbiCall(FOMO_ABI, 'withdrawJackpot', [wallet.address], l4Addresses.fomo);
+      await sendOnChainTx({ to: l4Addresses.fomo, data: call.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      setMyJackpotOwed(0n);
+      sounds.playConnect();
+      confetti({ particleCount: 120, spread: 120 });
+      await refreshL4Balance();
+    } catch (err: any) {
+      console.error('Withdraw jackpot error:', err);
       alert(err?.shortMessage || err?.message || 'Transaction failed');
     }
   };
@@ -1821,12 +1851,20 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                       className={`w-full bg-[#120d17] border rounded-xl pl-7 pr-3 py-2 text-xs font-bold text-white placeholder-slate-600 focus:outline-none font-sans ${handleLocked ? 'border-emerald-500/40 text-emerald-300' : 'border-[#2a1b32] focus:border-rose-500'}`}
                     />
                   </div>
+                  {myJackpotOwed > 0n && (
+                    <button
+                      onClick={handleWithdrawJackpotOnChain}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-400 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg transition-all cursor-pointer shrink-0"
+                    >
+                      Withdraw your held jackpot: {Number(formatEther(myJackpotOwed)).toFixed(4)} xMoney
+                    </button>
+                  )}
                   {roundExpired ? (
                     <button
                       onClick={handleClaimJackpotOnChain}
                       className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-amber-500/30 transition-all cursor-pointer shrink-0"
                     >
-                      Round Over — Pay ${fomo.jackpotPot.toFixed(2)} Jackpot &amp; Start Round #{fomo.roundId + 1}
+                      Round over: pay ${fomo.jackpotPot.toFixed(2)} jackpot &amp; start round #{fomo.roundId + 1}
                     </button>
                   ) : (
                     <button

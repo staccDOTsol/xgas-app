@@ -56,7 +56,7 @@
   },
   "l4": {
     "escrow": "0x842E6904e4eB64d5957CC2E9Eb640A9a8C006754",
-    "fomo": null,
+    "fomo": "0xa8d88800cf41a2c246fa363f4fa9ee14c1fef151",
     "router": "0xc4a5869A959Db3cead7E568D368Ce822f52b9a2E",
     "fanoutSink": "0xfeb38ce50e1F49438acAa39b2Da513d2F1DE548f",
     "nguLauncher": "0x6067e608d1e0c4a67d406447faa42a7c7452f7f8",
@@ -64,7 +64,7 @@
     "validatorFeeSplitter": "0xa924c725b64cc346f275269efa4bd0538cfba97e",
     "arbSys": "0x0000000000000000000000000000000000000064",
     "nodeInterface": "0x00000000000000000000000000000000000000C8",
-    "fomoDeployedUnlisted": "0xB907c064FCD431FC01c76CEF06d5fDC78dB409F1"
+    "fomoRetiredNoJackpotFallback": "0xB907c064FCD431FC01c76CEF06d5fDC78dB409F1"
   },
   "legacy466301": {
     "status": "retired: old inbox paused on Robinhood, holders refunded in USDG. Kept only so withdrawals started on 466301 can still be tracked and claimed on its Outbox.",
