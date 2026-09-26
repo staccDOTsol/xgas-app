@@ -218,7 +218,7 @@ export const PlaidCheck: React.FC<PlaidCheckProps> = ({ tradeId, side, xHandle, 
           </div>
           {items.length < 3 && (
             <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
-              <Fingerprint className="w-3 h-3" /> Linking asks for your passkey first (Face ID, Touch ID or your device PIN), on top of Sign in with X.
+              <Fingerprint className="w-3 h-3" /> Linking asks for your passkey first (Face ID, Touch ID or your device PIN), on top of Sign in with X. <a href="/privacy#plaid" target="_blank" rel="noopener" className="underline hover:text-white">What we read and keep</a>
             </div>
           )}
 
@@ -336,6 +336,7 @@ export const PlaidAccounts: React.FC<{ xHandle: string }> = ({ xHandle }) => {
           <Fingerprint className="w-3.5 h-3.5 inline" /> {items.length ? 'Link another' : 'Link bank (Plaid)'}
         </button>
       )}
+      <a href="/privacy#plaid" target="_blank" rel="noopener" className="text-[10px] text-slate-500 underline hover:text-white">Privacy</a>
       {info.env !== 'production' && <span className="text-[9px] text-amber-300 uppercase">Plaid {info.env}</span>}
       {working && <span className="text-[10px] text-slate-400">{working}…</span>}
       {error && <span className="basis-full text-[11px] text-rose-300">{error}</span>}
