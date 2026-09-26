@@ -1,5 +1,5 @@
 import { isAddress } from 'viem';
-import { DEPLOY, L3, L4, PARENT_CHAIN_ID, XGAS_CHAIN_ID, parent, xgas, parentChain, xgasChain, nguLauncher, DEAD, XGAS_DEV } from '../config.mjs';
+import { DEPLOY, L3, L4, PARENT_CHAIN_ID, XGAS_CHAIN_ID, parent, xgas, parentChain, xgasChain, nguLauncher, DEAD, XGAS_DEV, VALIDATORS, FAST_CONFIRM_SAFE, FEE_TOKEN_PRICER, LEGACY, L4_MISSING } from '../config.mjs';
 import { ERC20_ABI, VAULT_ABI } from '../abis.mjs';
 import { fmtNav, fmtUsdg, fmtXMoney } from '../money.mjs';
 import { reply } from '../approval.mjs';
@@ -61,14 +61,22 @@ export const tools = [
         ],
         parent_contracts: L3,
         xgas_contracts: { ...L4, nguLauncher: launcher },
-        rollup: { createRollupTx: DEPLOY.createRollupTx, deployedAtBlock: DEPLOY.deployedAtBlock, owner: DEPLOY.owner, batchPoster: DEPLOY.batchPoster, validator: DEPLOY.validator },
+        rollup: {
+          mode: 'rollup: all transaction data is posted to Robinhood Chain',
+          createRollupTx: DEPLOY.createRollupTx, deployedAtBlock: DEPLOY.deployedAtBlock, owner: DEPLOY.owner, batchPoster: DEPLOY.batchPoster,
+          validators: VALIDATORS, fastConfirmSafe: FAST_CONFIRM_SAFE, feeTokenPricer: FEE_TOKEN_PRICER,
+        },
+        ...(LEGACY && { legacy_chain: { ...LEGACY, status: 'retired: exits and Outbox claims only, no deposits' } }),
+        ...(L4_MISSING.length && { xgas_contracts_not_deployed: L4_MISSING }),
         fees: FEE_SCHEDULE,
-        ngu_launcher_status: launcher ? 'deployed' : 'not deployed yet — every ngu_* tool will say so rather than guess',
+        ngu_launcher_status: launcher ? 'deployed' : 'not deployed yet; every ngu_* tool will say so rather than guess',
       };
       const text = [
-        `Robinhood Chain (parent) #${PARENT_CHAIN_ID} — head ${parentBlock}`,
-        `xGas Orbit L4 #${XGAS_CHAIN_ID} — head ${xgasBlock}, native gas is $xMoney`,
-        `Vault ${L3.xMoney} holds USDG ${L3.usdg}; escrow ${L4.escrow} runs the OTC desk.`,
+        `Robinhood Chain (parent) #${PARENT_CHAIN_ID}, head ${parentBlock}`,
+        `xGas Orbit L4 #${XGAS_CHAIN_ID}, head ${xgasBlock}, native gas is $xMoney. Rollup mode: all data on Robinhood Chain.`,
+        `Vault ${L3.xMoney} holds USDG ${L3.usdg}; ${L4.escrow ? `escrow ${L4.escrow} runs the OTC desk.` : 'the OTC escrow is not deployed on this chain yet.'}`,
+        ...(FAST_CONFIRM_SAFE ? [`Fast confirmer: Safe ${FAST_CONFIRM_SAFE} (${VALIDATORS.length} validator keys); validation is open to anyone.`] : []),
+        ...(L4_MISSING.length ? [`Not deployed on this chain yet: ${L4_MISSING.join(', ')}.`] : []),
         launcher ? `NguLauncher ${launcher}.` : 'NguLauncher is not deployed; NGU tools are dark.',
       ].join('\n');
       return reply(text, data);

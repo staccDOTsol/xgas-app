@@ -6,7 +6,7 @@
 // tools can spend this wallet — that is the whole point, and the whole risk.
 //
 // Privy SIGNS; we BROADCAST. Their sendTransaction would broadcast through Privy's own
-// RPC, which has never heard of chain 466301, so we take the signed payload and put it
+// RPC, which has never heard of chain 466302, so we take the signed payload and put it
 // through our relay instead.
 import fs from 'fs';
 import path from 'path';

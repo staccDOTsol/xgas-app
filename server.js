@@ -26,6 +26,13 @@ const L3_RPC = process.env.VITE_ROBINHOOD_RPC_URL || DEPLOY.parentRpcUrl;
 // Nitro sequencer: reach it over Fly's private network when we're on Fly, else the public URL. The web app (xgas)
 // and the node (xgas-l4) share a Fly org, so the .internal name resolves.
 const L4_RPC_INTERNAL = process.env.L4_RPC_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l4.internal:8449' : DEPLOY.sequencerRpcUrl);
+// A stale L4_RPC_INTERNAL secret would quietly serve the retired chain under this chain's frontend. Say so loudly.
+fetch(L4_RPC_INTERNAL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) })
+  .then((r) => r.json()).then((j) => {
+    const got = parseInt(j.result, 16), want = Number(DEPLOY.chainId || 466302);
+    if (got !== want) console.error(`[boot] L4 RPC ${L4_RPC_INTERNAL} is chain ${got}, expected ${want}: fix the L4_RPC_INTERNAL secret`);
+    else console.log(`[boot] L4 RPC ${L4_RPC_INTERNAL} is chain ${got}`);
+  }).catch((e) => console.error('[boot] L4 RPC chainId check failed:', e.message));
 const L4_RPC_PUBLIC = DEPLOY.publicRpcUrl; // https://xgas.dev/rpc — the only RPC URL users ever see
 // The host's one hot key. It executes Outbox withdrawals on Robinhood on users' behalf (a permissionless call; we
 // just pay gas) and runs the XGAS.DEV buyback keeper. Neither needs any role, so this should be a no-role claimer

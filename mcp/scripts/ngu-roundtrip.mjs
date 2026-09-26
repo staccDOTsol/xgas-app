@@ -1,6 +1,6 @@
 // Local end-to-end check of the NGU tools against an anvil chain, since no NguLauncher
 // is deployed on xGas yet. Start one first:
-//   anvil --port 8599 --chain-id 466301
+//   anvil --port 8599 --chain-id 466302
 //   forge create src/NguLauncher.sol:NguLauncher --rpc-url http://127.0.0.1:8599 \
 //     --private-key <anvil key 0> --broadcast --constructor-args <fanoutSink> <buybackSink>
 //   cast send <launcher> 'launch(string,string,uint256,uint256,uint16,uint16,uint256)' ... --value 0.05ether
@@ -11,7 +11,7 @@ const RPC = 'http://127.0.0.1:8599';
 const TOKEN = process.env.TOKEN;
 // anvil's well-known account #0 — a public test key, deliberately not a secret
 const account = privateKeyToAccount('0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80');
-const chain = { id: 466301, name: 'anvil', nativeCurrency: { name: 'x', symbol: 'x', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } };
+const chain = { id: 466302, name: 'anvil', nativeCurrency: { name: 'x', symbol: 'x', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } };
 const pub = createPublicClient({ chain, transport: http(RPC) });
 const wallet = createWalletClient({ account, chain, transport: http(RPC) });
 

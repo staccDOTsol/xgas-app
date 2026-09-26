@@ -20,10 +20,10 @@ if (!DEPLOY_FILE) throw new Error(`No deployment file found. Looked at: ${CANDID
 export const DEPLOY = JSON.parse(fs.readFileSync(DEPLOY_FILE, 'utf8'));
 
 export const PARENT_CHAIN_ID = DEPLOY.parentChainId;   // 4663  Robinhood Chain
-export const XGAS_CHAIN_ID = DEPLOY.chainId;           // 466301 xGas Orbit L4
+export const XGAS_CHAIN_ID = DEPLOY.chainId;           // 466302 xGas Orbit L4 (rollup mode)
 
 const PARENT_RPC = process.env.XGAS_PARENT_RPC || DEPLOY.parentRpcUrl;
-const XGAS_RPC = process.env.XGAS_RPC || DEPLOY.publicRpcUrl;
+const XGAS_RPC = process.env.XGAS_RPC || DEPLOY.publicRpcUrl || DEPLOY.rpcUrl || DEPLOY.sequencerRpcUrl;
 
 // The host that runs the Outbox executor ("claim for me") and serves /api/l4-info.
 export const XGAS_API = (process.env.XGAS_API || 'https://xgas.dev').replace(/\/+$/, '');
@@ -50,7 +50,27 @@ export const clientFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? xgas 
 export const rpcFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? XGAS_RPC : PARENT_RPC);
 
 export const L3 = DEPLOY.l3;
-export const L4 = DEPLOY.l4;
+export const L4 = DEPLOY.l4 || {};
+
+// Rollup roles. 466302 lists every validator key and a Safe as the fast confirmer; the 466301 file had a
+// single `validator`. Read either shape so an older deployment file still loads.
+export const VALIDATORS = Array.isArray(DEPLOY.validators) ? DEPLOY.validators
+  : DEPLOY.validator ? [DEPLOY.validator] : [];
+export const FAST_CONFIRM_SAFE = DEPLOY.fastConfirmSafe || L3.fastConfirmSafe || null;
+export const FEE_TOKEN_PRICER = DEPLOY.feeTokenPricer || L3.feeTokenPricer || null;
+// The retired chain, kept so old withdrawals can still be tracked and claimed. Null when the file has none.
+export const LEGACY = DEPLOY.legacy466301 || null;
+// L4 app contracts not (re)deployed on this chain yet. Tools that need one say so instead of calling address null.
+export const L4_MISSING = Object.entries(L4)
+  .filter(([, v]) => v === null || v === '' || v === '0x0000000000000000000000000000000000000000')
+  .map(([k]) => k);
+export function l4Address(name) {
+  const a = L4[name];
+  if (!a || a === '0x0000000000000000000000000000000000000000') {
+    throw new Error(`${name} is not deployed on xGas ${XGAS_CHAIN_ID} yet (l4.${name} is empty in the deployment file), so this tool has nothing to call.`);
+  }
+  return a;
+}
 
 export const DEAD = '0x000000000000000000000000000000000000dEaD';
 export const ZERO = '0x0000000000000000000000000000000000000000';
@@ -76,8 +96,15 @@ export async function nguLauncher() {
   try {
     const res = await fetch(`${XGAS_API}/api/l4-info`, { signal: AbortSignal.timeout(8000) });
     const info = await res.json();
+    // The host may still describe another chain (say, mid-migration). Only take an address it gives for
+    // this chain, and only once there is code at it here: value sent to an empty address is gone.
+    const infoChain = info?.chainId ?? info?.chain?.chainId;
+    if (infoChain != null && Number(infoChain) !== XGAS_CHAIN_ID) return null;
     const addr = info?.contracts?.nguLauncher || null;
-    if (addr && addr !== ZERO) launcherCache.address = addr;
+    if (addr && addr !== ZERO) {
+      const code = await xgas.getCode({ address: addr });
+      if (code && code !== '0x') launcherCache.address = addr;
+    }
   } catch { /* offline host is not an answer about the chain; callers get null */ }
   return launcherCache.address;
 }

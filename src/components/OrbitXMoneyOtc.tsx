@@ -88,6 +88,9 @@ const USDG_ABI = parseAbi([
 // Kill switch for the deposit button. Off on #466302: the vault's setBridgeSystem has pointed enterRollup at the
 // new inbox. Turn it back on (and reword the message) if deposits ever have to stop again.
 const DEPOSITS_PAUSED = false;
+// Robinhood helper for deposits before the vault's timelocked switch (reviewed; see ~/.xgas-orbit/relaunch-466302/early).
+const EARLY_DEPOSITOR = '0x36e52831ba473e9374bad7cc22ed942a99b4d431';
+const EARLY_DEPOSITOR_ABI = parseAbi(['function deposit(uint256 usdgAmount, address l3Recipient) returns (uint256)']);
 const DEPOSITS_PAUSED_MSG = 'Deposits are paused for now. Nothing you already hold is affected, and withdrawals keep working.';
 
 // XMoney: the vault + gas token on Robinhood. enterRollup bridges to the Orbit L4 in the same tx.
@@ -545,9 +548,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       // enterRollup sends to whatever inbox the vault holds. Until its timelocked setBridgeSystem points it at this
       // chain's inbox, a deposit would go to the retired chain (whose inbox is paused, so it would just revert).
       const vaultInbox = await publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'inbox' });
-      if (vaultInbox.toLowerCase() !== CONTRACT_ADDRESSES.ORBIT_INBOX.toLowerCase()) {
-        throw new Error(`Deposits open once the XMoney vault points at chain #${L4_CHAIN_ID}. That switch sits on the vault's public 24 hour timelock and can execute from 2026-09-27 08:33 UTC. Nothing was sent.`);
-      }
+      // Until the vault's timelocked switch lands, deposits go through EarlyDepositor: one call mints xMoney from the
+      // vault and opens a retryable to exactly this wallet on the new chain (no aliasing, nothing left in the helper).
+      const viaHelper = vaultInbox.toLowerCase() !== CONTRACT_ADDRESSES.ORBIT_INBOX.toLowerCase();
+      const spender = (viaHelper ? EARLY_DEPOSITOR : CONTRACT_ADDRESSES.XMONEY_USD_L3) as `0x${string}`;
       // Say what is actually missing before the wallet does. Without this, USDG's InsufficientFunds revert
       // reaches the user as "execution reverted for an unknown reason".
       const who = wallet.address as `0x${string}`;
@@ -564,17 +568,19 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       const before = await l4PublicClient.getBalance({ address: who }).catch(() => 0n);
 
       // 1) Approve exactly this deposit, never an unlimited allowance (same as the MCP enter path)
-      const allowance = await publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: parseAbi(['function allowance(address,address) view returns (uint256)']), functionName: 'allowance', args: [wallet.address as `0x${string}`, CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`] });
+      const allowance = await publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: parseAbi(['function allowance(address,address) view returns (uint256)']), functionName: 'allowance', args: [wallet.address as `0x${string}`, spender] });
       if (allowance < rawUnits) {
         setBridgeStatus('Approving USDG on Robinhood…');
-        const approveCall = encodeAbiCall(USDG_ABI, 'approve', [CONTRACT_ADDRESSES.XMONEY_USD_L3, rawUnits], CONTRACT_ADDRESSES.USDG, '0', L3_CHAIN_ID);
+        const approveCall = encodeAbiCall(USDG_ABI, 'approve', [spender, rawUnits], CONTRACT_ADDRESSES.USDG, '0', L3_CHAIN_ID);
         await sendOnChainTx({ to: CONTRACT_ADDRESSES.USDG, data: approveCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
       }
 
       // 2) enterRollup: USDG locked, xMoney minted and sent through the Orbit Inbox to you on the L4
       setBridgeStatus('Locking USDG and sending through the Orbit Inbox…');
-      const depositCall = encodeAbiCall(XUSD_VAULT_ABI, 'enterRollup', [rawUnits, wallet.address], CONTRACT_ADDRESSES.XMONEY_USD_L3, '0', L3_CHAIN_ID);
-      const res = await sendOnChainTx({ to: CONTRACT_ADDRESSES.XMONEY_USD_L3, data: depositCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
+      const depositCall = viaHelper
+        ? encodeAbiCall(EARLY_DEPOSITOR_ABI, 'deposit', [rawUnits, wallet.address], EARLY_DEPOSITOR, '0', L3_CHAIN_ID)
+        : encodeAbiCall(XUSD_VAULT_ABI, 'enterRollup', [rawUnits, wallet.address], CONTRACT_ADDRESSES.XMONEY_USD_L3, '0', L3_CHAIN_ID);
+      const res = await sendOnChainTx({ to: viaHelper ? EARLY_DEPOSITOR : CONTRACT_ADDRESSES.XMONEY_USD_L3, data: depositCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
 
       // 3) The sequencer includes the delayed message; the retryable auto-redeems and credits native gas
       setBridgeStatus(`Bridging… the L4 sequencer is picking up your deposit (tx ${res.txHash.slice(0, 10)}…). Usually under a minute.`);

@@ -1,5 +1,5 @@
 import { isAddress } from 'viem';
-import { L3, L4, XGAS_API, parent, xgas } from '../config.mjs';
+import { L3, L4_MISSING, l4Address, XGAS_API, parent, xgas } from '../config.mjs';
 import { ESCROW_ABI, VAULT_ABI } from '../abis.mjs';
 import { expectedCents, fmtUsdg, fmtXMoney, parseUsdg, parseXMoney, usd } from '../money.mjs';
 import { reply } from '../approval.mjs';
@@ -13,13 +13,24 @@ const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const TRUST = {
   vault: 'The XMoney vault itself: USDG sits in it, redeemable at NAV. No third party.',
   otc: 'Your counterparty, identified only by an X handle. The $xMoney leg is escrowed on chain; the fiat leg is not, and only the seller can release.',
-  rollup: 'The Orbit rollup: withdrawals wait for an assertion to be confirmed on the parent chain by our validator.',
+  rollup: 'The Orbit rollup: withdrawals wait for an assertion to be confirmed on the parent chain, either after the challenge window or at once by the fast-confirm Safe, whose validator keys you trust for that speed. Anyone can assert.',
   warp: 'A Hyperlane warp route and its ISM/relayer set. Not deployed — so this connector will not quote it.',
   paxos: 'Paxos, for redeeming USDG to dollars, under their KYC.',
 };
 
+const otcNotDeployed = (path_id, title) => ({
+  path_id,
+  title,
+  unavailable: 'The OTC escrow is not deployed on this chain yet, so there is no order book to take from or post to.',
+  recourse: 'Use the vault route through USDG for now; the desk returns once the escrow is deployed and in the deployment file.',
+  trust: TRUST.otc,
+  tools: [],
+});
+
 async function liveAsks(sizeWei) {
-  const next = await xgas.readContract({ address: L4.escrow, abi: ESCROW_ABI, functionName: 'nextOrderId' });
+  // No escrow on this chain yet (before the L4 apps are redeployed): the OTC route has no book, so it simply has no offers.
+  if (L4_MISSING.includes('escrow')) return [];
+  const next = await xgas.readContract({ address: l4Address('escrow'), abi: ESCROW_ABI, functionName: 'nextOrderId' });
   if (next === 0n) return [];
   const all = await Promise.all(Array.from({ length: Number(next) }, (_, i) => order(i).catch(() => null)));
   // Overlap, not containment: an order that can fill part of what you asked for is a
@@ -29,7 +40,8 @@ async function liveAsks(sizeWei) {
 }
 
 async function liveBids(sizeWei) {
-  const next = await xgas.readContract({ address: L4.escrow, abi: ESCROW_ABI, functionName: 'nextOrderId' });
+  if (L4_MISSING.includes('escrow')) return [];
+  const next = await xgas.readContract({ address: l4Address('escrow'), abi: ESCROW_ABI, functionName: 'nextOrderId' });
   if (next === 0n) return [];
   const all = await Promise.all(Array.from({ length: Number(next) }, (_, i) => order(i).catch(() => null)));
   return all.filter((o) => o && o.active && o.side === 'bid' && sizeWei >= o.min_wei && o.available_wei >= o.min_wei)
@@ -93,6 +105,8 @@ async function quoteIn({ source, amount }) {
         rank_note: 'The only path that starts from actual dollars. Its cost is counterparty risk, not fees.',
         best_order: best,
       });
+    } else if (L4_MISSING.includes('escrow')) {
+      paths.push(otcNotDeployed('in:otc_unavailable', 'Dollars on X Money → $xMoney, peer to peer'));
     } else {
       paths.push({
         path_id: 'in:otc_no_liquidity',
@@ -140,6 +154,8 @@ async function quoteOut({ source, amount }) {
         rank_note: 'Fastest route to actual dollars, and the only one that does not wait on the rollup.',
         best_order: best,
       });
+    } else if (L4_MISSING.includes('escrow')) {
+      paths.push(otcNotDeployed('out:otc_unavailable', '$xMoney → dollars on X Money, peer to peer'));
     } else {
       paths.push({
         path_id: 'out:otc_post_ask',

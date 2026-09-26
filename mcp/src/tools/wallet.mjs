@@ -35,7 +35,7 @@ export const tools = [
       };
       return reply(
         `${whose()}: ${w.address} (Privy, ${w.source}).\n`
-        + `  xGas L4: ${formatEther(native)} $xMoney — this pays gas for everything on 466301\n`
+        + `  xGas L4: ${formatEther(native)} $xMoney, which pays gas for everything on ${XGAS_CHAIN_ID}\n`
         + `  Parent:  ${fmtUsdg(usdg)} USDG, ${fmtXMoney(xm)} xMoney\n${CUSTODY_NOTE}`,
         data,
       );
@@ -51,7 +51,7 @@ export const tools = [
       const w = await createAgentWallet();
       return reply(
         w.created
-          ? `Created ${w.address}.\nIt holds nothing yet. It needs native $xMoney on xGas (466301) for gas before it can do anything there, and ETH on the parent (4663) for anything on that side.\n${CUSTODY_NOTE}`
+          ? `Created ${w.address}.\nIt holds nothing yet. It needs native $xMoney on xGas (${XGAS_CHAIN_ID}) for gas before it can do anything there, and ETH on the parent (${PARENT_CHAIN_ID}) for anything on that side.\n${CUSTODY_NOTE}`
           : `You already have one: ${w.address}. Nothing created.`,
         w,
       );
@@ -62,7 +62,7 @@ export const tools = [
     name: 'wallet_execute',
     description:
       'Run a prepare_* tool and actually execute it with your own wallet: Privy signs each step, this connector broadcasts it. '
-      + 'The approval terms are returned with the result, and confirm must be true — there is no way to undo a sent transaction.',
+      + 'The approval terms are returned with the result, and confirm must be true, because there is no way to undo a sent transaction.',
     inputSchema: {
       type: 'object',
       properties: {

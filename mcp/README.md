@@ -1,7 +1,7 @@
 # xgas-mcp
 
 An MCP server over the xGas stack: the USDG vault bridge on Robinhood Chain (4663),
-the P2P OTC desk and NGU curves on xGas Orbit L4 (466301), a teller layer that routes
+the P2P OTC desk and NGU curves on xGas Orbit L4 (466302, rollup mode), a teller layer that routes
 between dollars and $xMoney, and XSwap: X Money in, anything on any EVM chain out, and the other way round.
 
 52 tools, all grounded in a deployment file and the live chains. Over stdio you get all 52.
@@ -56,9 +56,34 @@ Environment overrides, all optional:
 | `XGAS_RPC` | `publicRpcUrl` from the deployment | xGas L4 RPC |
 | `XGAS_API` | `https://xgas.dev` | the host that runs the Outbox executor and serves `/api/l4-info` |
 | `XGAS_NGU_LAUNCHER` | unset | the NguLauncher address, until it is in the deployment file |
+| `XGAS_DEPOSITS_PAUSED` | unset (deposits open) | set to `1` to make `prepare_enter` and `submit_enter` refuse |
 | `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
 | `XSWAP_INTENTS` | `0xf8B4…9a35` | the X-Money-in escrow on the parent chain |
 | `XSWAP_ASKS` | `0x0a33…Cd13` | the X-Money-out escrow on the parent chain |
+
+## Chain 466302
+
+xGas relaunched as an Arbitrum Orbit chain in rollup mode: every batch is posted to Robinhood
+Chain, and there is no data availability committee. The retired chain 466301 takes no deposits;
+its exits and Outbox claims keep working, and the deployment file keeps its addresses under
+`legacy466301`.
+
+- **Exits and the fast confirmer.** The fast confirmer is a Safe whose owners are the validator
+  keys (`fastConfirmSafe` in the deployment file). `quote_exit` reads its owners and threshold
+  live and says what that means: while enough of those keys are online a withdrawal is usually
+  claimable minutes after the assertion that covers it, and any threshold of them can confirm any
+  assertion, including a wrong one. A confirmed assertion is final. The chain owner key can also
+  upgrade the rollup and force-confirm.
+- **Validation is permissionless.** The validator whitelist is disabled. Anyone who runs a node
+  and posts the stake can assert and challenge. If the xGas validators stop, exits do not depend
+  on them, but they then wait the full challenge window.
+- **Deposits.** `prepare_enter` builds `vault.enterRollup(amount, recipient)` and refuses while
+  the vault's inbox is not this chain's inbox. Do not deposit by calling `inbox.depositERC20`
+  directly from a smart account or an EIP-7702 delegated EOA: the Inbox credits the aliased
+  address, not yours. `enterRollup` names the recipient explicitly, so it is safe from either.
+- **L4 contracts.** Anything missing from `l4.*` is reported by `get_chain_info`, and every
+  `prepare_*` refuses to build a transaction with no target rather than hand a wallet a contract
+  creation.
 
 ## XSwap: X Money in, anything out
 
@@ -151,7 +176,7 @@ never claims the money moved.
 `npm run check` exercises the real MCP stdio transport against both live chains.
 
 The NGU tools have no launcher on xGas yet, so they were verified against a local
-anvil at chain id 466301 with a real `NguLauncher` and curve: buy with buffer,
+anvil at the xGas chain id (466302 now) with a real `NguLauncher` and curve: buy with buffer,
 sell with `minOut`, donate, and an idempotent replay. `scripts/ngu-roundtrip.mjs`
 reruns that; its header has the setup commands. The predicted post-donation floor
 matched the chain exactly, and the sell basis correctly flipped from `floor` to
@@ -170,11 +195,14 @@ All three items the spec left open are closed.
    `sendOnChainTx` one step at a time, waiting for each. The site and the connector now
    share one source of truth for quotes, fees and approval copy.
 2. **Exit ETAs.** `quote_exit`, `prepare_exit` and `get_exit_status` read
-   `confirmPeriodBlocks` off the rollup and measure the parent's cadence over the
-   last 1000 blocks, rather than hardcoding either. They state the caveat that the
-   window starts at the assertion covering the withdrawal, not at the withdrawal.
-3. **NguLauncher** is deployed at `0x70A0fBE369e7C390BddA7c55dFD8590F6C13B47B`
-   and set in `l4.nguLauncher`; its curves pay 0.04% (0.01% burn + 0.01%
+   `confirmPeriodBlocks` off the rollup (counted in Ethereum blocks), the fast confirmer
+   and, when it is a Safe, its owners and threshold, rather than hardcoding any of it.
+   They state the caveat that the window starts at the assertion covering the withdrawal,
+   not at the withdrawal, and what the fast path trusts.
+3. **NguLauncher** is read from `l4.nguLauncher`. On the retired chain 466301 it was
+   `0x70A0fBE369e7C390BddA7c55dFD8590F6C13B47B`; on 466302 it is redeployed with the
+   other L4 contracts, and until the deployment file carries it the NGU tools say it is
+   not deployed. Its curves pay 0.04% (0.01% burn + 0.01%
    FanoutSink + 0.02% XGAS.DEV buyback). The first launcher,
    `0xEA2cE320B5CDbF14bc734FeB60c78097e146f1B0` (block 35), is kept in
    `l4.legacy2bp.nguLauncher`: its curves predate the buyback and keep 0.01% +
@@ -191,7 +219,7 @@ An agent has no browser and no wallet, so `prepare_*` on its own is a dead end f
 - `wallet_create` : make the wallet once, then fund it
 - `wallet_execute` : run any `prepare_*` tool and actually send it, with `confirm: true` and an idempotency key
 
-Privy signs; this connector broadcasts (Privy's own RPC has never heard of chain 466301).
+Privy signs; this connector broadcasts (Privy's own RPC has never heard of chain 466302).
 Privy signs whenever this host asks with `PRIVY_APP_SECRET`, so whoever runs the host can sign
 for every wallet it has made. That is what custodial means here, and it is why the wallet is
 opt-in. Everything else in this connector stays unsigned until your own wallet signs it.
