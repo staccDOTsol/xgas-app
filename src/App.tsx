@@ -11,6 +11,15 @@ import { sounds } from './utils/audio';
 import { Layers, Wallet, Volume2, VolumeX, AlertTriangle, Check, Plus, LogOut } from 'lucide-react';
 
 const KNOWN_CHAINS = new Set<number>([L3_CHAIN_ID, L4_CHAIN_ID]);
+
+// Remembers an explicit Disconnect across reloads, so the site does not silently reconnect through eth_accounts.
+const DISCONNECT_KEY = 'xgas.walletDisconnected';
+function walletDisconnectedFlag(): boolean {
+  try { return localStorage.getItem(DISCONNECT_KEY) === '1'; } catch { return false; }
+}
+function setWalletDisconnectedFlag(on: boolean) {
+  try { on ? localStorage.setItem(DISCONNECT_KEY, '1') : localStorage.removeItem(DISCONNECT_KEY); } catch { /* storage blocked */ }
+}
 // The retired chain. A wallet still on it gets told why, not just that it is on the wrong network.
 const LEGACY_L4_CHAIN_ID = CONTRACT_ADDRESSES.ORBIT_L4_LEGACY_CHAIN_ID;
 
@@ -159,7 +168,7 @@ export default function App() {
     }).catch(() => {});
 
     ethereum.request({ method: 'eth_accounts' }).then((accounts: string[]) => {
-      if (accounts && accounts.length > 0) {
+      if (accounts && accounts.length > 0 && !walletDisconnectedFlag()) {
         setWallet(prev => ({ ...prev, connected: true, address: accounts[0] }));
       }
     }).catch(() => {});
@@ -171,7 +180,7 @@ export default function App() {
     };
 
     const handleAccountsChanged = (accounts: string[]) => {
-      if (accounts && accounts.length > 0) {
+      if (accounts && accounts.length > 0 && !walletDisconnectedFlag()) {
         setWallet(prev => ({ ...prev, connected: true, address: accounts[0] }));
       } else {
         setWallet(prev => ({ ...prev, connected: false, address: '' }));
@@ -189,8 +198,46 @@ export default function App() {
     };
   }, []);
 
+  const [walletMenu, setWalletMenu] = useState(false);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!walletMenu) return;
+    const close = (e: MouseEvent) => { if (!(e.target as HTMLElement)?.closest?.('[data-wallet-menu]')) setWalletMenu(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [walletMenu]);
+
+  // Switch account: ask the wallet to show its account picker again.
+  const handleSwitchAccount = async () => {
+    setWalletMenu(false);
+    const ethereum = (window as any).ethereum;
+    if (!ethereum) return;
+    try {
+      await ethereum.request({ method: 'wallet_requestPermissions', params: [{ eth_accounts: {} }] });
+      const accounts: string[] = await ethereum.request({ method: 'eth_accounts' });
+      setWalletDisconnectedFlag(false);
+      if (accounts?.[0]) setWallet(prev => ({ ...prev, connected: true, address: accounts[0] }));
+    } catch (e) {
+      console.warn('Switch account cancelled:', e);
+    }
+  };
+
+  // Disconnect: revoke this site's access where the wallet supports it (MetaMask, Rabby), and forget it here either way.
+  const handleDisconnectWallet = async () => {
+    setWalletMenu(false);
+    setWalletDisconnectedFlag(true);
+    setWallet(prev => ({ ...prev, connected: false, address: '' }));
+    const ethereum = (window as any).ethereum;
+    try { await ethereum?.request?.({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); } catch { /* not supported: the local flag still keeps it disconnected */ }
+  };
+
+  const handleCopyAddress = async () => {
+    try { await navigator.clipboard.writeText(wallet.address); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch { /* clipboard blocked */ }
+  };
+
   const handleConnectWallet = async () => {
     try {
+      setWalletDisconnectedFlag(false);
       const res = await connectInjectedWallet();
       if (res.success && res.address) {
         setWallet(prev => ({ ...prev, connected: true, address: res.address! }));
@@ -331,8 +378,9 @@ export default function App() {
               <span className="hidden sm:inline">{isWrongNetwork ? `Switch to L4 #${L4_CHAIN_ID}` : chainLabel(currentChainId)}</span>
             </button>
 
+            <div className="relative" data-wallet-menu>
             <button
-              onClick={handleConnectWallet}
+              onClick={() => (wallet.connected ? setWalletMenu(m => !m) : handleConnectWallet())}
               className={`px-3 sm:px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all flex items-center gap-2 cursor-pointer shadow-md ${
                 wallet.connected
                   ? 'bg-[#121624] border border-emerald-500/40 text-emerald-400'
@@ -346,6 +394,15 @@ export default function App() {
                   : 'Connect'}
               </span>
             </button>
+            {wallet.connected && walletMenu && (
+              <div className="absolute right-0 mt-2 w-56 z-50 rounded-xl bg-[#0d111c] border border-[#1e2538] shadow-xl p-1.5 font-mono text-xs">
+                <div className="px-2.5 py-2 text-slate-400 break-all">{wallet.address}</div>
+                <button onClick={handleCopyAddress} className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[#1a2033] text-slate-200 cursor-pointer">{copied ? 'Copied' : 'Copy address'}</button>
+                <button onClick={handleSwitchAccount} className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-[#1a2033] text-slate-200 cursor-pointer">Switch account</button>
+                <button onClick={handleDisconnectWallet} className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-rose-500/10 text-rose-300 cursor-pointer">Disconnect</button>
+              </div>
+            )}
+            </div>
           </div>
 
           {/* Secondary rail: scrolls sideways on phones, inline on desktop */}

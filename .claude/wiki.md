@@ -80,3 +80,7 @@ server/plaid.mjs + src/components/PlaidCheck.tsx: read-only check that a desk tr
 ## X Money is a Plaid institution: ins_137835 (url https://www.x.com), seen in the Plaid dashboard 26 Sep 2026
 So a desk party can link their X Money wallet itself through Plaid Link, not only the bank behind it; the Plaid payment check (server/plaid.mjs) can then see X Money P2P transfers at the source. It supports TRANSACTIONS and TRANSACTIONS_REFRESH (plus AUTH, BALANCE, IDENTITY, IDENTITY_MATCH, SIGNAL, PAY_BY_BANK and the CRA products). Unverified until a real production link: whether X Money's transaction descriptions carry the payment note (the "xgas #id" memo) and the counterparty handle.
 **Why:** this was the open question behind "Plaid for the X Money API"; it decides whether the fiat leg can be verified directly.
+
+## Sequencer parent RPC is dRPC (xgas-l4 PARENT_CHAIN_RPC_URL), since 26 Sep 15:58 UTC
+The public Robinhood RPC started returning 429 to the sequencer's inbox reader; deposits (delayed messages) stopped being sequenced for ~70 min (bridge count 16 vs read 8, L4 head frozen). Switching the xgas-l4 secret PARENT_CHAIN_RPC_URL to the dRPC endpoint fixed it within a minute. Symptom to watch: "error reading inbox ... 429" in `fly logs -a xgas-l4`, or bridge.delayedMessageCount() > sequencerInbox.totalDelayedMessagesRead().
+**Why:** the site now polls Robinhood a lot (SSE watcher, paymaster price/debits, OG cards), which likely shares egress with the sequencer; never put the sequencer back on the public RPC.
