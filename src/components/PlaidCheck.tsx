@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle, Landmark, RefreshCw, Search, Unlink } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Fingerprint, Landmark, RefreshCw, Search, Unlink } from 'lucide-react';
+import { browserSupportsWebAuthn, startAuthentication, startRegistration } from '@simplewebauthn/browser';
 
 // ---------------------------------------------------------------------------
 // Plaid on a Robinhood desk trade: a party links the account their X Money dollars move through, and the host
@@ -73,6 +74,28 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `The host answered ${r.status}.`);
   return j as T;
+}
+
+/**
+ * The passkey step-up the host requires before Plaid Link: the first time it creates a passkey on this X account
+ * (Face ID, Touch ID, Windows Hello or a security key), after that it asks for it. Good for 15 minutes.
+ */
+async function ensurePasskey(): Promise<void> {
+  const s = await fetch('/api/passkey', { credentials: 'same-origin' }).then(r => r.json());
+  if (s.stepUp) return;
+  if (!browserSupportsWebAuthn()) throw new Error('This browser cannot use passkeys. Open xgas.dev in a current browser to link an account.');
+  try {
+    if (!s.registered) {
+      const optionsJSON = await postJson<Parameters<typeof startRegistration>[0]['optionsJSON']>('/api/passkey/register/options', {});
+      await postJson('/api/passkey/register/verify', { response: await startRegistration({ optionsJSON }) });
+    } else {
+      const optionsJSON = await postJson<Parameters<typeof startAuthentication>[0]['optionsJSON']>('/api/passkey/auth/options', {});
+      await postJson('/api/passkey/auth/verify', { response: await startAuthentication({ optionsJSON }) });
+    }
+  } catch (e) {
+    if (e instanceof Error && e.name === 'NotAllowedError') throw new Error('The passkey prompt was closed. Plaid only opens after you confirm with your passkey.');
+    throw e;
+  }
 }
 
 /** Opens Plaid Link with a token; resolves true once the new account is stored on the host, false if closed. */
@@ -149,6 +172,9 @@ export const PlaidCheck: React.FC<PlaidCheckProps> = ({ tradeId, side, xHandle, 
     try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setWorking(null); }
   };
   const link = wrap('Opening Plaid', async () => {
+    setWorking('Confirm with your passkey');
+    await ensurePasskey();
+    setWorking('Opening Plaid');
     const { link_token } = await postJson<{ link_token: string }>('/api/plaid/link-token', {});
     try { sessionStorage.setItem(TOKEN_KEY, link_token); } catch { /* OAuth resume just will not work */ }
     if (await runLink(link_token)) await reload();
@@ -190,6 +216,11 @@ export const PlaidCheck: React.FC<PlaidCheckProps> = ({ tradeId, side, xHandle, 
           <div className="text-[11px] text-slate-300">
             Link the account your X Money dollars move through, and xgas.dev looks for exactly {dollars} {dir} with the memo xgas #{tradeId}. Read-only: it never moves money and never {side === 'seller' ? 'releases for you' : 'claims for you'}. Unlink any time.
           </div>
+          {items.length < 3 && (
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
+              <Fingerprint className="w-3 h-3" /> Linking asks for your passkey first (Face ID, Touch ID or your device PIN), on top of Sign in with X.
+            </div>
+          )}
 
           {items.length > 0 && (
             <div className="flex flex-wrap gap-1.5">

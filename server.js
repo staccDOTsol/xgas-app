@@ -14,6 +14,7 @@ import { runAs, OPERATOR } from './mcp/src/actor.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createRobinhoodOg } from './server/og/robinhood.mjs';
 import { createPlaid } from './server/plaid.mjs';
+import { createPasskeys } from './server/passkey.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1884,12 +1885,16 @@ const robinhoodOg = createRobinhoodOg({
 robinhoodOg.mountImages(app);
 
 // Plaid, read-only: a desk party links the account their X Money dollars move through and the host looks for the
-// trade's payment there (server/plaid.mjs). Off unless PLAID_CLIENT_ID and PLAID_SECRET are set.
+// trade's payment there (server/plaid.mjs). Off unless PLAID_CLIENT_ID and PLAID_SECRET are set. Plaid Link only
+// opens after a passkey step-up on top of Sign in with X (server/passkey.mjs).
+const passkeys = createPasskeys({ dataDir: DATA_DIR, origin: PUBLIC_ORIGIN, sessionSecret: SESSION_SECRET, currentUser, sign, verify, parseCookies, setCookie });
+passkeys.mount(app);
 const plaid = createPlaid({
   dataDir: DATA_DIR,
   sessionSecret: SESSION_SECRET,
   currentUser,
   origin: PUBLIC_ORIGIN,
+  stepUp: passkeys.hasStepUp,
   readTrade: async (tradeId) => {
     if (!ROBINHOOD_OTC) return { status: 503, error: 'The Robinhood OTC desk is not deployed yet.' };
     try {

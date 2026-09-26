@@ -10,8 +10,9 @@
 // instead of a screenshot anyone could edit.
 //
 //   GET  /api/plaid                          { configured, env, signedIn, items } for the signed-in X account
-//   POST /api/plaid/link-token               a Plaid Link token (Transactions, US, 30 days of history)
-//   POST /api/plaid/exchange                 { public_token } from Link's onSuccess; stores the item
+//   POST /api/plaid/link-token               a Plaid Link token (Transactions, US, 30 days of history); needs a
+//                                            fresh passkey step-up when the host passes `stepUp`
+//   POST /api/plaid/exchange                 { public_token } from Link's onSuccess; stores the item (same step-up)
 //   POST /api/plaid/unlink                   { item } removes the item at Plaid and here
 //   POST /api/robinhood/plaid-check          { tradeId } looks for this trade's payment in your linked accounts
 //   POST /api/robinhood/plaid-receipt        { tradeId } for a disputed trade: writes a public receipt of the check
@@ -82,7 +83,7 @@ export function matchPayment(transactions, { tradeId, expectedCents, openedAt, s
 }
 
 // --- the module --------------------------------------------------------------
-export function createPlaid({ dataDir, sessionSecret, currentUser, readTrade, origin }) {
+export function createPlaid({ dataDir, sessionSecret, currentUser, readTrade, origin, stepUp }) {
   const clientId = String(process.env.PLAID_CLIENT_ID || '').trim();
   const secret = String(process.env.PLAID_SECRET || '').trim();
   const env = String(process.env.PLAID_ENV || 'sandbox').trim().toLowerCase();
@@ -200,6 +201,12 @@ export function createPlaid({ dataDir, sessionSecret, currentUser, readTrade, or
     if (!user || !user.id) { res.status(401).json({ error: 'Sign in with X first: linked accounts belong to your X account.' }); return null; }
     return user;
   }
+  // Plaid Link only opens after a passkey step-up (server/passkey.mjs) when the host wires one in.
+  function needsStepUp(req, res, user) {
+    if (!stepUp || stepUp(req, user)) return false;
+    res.status(403).json({ error: 'Confirm with your passkey first.', needsPasskey: true });
+    return true;
+  }
   const itemView = (it) => ({ id: publicItemId(it.itemId), institution: it.institution || 'Unknown institution', accounts: it.accounts || [], linkedAt: it.linkedAt, needsRelink: !!it.needsRelink });
 
   // The trade and which side of it the signed-in X account is on.
@@ -312,6 +319,7 @@ export function createPlaid({ dataDir, sessionSecret, currentUser, readTrade, or
 
     app.post('/api/plaid/link-token', async (req, res) => {
       const user = gate(req, res); if (!user) return;
+      if (needsStepUp(req, res, user)) return;
       if (itemsOf(user.id).length >= MAX_ITEMS_PER_ACCOUNT) return res.status(409).json({ error: `You already linked ${MAX_ITEMS_PER_ACCOUNT} accounts, the most one X account can. Unlink one first.` });
       try {
         const r = await call('/link/token/create', {
@@ -332,6 +340,7 @@ export function createPlaid({ dataDir, sessionSecret, currentUser, readTrade, or
 
     app.post('/api/plaid/exchange', async (req, res) => {
       const user = gate(req, res); if (!user) return;
+      if (needsStepUp(req, res, user)) return;
       const publicToken = req.body?.public_token;
       if (typeof publicToken !== 'string' || !/^public-[a-z]+-[0-9a-f-]{36}$/i.test(publicToken)) return res.status(400).json({ error: 'Send {"public_token": "public-..."} from Plaid Link.' });
       let accessToken, itemId;
