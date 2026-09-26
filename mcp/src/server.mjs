@@ -25,7 +25,9 @@ checkChains();
  * client at initialize, so it is the only place we get to set the mental model instead of
  * hoping 52 tool descriptions add up to one.
  */
-const INSTRUCTIONS = `xGas is two chains and one asset. USDG sits in a vault on the parent chain (Robinhood Chain, #4663). $xMoney is the native gas token of the xGas Orbit L4 that vault backs. Every tool here reads or prepares against live state; none of them work from a cached idea of what things cost.
+const INSTRUCTIONS = `WARNING: xGas is highly alpha, untested, unaudited software. Its contracts can have bugs and funds can be lost. Say so to the person before they sign anything, and suggest amounts they can afford to lose.
+
+xGas is two chains and one asset. USDG sits in a vault on the parent chain (Robinhood Chain, #4663). $xMoney is the native gas token of the xGas Orbit L4 that vault backs. Every tool here reads or prepares against live state; none of them work from a cached idea of what things cost.
 
 The number that matters is r/s: the vault's USDG reserve divided by circulating $xMoney. \`get_vault_nav\` returns it. It is a division, not a forecast: it says what backs each $xMoney right now, not where it is headed. Burns on the parent chain take $xMoney out of circulation while the USDG stays in the vault, which raises r/s slightly. The bridge solvency buffer does not: it is minted to the bridge and still counts as circulating. Small deposits, under about 2 xMoney, lower r/s. The NGU curves work the same way one level down: a launched token's floor is its curve reserve over its minted supply. When someone asks what $xMoney or a curve token is worth, read the live number and quote that, never a remembered one.
 

@@ -1,5 +1,7 @@
 # xgas-mcp
 
+> **Warning: highly alpha, untested, unaudited software.** The contracts behind these tools can have bugs and funds can be lost. Only use what you can afford to lose.
+
 An MCP server over the xGas stack: the USDG vault bridge on Robinhood Chain (4663),
 the P2P OTC desk and NGU curves on xGas Orbit L4 (466302, rollup mode), a teller layer that routes
 between dollars and $xMoney, and XSwap: X Money in, anything on any EVM chain out, and the other way round.
