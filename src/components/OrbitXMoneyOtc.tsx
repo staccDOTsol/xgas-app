@@ -85,10 +85,10 @@ const USDG_ABI = parseAbi([
   'function approve(address spender, uint256 amount) returns (bool)'
 ]);
 
-// Deposits are paused while xgas moves to a new chain: exits on this one are waiting on a stalled validator,
-// so new money should not go in. Flip back to false after the relaunch.
-const DEPOSITS_PAUSED = true;
-const DEPOSITS_PAUSED_MSG = 'Deposits are paused while xgas moves to a new chain. Exits on this chain are waiting on a stalled validator, so no new money should go in. Existing holders are being refunded in USDG by the founder.';
+// Kill switch for the deposit button. Off on #466302: the vault's setBridgeSystem has pointed enterRollup at the
+// new inbox. Turn it back on (and reword the message) if deposits ever have to stop again.
+const DEPOSITS_PAUSED = false;
+const DEPOSITS_PAUSED_MSG = 'Deposits are paused for now. Nothing you already hold is affected, and withdrawals keep working.';
 
 // XMoney: the vault + gas token on Robinhood. enterRollup bridges to the Orbit L4 in the same tx.
 const XUSD_VAULT_ABI = parseAbi([
@@ -235,17 +235,6 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   const [bridgeStatus, setBridgeStatus] = useState<string | null>(null);
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [executorEnabled, setExecutorEnabled] = useState<boolean>(false);
-  // Whether the batch-data endpoint answers, from GET /api/health's das field; null until known.
-  const [dasUp, setDasUp] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (activeTab !== 'specs') return;
-    let alive = true;
-    fetch('/api/health')
-      .then(r => (r.ok ? r.json() : null))
-      .then(h => { if (alive) setDasUp(typeof h?.das === 'boolean' ? h.das : null); })
-      .catch(() => { if (alive) setDasUp(null); });
-    return () => { alive = false; };
-  }, [activeTab]);
   const [pastRoundDividends, setPastRoundDividends] = useState<{ round: number; amount: number }[]>([]);
 
   // Vault On-Ramp / Off-Ramp State
@@ -314,14 +303,19 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         await loadL4Info();
         const escrowAddr = l4Addresses.escrow as `0x${string}`;
         const fomoAddr = l4Addresses.fomo as `0x${string}`;
+        // Empty until the desk and the game are deployed on this chain: the vault, balances and withdrawals
+        // still load, the order book and the game read as empty.
+        const appsLive = !!escrowAddr && !!fomoAddr;
 
-        const [nextOrderBig, nextTradeBig, escrowVolBig] = await Promise.all([
+        const [nextOrderBig, nextTradeBig, escrowVolBig] = !appsLive ? [0n, 0n, 0n] : await Promise.all([
           l4PublicClient.readContract({ address: escrowAddr, abi: ESCROW_ABI, functionName: 'nextOrderId' }),
           l4PublicClient.readContract({ address: escrowAddr, abi: ESCROW_ABI, functionName: 'nextTradeId' }),
           l4PublicClient.readContract({ address: escrowAddr, abi: ESCROW_ABI, functionName: 'totalSettledVolumeXMoney' })
         ]);
 
-        const [roundIdBig, deadlineBig, potBig, keysBig, priceBig, leader, handle] = await Promise.all([
+        const [roundIdBig, deadlineBig, potBig, keysBig, priceBig, leader, handle] = !appsLive
+          ? [0n, 0n, 0n, 0n, 0n, '0x0000000000000000000000000000000000000000' as `0x${string}`, '']
+          : await Promise.all([
           l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'roundId' }),
           l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'roundDeadline' }),
           l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'jackpotPot' }),
@@ -355,8 +349,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           try {
             const [l4Bal, p, owed, l3X, l3U] = await Promise.all([
               fetchL4XMoneyBalance(activeUser),
-              l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'players', args: [activeUser as `0x${string}`] }),
-              l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'pendingDividendsOf', args: [activeUser as `0x${string}`] }),
+              appsLive ? l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'players', args: [activeUser as `0x${string}`] }) : null,
+              appsLive ? l4PublicClient.readContract({ address: fomoAddr, abi: FOMO_ABI, functionName: 'pendingDividendsOf', args: [activeUser as `0x${string}`] }) : 0n,
               publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'balanceOf', args: [activeUser as `0x${string}`] }),
               publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: USDG_ABI, functionName: 'balanceOf', args: [activeUser as `0x${string}`] }),
             ]);
@@ -597,7 +591,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   };
 
   // ON-CHAIN WRITE (L4 -> L3) step 1: withdraw native $xMoney from the L4 through ArbSys.
-  // It becomes claimable on Robinhood once our validator confirms the assertion (minutes with fast confirmation).
+  // It becomes claimable on Robinhood once an assertion covering it is confirmed (minutes when 2 of the 3 validators fast-confirm through the Safe).
   const handleBurnXMoney = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!wallet.connected) {
@@ -626,7 +620,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   const handleClaimWithdrawal = async (w: Withdrawal) => {
     setIsSubmittingTx(true);
     try {
-      const r = await executeWithdrawal(w.txHash, w.position);
+      const r = await executeWithdrawal(w.txHash, w.position, w.chainId);
       sounds.playConnect();
       setBridgeStatus(r.alreadyExecuted ? 'Already claimed.' : `Claimed on Robinhood: ${w.amount} $xMoney is now in your wallet on L3. Redeem it for USDG below.`);
       fetchWithdrawals(wallet.address).then(x => setWithdrawals(x.withdrawals)).catch(() => {});
@@ -1272,7 +1266,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <div key={`${w.txHash}:${w.position}`} className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-[#0e121d] border border-[#1e2538]">
                     <div className="space-y-0.5">
                       <div className="text-white font-bold">{Number(w.amount).toFixed(4)} $xMoney</div>
-                      <div className="text-[10px] text-slate-500">L4 tx {w.txHash.slice(0, 10)}… · position #{w.position}</div>
+                      <div className="text-[10px] text-slate-500">{w.legacy ? `Old chain #${w.chainId} · ` : ''}L4 tx {w.txHash.slice(0, 10)}… · position #{w.position}</div>
                     </div>
                     {w.status === 'claimable' ? (
                       <button onClick={() => handleClaimWithdrawal(w)} disabled={isSubmittingTx || !executorEnabled} className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black cursor-pointer" title={executorEnabled ? 'Execute on the Robinhood Outbox' : 'Host executor not configured'}>
@@ -1919,21 +1913,17 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[11px] leading-relaxed text-slate-300">
               <div className="space-y-2">
                 <div className="text-emerald-400 font-bold uppercase tracking-wider">What is verifiable</div>
-                <p>xgas Orbit L4 (#{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}) is an Arbitrum Orbit AnyTrust chain. Every batch is posted to the SequencerInbox on Robinhood Chain and every state assertion to the Rollup contract. A node configured from <a href="/chain-info.json" className="text-cyan-400 hover:underline">chain-info.json</a> (see <a href="/RUN-A-NODE.md" className="text-cyan-400 hover:underline">RUN-A-NODE.md</a>) can verify the chain without trusting xgas.dev, but only if it can fetch batch data.</p>
-                {dasUp === false
-                  ? <p className="text-amber-300">The batch-data endpoint xgas.dev/das is unreachable right now, so third-party nodes cannot sync.</p>
-                  : dasUp === true
-                    ? <p className="text-slate-400">The batch-data endpoint xgas.dev/das is answering.</p>
-                    : <p className="text-slate-400">Batch data is served at xgas.dev/das.</p>}
-                <p>Deposits go through the canonical Orbit Inbox; exits go through the Outbox on Robinhood. The site executes Outbox claims as a convenience, but the call is permissionless.</p>
-                <p className="text-slate-400">What you do trust today: a single sequencer (ordering, liveness), a single-member data committee, and a single validator (<a href="https://robinhoodchain.blockscout.com/address/0x0d61D8e07a6210b0F082DAB784062c9c583BA647" target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">0x0d61...A647</a>) that is also the fast confirmer, all operated by xgas.dev. If that validator stops asserting, exits wait.</p>
+                <p>xgas Orbit L4 (#{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}) is an Arbitrum Orbit rollup. Every batch of transactions is posted in full to the <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_SEQUENCER_INBOX}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">SequencerInbox</a> on Robinhood Chain, and every state assertion goes to the <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_ROLLUP}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">Rollup</a> contract there. All of the chain's data lives on Robinhood, so a node configured from <a href="/chain-info.json" className="text-cyan-400 hover:underline">chain-info.json</a> (see <a href="/RUN-A-NODE.md" className="text-cyan-400 hover:underline">RUN-A-NODE.md</a>) can rebuild and verify the chain from Robinhood alone, without trusting xgas.dev.</p>
+                <p>Validation is permissionless: the validator whitelist is off on-chain, so anyone can bond 0.01 WETH and post or challenge assertions (<a href="/run-a-validator.md" className="text-cyan-400 hover:underline">run a validator</a>). Deposits go through the canonical Orbit Inbox; exits go through the Outbox on Robinhood. The site executes Outbox claims as a convenience, but the call is permissionless.</p>
+                <p className="text-slate-400">What you do trust today: a single sequencer run by xgas.dev (ordering and liveness; it cannot forge state), and the fast confirmer. Assertions are confirmed early by a 2-of-3 <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_FAST_CONFIRM_SAFE}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">Safe</a> owned by the three validator keys, so any 2 of them can confirm a state, a wrong one included, without waiting out the challenge period. Without the Safe, an assertion confirms after about 7 days unless someone challenges it.</p>
               </div>
               <div className="space-y-2">
                 <div className="text-amber-400 font-bold uppercase tracking-wider">Admin powers</div>
                 <p>The L4 escrow, War of Attrition and router are ownerless: no owner, pause, upgrade, role or withdraw path. Source: <a href="/source/XMoneyEscrow.sol" className="text-cyan-400 hover:underline">escrow</a>, <a href="/source/FomoAttritionL4.sol" className="text-cyan-400 hover:underline">game</a>, <a href="/source/XGasRouter.sol" className="text-cyan-400 hover:underline">router</a>.</p>
                 <p>The XMoney vault (<a href="/source/XMoney.sol" className="text-cyan-400 hover:underline">source</a>) has exactly two owner functions: setBridgeSystem (inbox/bridge addresses) and setL3RetryableParams (gas for the L4 leg). Minting only happens inside enterRollup / migrate, and the owner cannot pause or withdraw the reserve. Not every mint is backed: each deposit also mints 0.0001 xMoney with no USDG behind it to pay L4 delivery gas, and the owner sets that size through the timelock.</p>
                 <p>Vault owner = a 24-hour <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_TIMELOCK}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">TimelockController</a>: any change is queued publicly and waits a day before it can execute. The timelock owns only the vault and the XGAS.DEV buyback.</p>
-                <p className="text-slate-400">The chain owner key (<a href="https://robinhoodchain.blockscout.com/address/0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F" target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">0xC3D6...B14F</a>) holds the UpgradeExecutor role and can upgrade the Bridge, Inbox and Outbox on Robinhood with no timelock.</p>
+                <p className="text-slate-400">The chain owner key (<a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_OWNER}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">0xC3D6...B14F</a>) holds the <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_UPGRADE_EXECUTOR}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">UpgradeExecutor</a> role with no timelock: it can still upgrade the Rollup, Bridge, Inbox and Outbox on Robinhood, and it can forceConfirm any assertion, bypassing both the validators and the Safe. It is also the chain owner on the L4 itself.</p>
+                <p className="text-slate-400">L4 gas fees are not kept by xgas.dev: the chain's network and infra fee accounts point at a ValidatorFeeSplitter on the L4 (<span className="text-white">{CONTRACT_ADDRESSES.VALIDATOR_FEE_SPLITTER_L4.slice(0, 6)}...{CONTRACT_ADDRESSES.VALIDATOR_FEE_SPLITTER_L4.slice(-4)}</span>; same hex as the XMoney vault on Robinhood, by deployer-nonce coincidence), which splits them equally between the validators. The owner key picks that payee set and can repoint the fee accounts.</p>
               </div>
               <div className="space-y-2">
                 <div className="text-cyan-400 font-bold uppercase tracking-wider">Units &amp; accounting</div>

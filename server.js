@@ -23,12 +23,13 @@ const PORT = process.env.PORT || 3000;
 const ORBIT_L4_CHAIN_ID = DEPLOY.chainId;
 const L3_CHAIN_ID = DEPLOY.parentChainId;
 const L3_RPC = process.env.VITE_ROBINHOOD_RPC_URL || DEPLOY.parentRpcUrl;
-// Nitro sequencer: reach it over Fly's private network when we're on Fly, else the public URL.
-const L4_RPC_INTERNAL = process.env.L4_RPC_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l3.internal:8449' : DEPLOY.sequencerRpcUrl);
+// Nitro sequencer: reach it over Fly's private network when we're on Fly, else the public URL. The web app (xgas)
+// and the node (xgas-l4) share a Fly org, so the .internal name resolves.
+const L4_RPC_INTERNAL = process.env.L4_RPC_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l4.internal:8449' : DEPLOY.sequencerRpcUrl);
 const L4_RPC_PUBLIC = DEPLOY.publicRpcUrl; // https://xgas.dev/rpc — the only RPC URL users ever see
 // The host's one hot key. It executes Outbox withdrawals on Robinhood on users' behalf (a permissionless call; we
-// just pay gas) and runs the XGAS.DEV buyback keeper, but it is also the chain owner key, holding EXECUTOR_ROLE on
-// the UpgradeExecutor. Treat it as the chain's admin key, because it is.
+// just pay gas) and runs the XGAS.DEV buyback keeper. Neither needs any role, so this should be a no-role claimer
+// key with a little ETH, never the chain owner key (0xC3D6), which holds EXECUTOR_ROLE on both UpgradeExecutors.
 // The Fly secret is still named L2_EXECUTOR_KEY from before the L2->L3->L4 rename.
 // Accept either, so renaming the code does not silently switch the Outbox executor off.
 const L3_EXECUTOR_KEY = process.env.L3_EXECUTOR_KEY || process.env.L2_EXECUTOR_KEY || '';
@@ -68,44 +69,6 @@ app.post(['/rpc', '/api/rpc'], (req, res) => {
   proxyReq.write(body); proxyReq.end();
 });
 
-// /das/* -> the AnyTrust data availability server's REST interface (batch data by hash), for third-party nodes.
-const DAS_TARGET = new URL(process.env.DAS_REST_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l3.internal:9877' : DEPLOY.sequencerRpcUrl.replace(/:\d+$/, '') + ':9877'));
-// Said the same way every time it fails, because a node operator reading this needs the cause, not a 502.
-const DAS_DOWN = {
-  error: 'DAS unavailable',
-  detail: 'The AnyTrust data availability server\'s REST port is not reachable from this host right now (it is not exposed on the node host). '
-    + 'Batch data is temporarily unavailable to third-party nodes, so a node syncing from the parent chain cannot fetch batches through /das until it is back. '
-    + 'The chain itself, the RPC at /rpc and this site are unaffected.',
-};
-app.get('/das/*', (req, res) => {
-  const proxyReq = http.request({ hostname: DAS_TARGET.hostname, port: DAS_TARGET.port || 80, path: req.originalUrl.replace(/^\/das/, '') || '/', method: 'GET', timeout: 20_000 }, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode || 200, { 'content-type': proxyRes.headers['content-type'] || 'application/json' });
-    proxyRes.pipe(res, { end: true });
-  });
-  proxyReq.on('timeout', () => proxyReq.destroy(new Error('timeout')));
-  proxyReq.on('error', () => { if (!res.headersSent) res.status(503).set('Retry-After', '300').json(DAS_DOWN); else res.destroy(); });
-  proxyReq.end();
-});
-
-// Whether the DAS answers at all, for /api/health. Probed on demand with a short timeout and cached for a
-// minute, so a health check never waits on it for long and never hammers it.
-let dasProbe = { ok: null, at: 0, pending: null };
-function probeDas() {
-  if (Date.now() - dasProbe.at < 60_000) return Promise.resolve(dasProbe.ok);
-  if (dasProbe.pending) return dasProbe.pending;
-  dasProbe.pending = new Promise((resolve) => {
-    const done = (ok) => { dasProbe = { ok, at: Date.now(), pending: null }; resolve(ok); };
-    const r = http.request({ hostname: DAS_TARGET.hostname, port: DAS_TARGET.port || 80, path: '/health', method: 'GET', timeout: 2_000 }, (pr) => {
-      pr.resume();
-      done((pr.statusCode || 500) < 500);
-    });
-    r.on('timeout', () => r.destroy(new Error('timeout')));
-    r.on('error', () => done(false));
-    r.end();
-  });
-  return dasProbe.pending;
-}
-
 // ---------------------------------------------------------------------------
 // Chain info
 // ---------------------------------------------------------------------------
@@ -115,19 +78,22 @@ async function refreshHead() {
 }
 setInterval(refreshHead, 5000); refreshHead();
 
-// ok is the web app itself. The DAS and the assertion age are reported beside it, not folded into it, so a
-// monitor watching ok does not restart a healthy app over a port on another machine.
-app.get('/api/health', async (_req, res) => {
-  const das = await probeDas();
-  const confirmedAt = confirmedSendCount.confirmedAt || null;
+// ok is the web app itself. The assertion age is reported beside it, not folded into it, so a monitor watching
+// ok does not restart a healthy app over a validator on another machine. In rollup mode every batch is calldata on
+// Robinhood, so there is no data availability server to report on.
+function assertionSummary(c) {
+  const confirmedAt = c.confirmedAt || null;
+  return c.hash ? {
+    l4Block: c.l4Block ?? null,
+    confirmedAt: confirmedAt ? new Date(confirmedAt).toISOString() : null,
+    ageS: confirmedAt ? Math.round((Date.now() - confirmedAt) / 1000) : null,
+  } : null;
+}
+app.get('/api/health', (_req, res) => {
   res.json({
     ok: true, l4Ready: Date.now() - l4Head.at < 60_000, l4Head: l4Head.block, chainId: ORBIT_L4_CHAIN_ID, executor: !!L3_EXECUTOR_KEY,
-    das: !!das,
-    latestConfirmedAssertion: confirmedSendCount.hash ? {
-      l4Block: confirmedSendCount.l4Block ?? null,
-      confirmedAt: confirmedAt ? new Date(confirmedAt).toISOString() : null,
-      ageS: confirmedAt ? Math.round((Date.now() - confirmedAt) / 1000) : null,
-    } : null,
+    latestConfirmedAssertion: assertionSummary(CURRENT.confirmed),
+    legacy: LEGACY_CHAIN ? { chainId: LEGACY_CHAIN.chainId, latestConfirmedAssertion: assertionSummary(LEGACY_CHAIN.confirmed), lastError: LEGACY_CHAIN.lastError } : null,
   });
 });
 
@@ -135,7 +101,15 @@ app.get('/api/l4-info', (_req, res) => {
   res.json({
     chainId: ORBIT_L4_CHAIN_ID, rpcPath: '/rpc', rpcUrl: L4_RPC_PUBLIC, wsUrl: DEPLOY.wsUrl,
     l3ChainId: L3_CHAIN_ID, vault: DEPLOY.l3.xMoney, ready: Date.now() - l4Head.at < 60_000, head: l4Head.block,
-    contracts: DEPLOY.l4, l3: DEPLOY.l3, deployment: { createRollupTx: DEPLOY.createRollupTx, createdAt: DEPLOY.createdAt, deployedAtBlock: DEPLOY.deployedAtBlock, owner: DEPLOY.owner, batchPoster: DEPLOY.batchPoster, validator: DEPLOY.validator },
+    contracts: DEPLOY.l4, l3: DEPLOY.l3,
+    deployment: {
+      createRollupTx: DEPLOY.createRollupTx, createdAt: DEPLOY.createdAt, deployedAtBlock: DEPLOY.deployedAtBlock, owner: DEPLOY.owner,
+      batchPoster: DEPLOY.batchPoster, validator: DEPLOY.validator, validators: DEPLOY.validators || [DEPLOY.validator],
+      validatorWhitelistDisabled: !!DEPLOY.validatorWhitelistDisabled, fastConfirmSafe: DEPLOY.fastConfirmSafe || null,
+      fastConfirmThreshold: DEPLOY.fastConfirmThreshold || null, feeTokenPricer: DEPLOY.feeTokenPricer || null,
+      dataAvailability: DEPLOY.dataAvailability || 'rollup',
+    },
+    legacy: DEPLOY.legacy466301 ? { chainId: DEPLOY.legacy466301.chainId, status: DEPLOY.legacy466301.status, l3: DEPLOY.legacy466301.l3 } : null,
   });
 });
 
@@ -151,6 +125,11 @@ app.get('/api/l4-balance/:address', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Withdrawals (L4 -> L3): ArbSys.withdrawEth on the L4 emits L2ToL1Tx; once the assertion covering it is
 // confirmed on Robinhood, anyone can execute it on the Outbox. We track them and execute for users.
+//
+// Tracked per chain. The current chain (466302) comes first. The retired chain (466301, `legacy466301` in the
+// deployment file) stays for as long as its node answers, so a withdrawal started there can still be claimed on
+// its own Outbox: exits out of the old bridge were never affected by the vault switch. Positions restart at 0 on
+// every chain, so each chain keeps its own file and its own confirmed send count.
 // ---------------------------------------------------------------------------
 const ARBSYS_ABI = parseAbi([
   'event L2ToL1Tx(address caller, address indexed destination, uint256 indexed hash, uint256 indexed position, uint256 arbBlockNum, uint256 ethBlockNum, uint256 timestamp, uint256 callvalue, bytes data)'
@@ -168,57 +147,88 @@ const NODE_INTERFACE_ABI = parseAbi([
   'function constructOutboxProof(uint64 size, uint64 leaf) view returns (bytes32 send, bytes32 root, bytes32[] proof)'
 ]);
 
-const WITHDRAWALS_FILE = path.join(DATA_DIR, 'withdrawals.json');
-let withdrawals = {}; // txHash -> { ...event, status }
-try { if (fs.existsSync(WITHDRAWALS_FILE)) withdrawals = JSON.parse(fs.readFileSync(WITHDRAWALS_FILE, 'utf8')); } catch {}
-const saveWithdrawals = () => { try { fs.writeFileSync(WITHDRAWALS_FILE, JSON.stringify(withdrawals)); } catch {} };
-let scannedTo = 0n;
+function makeChain({ chainId, legacy, rpc, client, rollup, outbox, deployedAtBlock, file }) {
+  const f = path.join(DATA_DIR, file);
+  let withdrawals = {}; // `${txHash}:${position}` -> { ...event, status }
+  try { if (fs.existsSync(f)) withdrawals = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+  return {
+    chainId, legacy, rpc, rollup, outbox, deployedAtBlock: BigInt(deployedAtBlock), file: f, withdrawals,
+    client: client || createPublicClient({ transport: viemHttp(rpc, { timeout: 15_000 }) }),
+    scannedTo: 0n, confirmed: { count: 0n, at: 0 }, lastError: null,
+  };
+}
 
-async function scanWithdrawals() {
+const CURRENT = makeChain({
+  chainId: ORBIT_L4_CHAIN_ID, legacy: false, rpc: L4_RPC_INTERNAL, client: l4Client,
+  rollup: DEPLOY.l3.rollup, outbox: DEPLOY.l3.outbox, deployedAtBlock: DEPLOY.deployedAtBlock,
+  file: `withdrawals-${ORBIT_L4_CHAIN_ID}.json`,
+});
+// LEGACY_L4_RPC overrides the old node's URL; set it to "off" once that node is gone for good.
+const LEGACY = DEPLOY.legacy466301 || null;
+const LEGACY_L4_RPC = process.env.LEGACY_L4_RPC || LEGACY?.sequencerRpcUrl || '';
+const LEGACY_CHAIN = LEGACY && LEGACY_L4_RPC && LEGACY_L4_RPC !== 'off' ? makeChain({
+  chainId: LEGACY.chainId, legacy: true, rpc: LEGACY_L4_RPC,
+  rollup: LEGACY.l3.rollup, outbox: LEGACY.l3.outbox, deployedAtBlock: LEGACY.deployedAtBlock,
+  // The file every withdrawal on 466301 was saved to before the relaunch. Reused as is, so nothing is migrated.
+  file: 'withdrawals.json',
+}) : null;
+const CHAINS = [CURRENT, LEGACY_CHAIN].filter(Boolean);
+const chainById = (id) => CHAINS.find((c) => c.chainId === Number(id));
+
+const saveWithdrawals = (c) => { try { fs.writeFileSync(c.file, JSON.stringify(c.withdrawals)); } catch {} };
+// A retired node that has gone away should say so once, not every ten seconds.
+function chainError(c, what, e) {
+  const msg = `${what}: ${e?.shortMessage || e?.message || e}`;
+  if (c.lastError !== msg) console.warn(`[withdrawals ${c.chainId}] ${msg}`);
+  c.lastError = msg;
+}
+
+async function scanWithdrawals(c) {
   try {
-    const head = await l4Client.getBlockNumber();
-    if (head <= scannedTo) return;
-    const from = scannedTo === 0n ? 0n : scannedTo + 1n;
-    const logs = await l4Client.getLogs({ address: DEPLOY.l4.arbSys, event: ARBSYS_ABI[0], fromBlock: from, toBlock: head });
+    const head = await c.client.getBlockNumber();
+    if (head <= c.scannedTo) return;
+    const from = c.scannedTo === 0n ? 0n : c.scannedTo + 1n;
+    const logs = await c.client.getLogs({ address: DEPLOY.l4.arbSys, event: ARBSYS_ABI[0], fromBlock: from, toBlock: head });
     for (const log of logs) {
       const a = log.args;
       const key = `${log.transactionHash}:${a.position}`;
-      if (withdrawals[key]) continue;
-      withdrawals[key] = {
+      if (c.withdrawals[key]) continue;
+      c.withdrawals[key] = {
         txHash: log.transactionHash, caller: a.caller, destination: a.destination, position: a.position.toString(),
         arbBlockNum: a.arbBlockNum.toString(), ethBlockNum: a.ethBlockNum.toString(), timestamp: a.timestamp.toString(),
         callvalue: a.callvalue.toString(), data: a.data, status: 'pending', createdAt: Date.now(),
       };
     }
-    scannedTo = head;
-    if (logs.length) saveWithdrawals();
-  } catch (e) { console.warn('[withdrawals] scan error:', e?.message || e); }
+    c.scannedTo = head;
+    c.lastError = null;
+    if (logs.length) saveWithdrawals(c);
+  } catch (e) { chainError(c, 'scan error', e); }
 }
+const scanAllWithdrawals = () => Promise.all(CHAINS.map(scanWithdrawals));
 
 /** sendCount of the latest confirmed assertion on Robinhood = how many L4->L3 sends are executable. */
-let confirmedSendCount = { count: 0n, at: 0 };
-async function refreshConfirmedSendCount() {
+async function refreshConfirmedSendCount(c) {
   try {
-    const hash = await l3Client.readContract({ address: DEPLOY.l3.rollup, abi: ROLLUP_ABI, functionName: 'latestConfirmed' });
-    if (confirmedSendCount.hash === hash) { confirmedSendCount.at = Date.now(); return; }
-    const logs = await l3Client.getLogs({ address: DEPLOY.l3.rollup, event: ROLLUP_ABI[1], args: { assertionHash: hash }, fromBlock: BigInt(DEPLOY.deployedAtBlock), toBlock: 'latest' });
-    if (logs.length === 0) { confirmedSendCount = { count: 0n, at: Date.now(), hash, l4Block: 0 }; return; } // still at genesis
+    const hash = await l3Client.readContract({ address: c.rollup, abi: ROLLUP_ABI, functionName: 'latestConfirmed' });
+    if (c.confirmed.hash === hash) { c.confirmed.at = Date.now(); return; }
+    const logs = await l3Client.getLogs({ address: c.rollup, event: ROLLUP_ABI[1], args: { assertionHash: hash }, fromBlock: c.deployedAtBlock, toBlock: 'latest' });
+    if (logs.length === 0) { c.confirmed = { count: 0n, at: Date.now(), hash, l4Block: 0 }; return; } // still at genesis
     const blockHash = logs[logs.length - 1].args.blockHash;
-    const block = await l4Client.request({ method: 'eth_getBlockByHash', params: [blockHash, false] });
+    const block = await c.client.request({ method: 'eth_getBlockByHash', params: [blockHash, false] });
     // When the parent chain confirmed it, for /api/health. One extra read, and only when the assertion changes.
     const confirmedAt = await l3Client.getBlock({ blockNumber: logs[logs.length - 1].blockNumber }).then((b) => Number(b.timestamp) * 1000).catch(() => null);
-    confirmedSendCount = { count: BigInt(block?.sendCount ?? '0x0'), at: Date.now(), hash, blockHash, l4Block: block ? parseInt(block.number, 16) : null, confirmedAt };
-    console.log(`[withdrawals] latest confirmed assertion ${hash.slice(0, 10)} -> L4 block ${confirmedSendCount.l4Block}, sendCount ${confirmedSendCount.count}`);
-  } catch (e) { console.warn('[withdrawals] confirmed send count error:', e?.message || e); }
+    c.confirmed = { count: BigInt(block?.sendCount ?? '0x0'), at: Date.now(), hash, blockHash, l4Block: block ? parseInt(block.number, 16) : null, confirmedAt };
+    console.log(`[withdrawals ${c.chainId}] latest confirmed assertion ${hash.slice(0, 10)} -> L4 block ${c.confirmed.l4Block}, sendCount ${c.confirmed.count}`);
+  } catch (e) { chainError(c, 'confirmed send count error', e); }
 }
 
-async function withdrawalStatus(w) {
+async function withdrawalStatus(c, w) {
   if (w.status === 'executed') return w;
   try {
-    const spent = await l3Client.readContract({ address: DEPLOY.l3.outbox, abi: OUTBOX_ABI, functionName: 'isSpent', args: [BigInt(w.position)] });
+    const spent = await l3Client.readContract({ address: c.outbox, abi: OUTBOX_ABI, functionName: 'isSpent', args: [BigInt(w.position)] });
     if (spent) { w.status = 'executed'; return w; }
   } catch {}
-  w.status = BigInt(w.position) < confirmedSendCount.count ? 'claimable' : 'pending';
+  w.status = BigInt(w.position) < c.confirmed.count ? 'claimable' : 'pending';
   return w;
 }
 
@@ -226,58 +236,83 @@ app.get('/api/withdrawals/:address', async (req, res) => {
   try {
     const addr = req.params.address.toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(addr)) return res.status(400).json({ error: 'Invalid address' });
-    await scanWithdrawals();
-    const mine = Object.values(withdrawals).filter(w => w.caller.toLowerCase() === addr || w.destination.toLowerCase() === addr);
-    for (const w of mine) await withdrawalStatus(w);
-    saveWithdrawals();
-    res.json({ confirmedSendCount: confirmedSendCount.count.toString(), confirmedL4Block: confirmedSendCount.l4Block ?? null, executorEnabled: !!L3_EXECUTOR_KEY,
-      withdrawals: mine.sort((a, b) => Number(b.position) - Number(a.position)).map(w => ({ ...w, amount: formatEther(BigInt(w.callvalue)) })) });
+    await scanAllWithdrawals();
+    const out = [];
+    for (const c of CHAINS) {
+      const mine = Object.values(c.withdrawals).filter(w => w.caller.toLowerCase() === addr || w.destination.toLowerCase() === addr);
+      for (const w of mine) await withdrawalStatus(c, w);
+      if (mine.length) saveWithdrawals(c);
+      out.push(...mine.sort((a, b) => Number(b.position) - Number(a.position))
+        .map(w => ({ ...w, amount: formatEther(BigInt(w.callvalue)), chainId: c.chainId, legacy: c.legacy })));
+    }
+    // The top-level counts describe the current chain, as before; legacy entries carry chainId and legacy: true.
+    res.json({ chainId: CURRENT.chainId, confirmedSendCount: CURRENT.confirmed.count.toString(), confirmedL4Block: CURRENT.confirmed.l4Block ?? null, executorEnabled: !!L3_EXECUTOR_KEY,
+      withdrawals: out });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+/** Find a tracked withdrawal. chainId narrows the search; txHash and position together are exact. */
+function findWithdrawal({ txHash, position, chainId }) {
+  const chains = chainId != null && chainId !== '' ? [chainById(chainId)].filter(Boolean) : CHAINS;
+  const tx = txHash ? String(txHash).toLowerCase() : null;
+  const pos = position != null && position !== '' ? String(position) : null;
+  for (const c of chains) {
+    const key = Object.keys(c.withdrawals).find((k) => {
+      const [kTx, kPos] = k.split(':');
+      if (tx && pos) return kTx.toLowerCase() === tx && kPos === pos;
+      if (tx) return kTx.toLowerCase() === tx;
+      return pos != null && kPos === pos;
+    });
+    if (key) return { c, w: c.withdrawals[key] };
+  }
+  return null;
+}
 
 app.post('/api/withdrawals/execute', async (req, res) => {
   try {
     if (!L3_EXECUTOR_KEY) return res.status(503).json({ error: 'Executor not configured on host; execute the Outbox claim from your own wallet.' });
-    const { txHash, position } = req.body || {};
-    const key = Object.keys(withdrawals).find(k => k.startsWith(String(txHash).toLowerCase()) || k.endsWith(`:${position}`));
-    const w = key && withdrawals[key];
-    if (!w) return res.status(404).json({ error: 'Unknown withdrawal' });
-    await refreshConfirmedSendCount();
-    await withdrawalStatus(w);
-    if (w.status === 'executed') return res.json({ ok: true, alreadyExecuted: true });
-    if (w.status !== 'claimable') return res.status(409).json({ error: 'Not yet confirmed on Robinhood Chain', status: w.status });
+    const found = findWithdrawal(req.body || {});
+    if (!found) return res.status(404).json({ error: 'Unknown withdrawal' });
+    const { c, w } = found;
+    await refreshConfirmedSendCount(c);
+    await withdrawalStatus(c, w);
+    if (w.status === 'executed') return res.json({ ok: true, alreadyExecuted: true, chainId: c.chainId });
+    if (w.status !== 'claimable') return res.status(409).json({ error: 'Not yet confirmed on Robinhood Chain', status: w.status, chainId: c.chainId });
 
-    const { hash, ok } = await executeOutbox(w);
-    if (!ok) return res.status(500).json({ error: 'Outbox execution reverted', txHash: hash });
-    res.json({ ok: true, txHash: hash });
+    const { hash, ok } = await executeOutbox(c, w);
+    if (!ok) return res.status(500).json({ error: 'Outbox execution reverted', txHash: hash, chainId: c.chainId });
+    res.json({ ok: true, txHash: hash, chainId: c.chainId });
   } catch (e) { console.error('[withdrawals/execute]', e); res.status(500).json({ error: e.shortMessage || e.message }); }
 });
 
-/** Execute a claimable L4 -> Robinhood send on the Outbox with the host's executor key. */
-async function executeOutbox(w) {
-  const size = confirmedSendCount.count;
-  const proofRes = await l4Client.readContract({ address: DEPLOY.l4.nodeInterface, abi: NODE_INTERFACE_ABI, functionName: 'constructOutboxProof', args: [size, BigInt(w.position)] });
+/** Execute a claimable L4 -> Robinhood send on that chain's Outbox with the host's executor key. */
+async function executeOutbox(c, w) {
+  const size = c.confirmed.count;
+  const proofRes = await c.client.readContract({ address: DEPLOY.l4.nodeInterface, abi: NODE_INTERFACE_ABI, functionName: 'constructOutboxProof', args: [size, BigInt(w.position)] });
   const [, , proof] = proofRes;
   const account = privateKeyToAccount(L3_EXECUTOR_KEY);
   const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
   const hash = await wallet.writeContract({
-    address: DEPLOY.l3.outbox, abi: OUTBOX_ABI, functionName: 'executeTransaction', chain: null,
+    address: c.outbox, abi: OUTBOX_ABI, functionName: 'executeTransaction', chain: null,
     args: [proof, BigInt(w.position), w.caller, w.destination, BigInt(w.arbBlockNum), BigInt(w.ethBlockNum), BigInt(w.timestamp), BigInt(w.callvalue), w.data],
   });
   const rc = await l3Client.waitForTransactionReceipt({ hash });
   if (rc.status !== 'success') return { hash, ok: false };
-  w.status = 'executed'; w.executedTx = hash; saveWithdrawals();
+  w.status = 'executed'; w.executedTx = hash; saveWithdrawals(c);
   return { hash, ok: true };
 }
 
-setInterval(refreshConfirmedSendCount, 15_000); refreshConfirmedSendCount();
-setInterval(scanWithdrawals, 10_000);
+const refreshAllConfirmed = () => Promise.all(CHAINS.map(refreshConfirmedSendCount));
+setInterval(refreshAllConfirmed, 15_000); refreshAllConfirmed();
+setInterval(scanAllWithdrawals, 10_000);
 
 // ---------------------------------------------------------------------------
 // XGAS.DEV flywheel. Every L4 fee path sends 0.02% to the buyback FanoutSink. The keeper flushes that sink to
 // Robinhood, executes the withdrawal on the Outbox (it lands on XgasDevBuyback as xMoney), then has XgasDevBuyback
 // redeem the xMoney for USDG and buy + burn XGAS.DEV. The contract only lets the keeper trigger the buy, with a
 // minimum out taken from a simulation a moment earlier, so nobody can pump the pool into our buy.
+// The sink it flushes is the current chain's (empty until the L4 apps are deployed there). Sink withdrawals already
+// in flight on the retired chain are still executed on its Outbox, so nothing that was headed for the buyback strands.
 // ---------------------------------------------------------------------------
 const BUYBACK_SINK = DEPLOY.l4.buybackSink || '';
 const XGAS_BUYBACK = DEPLOY.l3.xgasDevBuyback || '';
@@ -305,14 +340,14 @@ async function buybackBalances() {
 }
 
 async function runBuybackKeeper() {
-  if (!L3_EXECUTOR_KEY || !BUYBACK_SINK || !XGAS_BUYBACK || buybackKeeper.running) return;
+  if (!L3_EXECUTOR_KEY || !XGAS_BUYBACK || buybackKeeper.running) return;
   buybackKeeper.running = true;
   try {
     const account = privateKeyToAccount(L3_EXECUTOR_KEY);
 
     // 1. L4: push the sink's xMoney toward Robinhood.
-    const pending = await l4Client.getBalance({ address: BUYBACK_SINK });
-    if (pending >= BUYBACK_FLUSH_MIN) {
+    const pending = BUYBACK_SINK ? await l4Client.getBalance({ address: BUYBACK_SINK }) : 0n;
+    if (BUYBACK_SINK && pending >= BUYBACK_FLUSH_MIN) {
       const l4Wallet = createWalletClient({ account, transport: viemHttp(L4_RPC_INTERNAL) });
       const hash = await l4Wallet.writeContract({ address: BUYBACK_SINK, abi: SINK_ABI, functionName: 'flush', chain: null });
       await l4Client.waitForTransactionReceipt({ hash });
@@ -320,14 +355,16 @@ async function runBuybackKeeper() {
       console.log(`[buyback] flushed ${formatEther(pending)} xMoney from the L4 sink: ${hash}`);
     }
 
-    // 2. Robinhood: execute confirmed sink withdrawals so the xMoney lands on XgasDevBuyback.
-    await scanWithdrawals();
-    for (const w of Object.values(withdrawals)) {
-      if (w.destination.toLowerCase() !== XGAS_BUYBACK.toLowerCase() || w.status === 'executed') continue;
-      await withdrawalStatus(w);
-      if (w.status !== 'claimable') continue;
-      const { hash, ok } = await executeOutbox(w);
-      console.log(`[buyback] outbox ${ok ? 'executed' : 'REVERTED'} for ${formatEther(BigInt(w.callvalue))} xMoney: ${hash}`);
+    // 2. Robinhood: execute confirmed sink withdrawals (on every tracked chain) so the xMoney lands on XgasDevBuyback.
+    await scanAllWithdrawals();
+    for (const c of CHAINS) {
+      for (const w of Object.values(c.withdrawals)) {
+        if (w.destination.toLowerCase() !== XGAS_BUYBACK.toLowerCase() || w.status === 'executed') continue;
+        await withdrawalStatus(c, w);
+        if (w.status !== 'claimable') continue;
+        const { hash, ok } = await executeOutbox(c, w);
+        console.log(`[buyback] outbox ${ok ? 'executed' : 'REVERTED'} on ${c.chainId} for ${formatEther(BigInt(w.callvalue))} xMoney: ${hash}`);
+      }
     }
 
     // 3. Robinhood: redeem, buy, burn.
@@ -363,7 +400,7 @@ app.get('/api/buyback', async (_req, res) => {
       BUYBACK_SINK ? l4Client.getBalance({ address: BUYBACK_SINK }) : 0n,
       buybackBalances(),
     ]);
-    const inFlight = Object.values(withdrawals)
+    const inFlight = CHAINS.flatMap((c) => Object.values(c.withdrawals))
       .filter(w => w.destination.toLowerCase() === XGAS_BUYBACK.toLowerCase() && w.status !== 'executed')
       .reduce((a, w) => a + BigInt(w.callvalue), 0n);
     res.json({
@@ -770,7 +807,7 @@ app.get(['/order/:id', '/offer/:id', '/bid/:id', '/ask/:id'], async (req, res) =
         const price = (Number(rateBps) / 10000).toFixed(3);
         const title = `${kind} #${id}: ${verb} ${fmtX(available)} $xMoney @ $${price} · @${handle} · xgas Orbit L4`;
         const description = active
-          ? `${verb} ${fmtX(minAmt)} to ${fmtX(maxAmt)} $xMoney per trade at $${price} USD on X Money, escrowed on xgas Orbit L4 #466301. 0.01% burn · 0.01% Stacc Wizards Fee Fanout · 0.02% XGAS.DEV buy & burn.`
+          ? `${verb} ${fmtX(minAmt)} to ${fmtX(maxAmt)} $xMoney per trade at $${price} USD on X Money, escrowed on xgas Orbit L4 #${ORBIT_L4_CHAIN_ID}. 0.01% burn · 0.01% Stacc Wizards Fee Fanout · 0.02% XGAS.DEV buy & burn.`
           : `This ${kind.toLowerCase()} by @${handle} is closed. Browse live offers and bids on the xgas Orbit L4 desk.`;
         html = withMeta(html, { title, description, url: `${PUBLIC_ORIGIN}/order/${id}` });
       }
@@ -793,7 +830,7 @@ app.get(['/trade/:id', '/settlement/:id'], async (req, res) => {
       if (seller !== '0x0000000000000000000000000000000000000000') {
         const state = completed ? 'Released' : cancelled ? 'Cancelled' : 'In escrow';
         const title = `Trade #${id} (${state}): @${buyerHandle} ← ${fmtX(amount)} $xMoney ← @${sellerHandle} · xgas Orbit L4`;
-        const description = `${fmtX(amount)} $xMoney against $${(Number(cents) / 100).toFixed(2)} USD on X Money, from order #${orderId}. Escrowed on xgas Orbit L4 #466301.`;
+        const description = `${fmtX(amount)} $xMoney against $${(Number(cents) / 100).toFixed(2)} USD on X Money, from order #${orderId}. Escrowed on xgas Orbit L4 #${ORBIT_L4_CHAIN_ID}.`;
         html = withMeta(html, { title, description, url: `${PUBLIC_ORIGIN}/trade/${id}` });
       }
     }

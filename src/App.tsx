@@ -10,6 +10,8 @@ import { sounds } from './utils/audio';
 import { Layers, Wallet, Volume2, VolumeX, AlertTriangle, Check, Plus, LogOut } from 'lucide-react';
 
 const KNOWN_CHAINS = new Set<number>([L3_CHAIN_ID, L4_CHAIN_ID]);
+// The retired chain. A wallet still on it gets told why, not just that it is on the wrong network.
+const LEGACY_L4_CHAIN_ID = CONTRACT_ADDRESSES.ORBIT_L4_LEGACY_CHAIN_ID;
 
 function shortChainLabel(id: number): string {
   if (id === L4_CHAIN_ID) return 'L4';
@@ -31,7 +33,7 @@ export default function App() {
   const [l4Added, setL4Added] = useState(false);
   const [l4Ready, setL4Ready] = useState<boolean | null>(null);
   // Wallet's own view of the L4 balance vs the sequencer's: a mismatch means the wallet's
-  // network entry for #466301 points at a stale RPC.
+  // network entry for the L4 points at a stale RPC.
   const [rpcMismatch, setRpcMismatch] = useState<{ wallet: number; sequencer: number } | null>(null);
   const [xUser, setXUser] = useState<XUser | null>(null);
   const [xConfigured, setXConfigured] = useState<boolean>(false);
@@ -73,7 +75,7 @@ export default function App() {
     return () => { mounted = false; clearInterval(t); };
   }, []);
 
-  // Detect a wallet whose #466301 network entry uses the wrong RPC
+  // Detect a wallet whose L4 network entry uses the wrong RPC
   useEffect(() => {
     const ethereum = (window as any).ethereum;
     if (!ethereum || !wallet.connected || currentChainId !== L4_CHAIN_ID) {
@@ -206,7 +208,11 @@ export default function App() {
       {isWrongNetwork && (
         <div className="bg-rose-500/20 border-b border-rose-500/40 px-4 py-2 text-center text-xs font-mono flex items-center justify-center gap-2 text-rose-300 animate-pulse">
           <AlertTriangle className="w-4 h-4 text-rose-400" />
-          <span>Wallet is on Chain #{currentChainId}. Expected xgas Orbit L4 (#{L4_CHAIN_ID}) or its parent Robinhood Chain (#{L3_CHAIN_ID}).</span>
+          <span>
+            {currentChainId === LEGACY_L4_CHAIN_ID
+              ? <>Wallet is on #{LEGACY_L4_CHAIN_ID}, the retired xgas chain. xgas now runs on #{L4_CHAIN_ID}. If your wallet's old network uses {orbitL4RpcUrl()}, delete it, then switch.</>
+              : <>Wallet is on Chain #{currentChainId}. Expected xgas Orbit L4 (#{L4_CHAIN_ID}) or its parent Robinhood Chain (#{L3_CHAIN_ID}).</>}
+          </span>
           <button
             onClick={handleFixNetwork}
             className="px-3 py-1 rounded-lg bg-rose-500 hover:bg-rose-400 text-slate-950 font-black uppercase text-[10px] cursor-pointer shadow-md"

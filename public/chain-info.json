@@ -1,11 +1,11 @@
 [
   {
-    "chain-id": 466301,
+    "chain-id": 466302,
     "parent-chain-id": 4663,
     "parent-chain-is-arbitrum": true,
-    "chain-name": "xgas Orbit L4",
+    "chain-name": "xgas",
     "chain-config": {
-      "chainId": 466301,
+      "chainId": 466302,
       "homesteadBlock": 0,
       "daoForkBlock": null,
       "daoForkSupport": true,
@@ -27,7 +27,7 @@
       "arbitrum": {
         "EnableArbOS": true,
         "AllowDebugPrecompiles": false,
-        "DataAvailabilityCommittee": true,
+        "DataAvailabilityCommittee": false,
         "InitialArbOSVersion": 51,
         "InitialChainOwner": "0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F",
         "GenesisBlockNum": 0,
@@ -36,13 +36,13 @@
       }
     },
     "rollup": {
-      "bridge": "0x8b58B2f893770E57e16D8c7551f2E405E9A94E5f",
-      "inbox": "0x67E524A7349ccB4a2d59D6256c51cf20586687b4",
-      "sequencer-inbox": "0x16Daa2551d41243C82366c8b94Dc11418Ac0AeD7",
-      "rollup": "0x5Ba539b34b9F33036CC4788225149ce07Ba183a8",
+      "bridge": "0x2290f4505484f055B710e7Df37e2482c90B8B6fb",
+      "inbox": "0xa7087693676F2Ca8e5e9563A6859952258688146",
+      "sequencer-inbox": "0xCA038a032154d0091b019A9104b369F94FD5c75F",
+      "rollup": "0x5868266C0c0663f4bc39329B525884f137BAD93E",
       "validator-wallet-creator": "0xB7FE37712e46F28C8f22Ec4bAA33A09fb8B52BD0",
       "stake-token": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-      "deployed-at": 66624961
+      "deployed-at": 72937914
     }
   }
 ]

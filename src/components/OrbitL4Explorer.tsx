@@ -85,7 +85,9 @@ const L4_EVENTS_ABI = parseAbi([
   'event ValueTransferred(address indexed from, address indexed to, uint256 netAmount, uint256 burnAmount, uint256 rakeAmount, string memo)'
 ]);
 
-const L3_BRIDGE_FROM_BLOCK = 66624961n; // xgas Orbit rollup + XMoney deploy block on Robinhood Chain
+// XMoney vault deploy block on Robinhood Chain. The vault outlived the retired #466301, so its history starts here
+// and spans both chains; entries before the relaunch bridged to the old chain.
+const L3_BRIDGE_FROM_BLOCK = 66624961n;
 const BP = 1 / 10000;
 
 function labelFor(address: string): string {
@@ -214,10 +216,11 @@ export const OrbitL4Explorer: React.FC = () => {
         });
 
         // --- L4: every event from our three contracts since genesis ---
-        const addrs = [l4Addresses.escrow, l4Addresses.fomo, l4Addresses.router] as `0x${string}`[];
+        // Empty until the apps are deployed on this chain; then there is nothing to query yet.
+        const addrs = [l4Addresses.escrow, l4Addresses.fomo, l4Addresses.router].filter(Boolean) as `0x${string}`[];
         let l4Logs: Log[] = [];
         try {
-          l4Logs = await l4PublicClient.getLogs({ address: addrs, fromBlock: 0n, toBlock: 'latest' });
+          if (addrs.length) l4Logs = await l4PublicClient.getLogs({ address: addrs, fromBlock: 0n, toBlock: 'latest' });
         } catch (e) {
           console.warn('L4 log query warning:', e);
         }
@@ -323,7 +326,7 @@ export const OrbitL4Explorer: React.FC = () => {
               </h2>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Arbitrum Orbit (Nitro, AnyTrust) chain #{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID} settling on Robinhood Chain. Native gas: <strong className="text-white">$xMoney</strong>, 100% USDG-backed. Rollup <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_ROLLUP}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">{CONTRACT_ADDRESSES.ORBIT_ROLLUP.slice(0, 10)}…</a> · Inbox <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_INBOX}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">{CONTRACT_ADDRESSES.ORBIT_INBOX.slice(0, 10)}…</a> · RPC <a href={CONTRACT_ADDRESSES.ORBIT_L4_RPC} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">{CONTRACT_ADDRESSES.ORBIT_L4_RPC.replace('https://', '')}</a>
+              Arbitrum Orbit rollup #{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID} settling on Robinhood Chain: every batch is posted to Robinhood, anyone can validate, and a 2-of-3 validator Safe fast-confirms. The owner key can still upgrade the core contracts and force-confirm. Native gas: <strong className="text-white">$xMoney</strong>, 100% USDG-backed. Rollup <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_ROLLUP}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">{CONTRACT_ADDRESSES.ORBIT_ROLLUP.slice(0, 10)}…</a> · Inbox <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.ORBIT_INBOX}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">{CONTRACT_ADDRESSES.ORBIT_INBOX.slice(0, 10)}…</a> · RPC <a href={CONTRACT_ADDRESSES.ORBIT_L4_RPC} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">{CONTRACT_ADDRESSES.ORBIT_L4_RPC.replace('https://', '')}</a>
             </p>
           </div>
 
