@@ -14,6 +14,9 @@ import { runAs, OPERATOR } from './mcp/src/actor.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createRobinhoodOg } from './server/og/robinhood.mjs';
 import { createPaymasterService, resolveConfig as resolvePaymasterConfig } from './server/paymaster/service.mjs';
+import { enableApprovalPage, approvalStore, approvalView, decideApproval } from './mcp/src/walletApprovals.mjs';
+import { setEthUsdSource } from './mcp/src/walletPolicy.mjs';
+import { renderApprovalPage } from './server/approve/page.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -513,11 +516,12 @@ function setCookie(req, res, name, value, maxAgeS) {
 function clearCookie(req, res, name) {
   setCookie(req, res, name, '', 0);
 }
-// A same-site path to land on after Sign in with X: one segment, or a Robinhood desk deep link.
+// A same-site path to land on after Sign in with X: one segment, a Robinhood desk deep link, or a wallet approval.
 function safeReturnTo(v) {
   if (typeof v !== 'string') return '/';
   if (/^\/[a-z0-9_-]*$/i.test(v)) return v;
   if (/^\/robinhood\/(?:post|trades|arbiters|(?:order|trade)\/\d{1,20})$/i.test(v)) return v;
+  if (/^\/approve\/[A-Za-z0-9_-]{20,64}$/.test(v)) return v;
   return '/';
 }
 function currentUser(req) {
@@ -784,6 +788,87 @@ app.get('/api/mcp', (_req, res) => {
         : name.startsWith('submit_') ? 'submit' : 'read',
     })),
   });
+});
+
+// ---------------------------------------------------------------------------
+// Agent wallet approvals: /approve/<id>. wallet_execute files one when a transaction is over the wallet's caps or
+// leaves its allowlist (mcp/src/walletPolicy.mjs). Only the wallet's owner can decide, signed in with X: the session
+// cookie, never a connector token, so the model that filed the request cannot approve it. Ten minutes, single use,
+// and what runs is exactly the stored steps the page shows. The state lives in mcp/src/walletApprovals.mjs.
+//   GET  /approve/:id       the review page (sign-in prompt when signed out; nothing shown to anyone else)
+//   POST /approve/:id       decision=approve|reject, csrf; same-origin only
+//   GET  /api/approve/:id   the same, as JSON, for the owner
+// ---------------------------------------------------------------------------
+enableApprovalPage({ origin: () => PUBLIC_ORIGIN });
+setEthUsdSource(async () => { const b = await ethFairPrice().catch(() => null); return b ? Number(b.usd) : null; });
+const APPROVAL_ID = /^[A-Za-z0-9_-]{20,64}$/;
+const approvalCsrf = (id, userId) => crypto.createHmac('sha256', SESSION_SECRET).update(`wallet-approval:${id}:${userId}`).digest('base64url');
+function approvalHeaders(res) {
+  res.set({
+    'Cache-Control': 'no-store',
+    'X-Frame-Options': 'DENY',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  });
+}
+// A decision must come from this page. The cookie is SameSite=Lax already; this and the CSRF token are the belt and braces.
+function approvalSameOrigin(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  const self = `${isSecure(req) ? 'https' : 'http'}://${req.headers.host}`;
+  return origin === self || origin === PUBLIC_ORIGIN;
+}
+const approvalLogin = (id) => `/auth/x/login?returnTo=${encodeURIComponent(`/approve/${id}`)}`;
+
+app.get('/approve/:id', (req, res) => {
+  approvalHeaders(res);
+  const id = String(req.params.id);
+  if (!APPROVAL_ID.test(id)) return res.status(404).type('html').send(renderApprovalPage({ state: 'not_found' }));
+  const user = currentUser(req);
+  // Signed out, say nothing about the request, not even whether it exists.
+  if (!user) return res.status(401).type('html').send(renderApprovalPage({ state: 'signin', loginHref: approvalLogin(id), xConfigured: !!X_CLIENT_ID }));
+  const rec = approvalStore.get(id);
+  if (!rec) return res.status(404).type('html').send(renderApprovalPage({ state: 'not_found', user }));
+  if (!rec.owner_x_id || String(rec.owner_x_id) !== String(user.id)) return res.status(403).type('html').send(renderApprovalPage({ state: 'wrong_user', user }));
+  res.type('html').send(renderApprovalPage({ state: rec.status === 'pending' ? 'review' : 'status', view: approvalView(rec), user, csrf: approvalCsrf(id, user.id) }));
+});
+
+app.post('/approve/:id', express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+  approvalHeaders(res);
+  const id = String(req.params.id);
+  if (!APPROVAL_ID.test(id)) return res.status(404).type('html').send(renderApprovalPage({ state: 'not_found' }));
+  const user = currentUser(req);
+  if (!user) return res.status(401).type('html').send(renderApprovalPage({ state: 'signin', loginHref: approvalLogin(id), xConfigured: !!X_CLIENT_ID }));
+  if (!approvalSameOrigin(req)) return res.status(403).type('html').send(renderApprovalPage({ state: 'error', message: 'That request did not come from this page, so it was ignored. Open the approval link again.' }));
+  const given = String(req.body?.csrf || '');
+  const want = approvalCsrf(id, user.id);
+  if (given.length !== want.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(want))) {
+    return res.status(403).type('html').send(renderApprovalPage({ state: 'error', message: 'The form expired or was not this one. Open the approval link again.' }));
+  }
+  const decision = req.body?.decision === 'approve' ? 'approve' : req.body?.decision === 'reject' ? 'reject' : null;
+  if (!decision) return res.status(400).type('html').send(renderApprovalPage({ state: 'error', message: 'Choose approve or reject.' }));
+  const out = decideApproval(id, user.id, decision);
+  if (out.http === 404) return res.status(404).type('html').send(renderApprovalPage({ state: 'not_found', user }));
+  if (out.http === 403) return res.status(403).type('html').send(renderApprovalPage({ state: 'wrong_user', user }));
+  if (out.error) {
+    return res.status(out.http).type('html').send(out.rec
+      ? renderApprovalPage({ state: 'status', view: approvalView(out.rec), user, message: out.error })
+      : renderApprovalPage({ state: 'error', message: out.error }));
+  }
+  console.log(`[approve] @${user.handle} ${decision === 'approve' ? 'approved' : 'rejected'} ${id} (${out.rec.tool}, ${out.rec.wallet.address})`);
+  res.redirect(303, `/approve/${id}`);
+});
+
+app.get('/api/approve/:id', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Sign in with X as the wallet owner.', login: approvalLogin(String(req.params.id)) });
+  const rec = APPROVAL_ID.test(String(req.params.id)) ? approvalStore.get(String(req.params.id)) : null;
+  if (!rec || !rec.owner_x_id || String(rec.owner_x_id) !== String(user.id)) return res.status(404).json({ error: 'No such approval for your account.' });
+  res.json(approvalView(rec));
 });
 
 // ---------------------------------------------------------------------------

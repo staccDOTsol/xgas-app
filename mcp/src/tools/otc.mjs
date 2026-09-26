@@ -4,6 +4,7 @@ import { ESCROW_ABI } from '../abis.mjs';
 import { expectedCents, fmtXMoney, parseXMoney, rateToUsd, usd } from '../money.mjs';
 import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitRaw } from '../idempotency.mjs';
+import { untrusted } from '../untrusted.mjs';
 
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const BPS = 10000n;
@@ -39,7 +40,8 @@ async function order(id) {
   const [maker, makerXHandle, side, availableXMoney, fiatRateBps, minAmount, maxAmount, active] = await read('orders', [BigInt(id)]);
   if (maker === ZERO) return null;
   return {
-    order_id: Number(id), maker, maker_x_handle: makerXHandle, side: SIDE[Number(side)],
+    // Anyone can post any string as their handle. It reaches a model, so it arrives wrapped as third-party text.
+    order_id: Number(id), maker, maker_x_handle: untrusted(makerXHandle, 32), side: SIDE[Number(side)],
     available_xmoney: fmtXMoney(availableXMoney), available_wei: availableXMoney,
     price_usd: rateToUsd(fiatRateBps), fiat_rate_bps: Number(fiatRateBps),
     min: fmtXMoney(minAmount), max: fmtXMoney(maxAmount), min_wei: minAmount, max_wei: maxAmount,
@@ -54,7 +56,7 @@ async function trade(id) {
   const now = Math.floor(Date.now() / 1000);
   return {
     trade_id: Number(id), order_id: Number(orderId), side: SIDE[Number(side)],
-    seller, seller_x_handle: sellerXHandle, buyer, buyer_x_handle: buyerXHandle,
+    seller, seller_x_handle: untrusted(sellerXHandle, 32), buyer, buyer_x_handle: untrusted(buyerXHandle, 32),
     xmoney: fmtXMoney(xMoneyAmount), xmoney_wei: xMoneyAmount,
     fiat_due: usd(cents), expected_cents: cents,
     deadline: Number(deadline), seconds_left: Number(deadline) - now,

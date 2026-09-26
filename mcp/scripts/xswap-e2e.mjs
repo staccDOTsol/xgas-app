@@ -1,8 +1,12 @@
 /**
- * The whole X Money swap, start to finish, against a fork — through the connector, the way a host would drive it.
+ * The whole X Money swap, start to finish, against a fork, through the connector, the way a host would drive it.
  *
- *   anvil --fork-url https://staccpad.fun/rpc --port 8547 --silent
- *   XGAS_PARENT_RPC=http://127.0.0.1:8547 node scripts/xswap-e2e.mjs
+ *   anvil --fork-url https://rpc.mainnet.chain.robinhood.com --port 8547 --silent
+ *   # deploy the redeploy onto the fork (never the real chain): contracts/script/DeployXSwap.s.sol --rpc-url http://127.0.0.1:8547
+ *   XGAS_PARENT_RPC=http://127.0.0.1:8547 XSWAP_ENABLED=1 XSWAP_INTENTS=0x… XSWAP_ASKS=0x… node scripts/xswap-e2e.mjs
+ *
+ * The v1 addresses are paused in the connector (nobody can resolve their disputes), so this needs the redeployed pair.
+ * Amounts are checked against what the escrow booked: xMoney burns 1 bp per transfer and the redeploy books what arrives.
  *
  * Open an intent, let a solver bid, accept, deliver, confirm, and check the money landed where the contract says
  * it should. It refuses to run against anything but a fork: it rewrites token balances to set the scene.
@@ -99,17 +103,21 @@ step(sent.data.hashes?.length === 2, `opened: ${sent.data.hashes?.length} txs re
 const replay = await call('submit_xswap', { signed_txs: ['0xdeadbeef'], idempotency_key: `e2e-open-${id}` });
 step(replay.data?.replayed === true, 'idempotency key replayed instead of sending again');
 
+const escrowBal = () => pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [XSWAP.intents] });
 let st = await call('xswap_status', { id });
-step(st.data?.state_code === 0 && st.data.escrowed === '10', `status: ${st.data?.state}, ${st.data?.escrowed} X Money escrowed`);
+const booked = BigInt(st.data?.escrowed_wei ?? 0);
+step(st.data?.state_code === 0 && booked > 0n && booked <= 10n * XM, `status: ${st.data?.state}, ${st.data?.escrowed} X Money escrowed (10 sent, less the transfer burn)`);
+step(await escrowBal() >= booked, `the escrow holds at least what it booked (${formatUnits(await escrowBal(), 18)} held)`);
 
 // ── 2. a solver bids 8, then the user accepts ──────────────────────────────────────────────────────────────────
-const bond = 10n * XM; // bondBps 100% of the escrow
 const solverCreditBefore = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [SOLVER.address] });
 const bidPrep = await call('prepare_xswap_action', { id, action: 'bid', from: SOLVER.address, ask: '8' });
-step(!bidPrep.isError && bidPrep.data.transactions.length >= 1, `solver prepared a bid: ${bidPrep.data?.transactions?.length} tx(s) — the bond is approved then posted`);
+step(!bidPrep.isError && bidPrep.data.transactions.length >= 1, `solver prepared a bid: ${bidPrep.data?.transactions?.length} tx(s): the bond is approved, then posted`);
 await signAndSubmit(SOLVER, bidPrep, `e2e-bid-${id}`);
 st = await call('xswap_status', { id });
-step(st.data?.solver?.toLowerCase() === SOLVER.address.toLowerCase() && st.data.back_to_you === '2', `bid in: ask ${st.data?.solver_ask}, ${st.data?.back_to_you} comes back to the payer`);
+const onChain = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'get', args: [id] });
+const bond = onChain.bond; // what arrived of the 100% bond
+step(st.data?.solver?.toLowerCase() === SOLVER.address.toLowerCase() && onChain.ask === 8n * XM && bond > 0n, `bid in: ask ${st.data?.solver_ask}, bond ${formatUnits(bond, 18)}, ${st.data?.back_to_you} comes back to the payer`);
 
 const acc = await call('prepare_xswap_action', { id, action: 'accept' });
 await signAndSubmit(USER, acc, `e2e-accept-${id}`);
@@ -128,7 +136,7 @@ await signAndSubmit(USER, conf, `e2e-confirm-${id}`);
 st = await call('xswap_status', { id });
 step(st.data?.state_code === 3, `confirmed: ${st.data?.state}`);
 const creditAfter = await pub.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: 'credit', args: [USER.address] });
-step(creditAfter - creditBefore === 2n * XM, `bidding set aside ${formatUnits(creditAfter - creditBefore, 18)} X Money for the payer (expected 2)`);
+step(creditAfter - creditBefore === booked - 8n * XM, `bidding set aside ${formatUnits(creditAfter - creditBefore, 18)} X Money for the payer (expected ${formatUnits(booked - 8n * XM, 18)})`);
 
 // and the payer pulls it, through the connector like everything else
 const balBefore = await pub.readContract({ address: XSWAP.xmoney, abi: ERC20, functionName: 'balanceOf', args: [USER.address] });

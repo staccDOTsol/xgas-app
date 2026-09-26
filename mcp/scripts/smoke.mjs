@@ -42,6 +42,15 @@ const bad = await client.callTool({ name: 'get_balance', arguments: { address: '
 console.log(`${bad.isError ? ' ok ' : 'FAIL'} bad input rejected: ${bad.content[0].text.slice(0, 80)}`);
 if (!bad.isError) failed++;
 
+// While XSwap is paused (the v1 escrows have no usable owner), new swaps must be refused with the reason.
+const terms = await client.callTool({ name: 'xswap_terms', arguments: {} });
+if (/^PAUSED\./.test(terms.content[0].text)) {
+  const open = await client.callTool({ name: 'prepare_xswap_out', arguments: { from: '0x000000000000000000000000000000000000dEaD', xmoney_amount: '1', chain: 'base', amount: '0.001', to: '0x000000000000000000000000000000000000dEaD' } });
+  const refused = open.isError && /refused/.test(open.content[0].text) && /Nothing was prepared/.test(open.content[0].text);
+  console.log(`${refused ? ' ok ' : 'FAIL'} paused XSwap refuses prepare_xswap_out: ${open.content[0].text.slice(0, 80)}`);
+  if (!refused) failed++;
+}
+
 const unknown = await client.callTool({ name: 'does_not_exist', arguments: {} });
 console.log(`${unknown.isError ? ' ok ' : 'FAIL'} unknown tool rejected`);
 if (!unknown.isError) failed++;

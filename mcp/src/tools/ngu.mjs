@@ -5,6 +5,7 @@ import { fmtXMoney, parseXMoney } from '../money.mjs';
 import { trueMaxLoss, pct, contractSkew } from '../nguRisk.mjs';
 import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitRaw } from '../idempotency.mjs';
+import { untrusted } from '../untrusted.mjs';
 
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const BPS = 10000n;
@@ -38,8 +39,9 @@ async function tokenState(token, who) {
   const skew = contractSkew(lossBps, s.maxLossBps);
   return {
     token,
-    name: s.name,
-    symbol: s.symbol,
+    // Whoever launched the curve chose these. They reach a model, so they arrive wrapped as third-party text.
+    name: untrusted(s.name, 64),
+    symbol: untrusted(s.symbol, 24),
     max_loss_bps: lossBps,
     max_loss_pct: pct(lossBps),
     max_loss_basis: 'live: buy 1 at nextPrice, sell it straight back at min(floor after the buy, that price), fees on both legs',
@@ -346,7 +348,7 @@ export const tools = [
         step_bps: { type: 'integer', minimum: 0, maximum: 5000, description: 'Price step per token. Max 5000.' },
         beta_bps: { type: 'integer', minimum: 5000, maximum: 9500, description: 'Floor protection. 9000 puts the floor at 90% of the buy price.' },
         seed_qty: { type: 'integer', minimum: 0, description: 'Genesis tokens to you, backed by seed_value.' },
-        seed_value: { type: 'string', description: '$xMoney sent with the launch to back the seed tokens.' },
+        seed_value: { type: 'string', description: '$xMoney sent with the launch to back the seed tokens. Only together with seed_qty of 1 or more: a seed with no seed tokens backs nothing of yours, and the first buyer can take it out of the reserve.' },
         from: addr,
       },
       required: ['name', 'symbol', 'max_supply', 'base_price', 'step_bps', 'beta_bps'],
@@ -366,6 +368,14 @@ export const tools = [
       if (errs.length) return reply(`The contract would revert with BadParams: ${errs.join('; ')}. Nothing prepared.`, { blocked: 'bad_params', errors: errs });
 
       const seedValue = a.seed_value ? parseXMoney(a.seed_value) : 0n;
+      if (seedValue > 0n && seedQty === 0n) {
+        return reply(
+          `seed_value ${a.seed_value} with seed_qty 0 would put ${fmtXMoney(seedValue)} $xMoney in the reserve behind no tokens of yours. `
+          + 'Whoever buys first can buy two tokens and sell both straight back for more than they paid, taking the seed with them. '
+          + 'Nothing prepared. Pass seed_qty (the genesis tokens that seed backs), or launch with no seed_value.',
+          { blocked: 'seed_without_tokens', seed_value: a.seed_value, seed_qty: 0 },
+        );
+      }
       // A launcher with buybackSink() mints curves that pay the XGAS.DEV buyback; the first launcher has none.
       const buybackBps = await xgas.readContract({ address: launcher, abi: NGU_LAUNCHER_ABI, functionName: 'buybackSink' }).then(() => Number(BUYBACK_BPS), zeroIfReverted);
       // The first buyer's true worst case, from the state the launch leaves behind. Mirrors NguToken._next:

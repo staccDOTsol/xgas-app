@@ -6,15 +6,16 @@ An MCP server over the xGas stack: the USDG vault bridge on Robinhood Chain (466
 the P2P OTC desk and NGU curves on xGas Orbit L4 (466302, rollup mode), a teller layer that routes
 between dollars and $xMoney, and XSwap: X Money in, anything on any EVM chain out, and the other way round.
 
-52 tools, all grounded in a deployment file and the live chains. Over stdio you get all 52.
-The hosted endpoint at `/mcp` serves 48 to anyone and 51 to a caller signed in with X (never
+53 tools, all grounded in a deployment file and the live chains. Over stdio you get all 53.
+The hosted endpoint at `/mcp` serves 48 to anyone and 52 to a caller signed in with X (never
 `claim_exit`, which spends the host's own gas); the site's `/api/connector` serves 42 to an
-anonymous browser and the same 51 to a signed-in one. `GET https://xgas.dev/api/mcp` returns these
+anonymous browser and the same 52 to a signed-in one. `GET https://xgas.dev/api/mcp` returns these
 counts live from the registry, so trust it over this paragraph if they ever differ.
 
 By default nothing is custodial: the connector prepares transactions and your own wallet signs
-them. The three `wallet_*` tools are the one exception. They do nothing until Privy is configured,
-and the wallet they drive is custodial: the host signs for it with `PRIVY_APP_SECRET`.
+them. The four `wallet_*` tools are the one exception. They do nothing until Privy is configured,
+and the wallet they drive is custodial: the host signs for it with `PRIVY_APP_SECRET`. What an agent
+can send from it on its own is capped and allowlisted by the host (see "The agent wallet" below).
 
 ## Use it without cloning
 
@@ -60,8 +61,10 @@ Environment overrides, all optional:
 | `XGAS_NGU_LAUNCHER` | unset | the NguLauncher address, until it is in the deployment file |
 | `XGAS_DEPOSITS_PAUSED` | unset (deposits open, through EarlyDepositor or the vault) | set to `1` to make `prepare_enter` and `submit_enter` refuse |
 | `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
-| `XSWAP_INTENTS` | `0xf8B4…9a35` | the X-Money-in escrow on the parent chain |
-| `XSWAP_ASKS` | `0x0a33…Cd13` | the X-Money-out escrow on the parent chain |
+| `XSWAP_INTENTS` | `xswap.intents` from the deployment, else v1 `0xf8B4…9a35` (paused) | the X-Money-in escrow on the parent chain |
+| `XSWAP_ASKS` | `xswap.asks` from the deployment, else v1 `0x0a33…Cd13` (paused) | the X-Money-out escrow on the parent chain |
+| `XSWAP_ENABLED` | unset: `xswap.enabled` from the deployment, else off | `1` lets XSwap prepare new swaps. It never switches on the v1 addresses |
+| `XSWAP_OWNER` | `xswap.owner` from the deployment | the owner new swaps require `owner()` to equal on both escrows |
 
 ## Chain 466302
 
@@ -131,6 +134,86 @@ rather than pretending a number it does not have.
 The connector cannot see the destination chain. It never claims an asset arrived; the
 challenge window and the bond are what stand in for that.
 
+### Paused: nobody can resolve a dispute on the v1 contracts
+
+The v1 escrows on Robinhood (intents `0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35`, asks
+`0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13`, and an earlier intents
+`0x3d4428cB247792e9183332c95A6A3C37b89E8301`) all have `owner()` =
+`0x1804c8AB1F12E6bbf3894d4083f33e07309d1f38`. That is forge-std's `DEFAULT_SENDER`,
+derived from the string "foundry default caller", and no one holds a key for it. The deploy
+script (nft-range `script/DeployXSwap.s.sol`) did this:
+
+```solidity
+address owner = vm.envOr("PROTOCOL_OWNER", msg.sender); // read BEFORE broadcasting
+vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
+new XSwapIntents(xmoney, owner, treasury);
+```
+
+`PROTOCOL_OWNER` was unset and no `--sender` was passed, so `msg.sender` inside `run()` was the
+default sender. The key `0x26E8…5158` paid for the deploys (txs `0x7c335d0e…`, `0x33b3293d…`),
+but the default sender became the owner. So `resolve()`, `setParams()` and `transferOwnership()`
+can never be called there: a disputed swap would stay frozen forever, escrow and bond both.
+Both contracts held 0 xMoney and 0 ETH when this was found.
+
+While the connector points at those addresses:
+
+- `prepare_xswap_out`, `prepare_xswap_in`, and `prepare_xswap_action` with `bid`, `claim`,
+  `accept` or `delivered` refuse with the reason. `wallet_execute` goes through the same
+  handlers, so it refuses too, and `submit_xswap` will not relay a signed `open`, `ask`, `bid`,
+  `claim`, `accept` or `delivered` to a v1 address or to a paused escrow.
+- `xswap_terms`, `quote_xswap` (marked as a quote only), `xswap_status`, `list_my_xswaps`,
+  `xswap_reputation`, and the ways out (`refund`, `cancel`, `settle`, `confirm`, `withdraw`) keep
+  working. `dispute` still prepares, but on a contract nobody can rule on it is not listed as a way
+  out anywhere: `xswap_terms`, every refusal and the dispute screen say it freezes the escrow and the
+  bond for good (its only effect is that the other side is never paid).
+- `xswap_terms` reads `owner()` live and says who resolves disputes: nobody (and why), a Safe
+  (threshold and signers), or one key, plus any pending handover. Once there is an owner it lists
+  what that owner can do (rule on a disputed swap, and only that swap's money; `setParams` within
+  the contract's bounds; a two-step handover on the redeploy) and what it cannot (touch any other
+  swap, anyone's credit, pause, upgrade, renounce), and that parameter changes reach swaps already
+  in flight.
+- `list_my_xswaps` no longer passes a swap's memo through. It keeps the five order fields,
+  type-checked, and says whether they hash to the on-chain want/give hash.
+
+### Redeploy and switch on
+
+`contracts/script/DeployXSwap.s.sol` deploys `contracts/src/xswap/` with an owner someone can
+sign for. `OWNER` is required and never defaults to `msg.sender`; the script refuses
+`address(0)` and the default sender, accepts the broadcasting key itself, a Safe (it must answer
+`getThreshold()` / `getOwners()`), or another EOA typed twice (`OWNER_CONFIRM`), and reads
+`owner()` back after deploying. The deployer is always `vm.addr(PRIVATE_KEY)`: `deploy()` takes no
+deployer argument (it used to, and passing one equal to `OWNER` skipped the `OWNER_CONFIRM` guard).
+Recommended owner: a Safe, else the founder wallet `0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158`
+broadcasting from its own key.
+
+The source is v1 with two changes. xMoney burns 1 bp of every transfer, and v1 booked the amount
+sent instead of the amount that arrived, so it owed more than it held and the last withdrawal
+would revert. The redeploy books what arrives. And ownership is `Ownable2Step` with
+`renounceOwnership()` disabled: `transferOwnership(new)` only names a pending owner, which takes over
+when it calls `acceptOwnership()`. A mistyped address, or a Safe that only exists on another chain,
+can never accept, so the old owner keeps ruling instead of nobody. Moving to a Safe later is
+`transferOwnership(safe)` on both contracts, then `acceptOwnership()` from the Safe on both. `contracts/test/XSwap.fork.t.sol` runs on a
+Robinhood fork (real xMoney): the v1 owner is the default sender, the script's owner checks,
+`resolve` works for the owner and reverts for everyone else on both contracts, and every
+account that is owed can withdraw.
+
+```bash
+cd contracts
+forge test --match-path test/XSwap.fork.t.sol          # FORK_URL defaults to the Robinhood RPC
+# dry run: simulates against the chain, sends nothing
+OWNER=0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158 PRIVATE_KEY=... \
+  forge script script/DeployXSwap.s.sol --rpc-url https://rpc.mainnet.chain.robinhood.com
+# then the same with --broadcast
+```
+
+The script prints an `xswap` block. Put it in `src/contracts/l4-deployment.json` (and so in the
+package's `deployment.json` at the next release). The connector reads `xswap.intents`,
+`xswap.asks` and `xswap.owner` from it. New swaps stay off until `XSWAP_ENABLED=1` on the host,
+or `"enabled": true` in that block, and only with an expected owner configured (`xswap.owner` or
+`XSWAP_OWNER`; without one XSwap stays off). Each new swap then checks `owner()` on both escrows:
+it must be a key or a working Safe (a contract that does not answer like one is refused, as the
+deploy script refuses it), never the default sender or zero, and it must match that owner.
+
 ## Design rules
 
 **Non-custodial by default.** Every write comes back as an unsigned transaction
@@ -185,7 +268,8 @@ never claims the money moved.
 `prepare_xswap_in`, `xswap_status`, `list_my_xswaps`, `xswap_reputation`,
 `prepare_xswap_action`, `submit_xswap`
 
-**Agent wallet (opt-in, custodial):** `wallet_status`, `wallet_create`, `wallet_execute`
+**Agent wallet (opt-in, custodial):** `wallet_status`, `wallet_create`, `wallet_execute`,
+`wallet_approval_status`
 
 ## Things the chain taught us, that the spec had wrong
 
@@ -206,6 +290,9 @@ never claims the money moved.
 
 `npm run check` exercises the real MCP stdio transport against both live chains.
 
+`npm test` runs the agent wallet tests offline: the caps, the allowlist, approval expiry and single use,
+and that `confirm: true` alone no longer sends anything over the cap or off the allowlist.
+
 `npm run check:deployment` checks the app's deployment file, and `prepublishOnly` runs the same
 check on the copy it packs. It exits non-zero on the wrong chain id, a missing core address, any
 null or empty `l4.*` app address, a missing `l3.earlyDepositor`, or a `_placeholders` key anywhere
@@ -225,8 +312,8 @@ All three items the spec left open are closed.
 
 1. **Wallet connection.** `server.js` serves the read and prepare tools at
    `GET /api/connector` and `POST /api/connector/:tool`. An anonymous browser gets
-   42 of the 52: every `submit_*`, `claim_exit` and `wallet_*` is refused with 403,
-   because the browser sends through the wallet. A caller signed in with X gets 51,
+   42 of the 53: every `submit_*`, `claim_exit` and `wallet_*` is refused with 403,
+   because the browser sends through the wallet. A caller signed in with X gets 52,
    everything but `claim_exit`. `web3Client.ts` gained `callConnector`, `isEnvelope` and
    `executeEnvelope`, which walks a prepared envelope through the existing
    `sendOnChainTx` one step at a time, waiting for each. The site and the connector now
@@ -250,11 +337,12 @@ All three items the spec left open are closed.
 ## The agent wallet (optional, and custodial)
 
 An agent has no browser and no wallet, so `prepare_*` on its own is a dead end for one. Set
-`PRIVY_APP_ID` and `PRIVY_APP_SECRET` and three more tools appear:
+`PRIVY_APP_ID` and `PRIVY_APP_SECRET` and four more tools appear:
 
-- `wallet_status` : the address it signs as, and what it holds on both chains
+- `wallet_status` : the address it signs as, what it holds on both chains, and its spending policy
 - `wallet_create` : make the wallet once, then fund it
-- `wallet_execute` : run any `prepare_*` tool and actually send it, with `confirm: true` and an idempotency key
+- `wallet_execute` : run any `prepare_*` tool and send it, with `confirm: true` and an idempotency key, inside the policy below
+- `wallet_approval_status` : follow an approval link `wallet_execute` returned
 
 Privy signs; this connector broadcasts (Privy's own RPC has never heard of chain 466302).
 Privy signs whenever this host asks with `PRIVY_APP_SECRET`, so whoever runs the host can sign
@@ -271,8 +359,73 @@ and hand it to their own host as `Authorization: Bearer <token>`. It carries onl
 180 days, and can be revoked: `POST /api/connector/revoke` while signed in with X (or the button on
 the site) kills every token that person has minted, at once.
 
+### What an agent can send on its own
+
+`confirm: true` is set by the model, so it is not a safeguard. The host enforces a policy the model
+cannot change (`src/walletPolicy.mjs`). `wallet_execute` decodes every prepared step and sends at once
+only when all of these hold:
+
+- every step goes to an xgas contract from the deployment file, per chain: the vault ($xMoney ERC-20),
+  USDG, EarlyDepositor, the Robinhood OTC desk and its arbitration on Robinhood; ArbSys (the exit),
+  the OTC escrow, router, FOMO, NGU launcher and the XGAS.DEV paymaster on the L4. Or to the wallet
+  itself;
+- on NGU curves, which anyone can launch: buys only on curves this wallet launched (the launcher's
+  `NguLaunched` log names it as creator), and sells of tokens it holds back to any curve (the payout
+  lands here). A buy on someone else's curve is labelled "third-party curve" and needs a person,
+  unless the host sets `XGAS_WALLET_MAX_THIRD_PARTY_NGU_USD`. A `donate` always needs a person: it is a
+  gift. So does a launch that sends a seed with no seed tokens, which `launch_ngu_token` also refuses;
+- every recipient or spender inside the calldata is the wallet itself or an allowlisted contract, and
+  every call is one the policy can read and value (anything else, including XSwap, needs a person);
+- the value it moves, native value plus the token amounts in the calldata, priced live (USDG at $1,
+  $xMoney at the vault NAV but never under $1, ETH at the host's exchange median, NGU tokens at their
+  sell-back quote), is within `XGAS_WALLET_MAX_TX_USD`, and within `XGAS_WALLET_MAX_DAY_USD` together
+  with what the wallet moved in the last 24 hours. An approve and the call that spends it count once;
+- it is not `release_trade`, which hands escrow to a buyer on the strength of a fiat payment only a
+  person can check (unless `XGAS_WALLET_AUTO_RELEASE=1`).
+
+Anything else comes back as a link, `https://xgas.dev/approve/<id>`, with nothing sent. It expires
+after 10 minutes and works once. Only the wallet's owner can open it, signed in with X in a browser:
+the session cookie, never a connector token, so the model that filed the request cannot approve it.
+The page shows the decoded steps, every destination, the amounts, the USD they count as and the fees;
+on approval the host sends exactly those stored steps and `wallet_approval_status` reports the hashes.
+Its headlines are built from the decoded calls only (function, destination, USD); the step labels and the
+request title come from the agent's tool arguments, so they appear only as quoted text marked "written by
+your agent, not checked".
+
+An idempotency key is claimed before anything is awaited and recorded as executing before the first
+signature, so a parallel call or a retry with the same key is told it is in progress and never sends a
+second time; a key left executing by a crash stays blocked until someone checks the chain. Every send
+from one wallet, direct or approved, runs one at a time, and each spend reservation settles only itself.
+Over stdio there is no page, so a request outside the policy is refused with the reasons; the operator
+can raise the caps in the environment, or sign it with their own wallet through the plain `prepare_*` tool.
+
+Third-party text in tool results (X handles on the order book, NGU names and symbols) arrives with
+control and invisible characters stripped, capped, and wrapped in «», with a note that it is data and
+not instructions. The server instructions tell models the same.
+
 | Variable | Use |
 |---|---|
+| `XGAS_WALLET_MAX_TX_USD` | per-execution cap for sending without approval, USD (default 25) |
+| `XGAS_WALLET_MAX_DAY_USD` | rolling 24-hour cap per wallet, USD (default 100; approved sends count toward it too) |
+| `XGAS_WALLET_APPROVE_ALL` | `1`: every agent wallet transaction needs the owner's approval |
+| `XGAS_WALLET_AUTO_RELEASE` | `1`: let `release_trade` run inside the caps without approval |
+| `XGAS_WALLET_MAX_THIRD_PARTY_NGU_USD` | per-transaction cap for buys on NGU curves this wallet did not launch (default 0: always ask) |
+| `XGAS_WALLET_APPROVAL_TTL_S` | approval link lifetime in seconds (default 600, 60 to 1800) |
+| `XGAS_WALLET_OPERATOR_X_ID` | X user id allowed to approve for the operator wallet on the hosted page |
 | `PRIVY_APP_ID`, `PRIVY_APP_SECRET` | turn the wallet tools on |
 | `PRIVY_WALLET_ID`, `PRIVY_WALLET_ADDRESS` | pin a specific wallet instead of the local store |
 | `MCP_AUTH_TOKEN` | operator token for our own tooling; users use their X sign-in instead |
+
+## Changelog
+
+**0.6.2**
+- Agent wallet: NGU curves someone else launched are no longer allowlisted. Buys on them need the owner
+  (or `XGAS_WALLET_MAX_THIRD_PARTY_NGU_USD`), donations always need the owner, sells of held tokens still
+  run. A launch with a seed but no seed tokens needs the owner, and `launch_ngu_token` refuses it.
+- Agent wallet: idempotency keys are claimed synchronously and persisted as executing, reservations get
+  their own refs, and sends are serialized per wallet, so parallel calls with one key cannot send twice or
+  erase each other's spend from the 24-hour cap.
+- Approval page: headlines come from the decoded call; agent-written labels are quoted and marked.
+- XSwap: new swaps need a configured expected owner and refuse an owner contract that is not a Safe;
+  `dispute` is not listed as a way out where nobody can rule. The redeploy source is `Ownable2Step` with
+  `renounceOwnership()` disabled, and `DeployXSwap.deploy()` derives the deployer from the key.

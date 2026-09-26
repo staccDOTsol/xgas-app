@@ -114,5 +114,21 @@
         "nguLauncher": "0xEA2cE320B5CDbF14bc734FeB60c78097e146f1B0"
       }
     }
+  },
+  "xswap": {
+    "intents": "0x5D78651C728c15b715d5f6727bE40C1c3a02B53d",
+    "asks": "0xa999BC26e184b83CECb3cF5b9640C438C5aDc8a3",
+    "owner": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "treasury": "0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8",
+    "chainId": 4663,
+    "enabled": true,
+    "retiredV1": {
+      "intents": [
+        "0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35",
+        "0x3d4428cB247792e9183332c95A6A3C37b89E8301"
+      ],
+      "asks": "0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13",
+      "reason": "owner is forge-std DEFAULT_SENDER (no key): disputes unresolvable"
+    }
   }
 }

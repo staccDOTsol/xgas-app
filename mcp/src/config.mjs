@@ -110,13 +110,50 @@ export async function nguLauncher() {
 }
 
 // XSwap lives on the parent chain, not the L4: the escrow holds the L3 xMoney ERC-20 that the vault mints,
-// so an intent opened through the connector is the same X Money a bridge exit hands you. Addresses are staccpad's, not
-// the Orbit deploy's, so they come from env with the live defaults baked in.
+// so an intent opened through the connector is the same X Money a bridge exit hands you.
+//
+// The v1 contracts cannot settle a dispute. Their deploy script (nft-range script/DeployXSwap.s.sol) read
+// `vm.envOr("PROTOCOL_OWNER", msg.sender)` BEFORE `vm.startBroadcast(key)`, with PROTOCOL_OWNER unset and no --sender,
+// so msg.sender was forge-std's DEFAULT_SENDER and that became owner(). Nobody holds a key for it: resolve(),
+// setParams() and transferOwnership() can never be called there. Those addresses stay readable (status, reputation,
+// refunds, cancels, withdrawals) and are never switched on for new swaps, whatever XSWAP_ENABLED says.
+// The redeploy (contracts/script/DeployXSwap.s.sol) prints an "xswap" block for src/contracts/l4-deployment.json:
+//   { "intents": "0x…", "asks": "0x…", "owner": "0x…", "enabled": false }
+// Addresses come from env first, then that block, then the v1 defaults. New swaps need XSWAP_ENABLED=1 (env, per host)
+// or "enabled": true in the block (everyone on that deployment file), and never run against the v1 addresses.
+export const FORGE_DEFAULT_SENDER = '0x1804c8AB1F12E6bbf3894d4083f33e07309d1f38';
+export const XSWAP_V1 = {
+  intents: '0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35',
+  asks: '0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13',
+  firstIntents: '0x3d4428cB247792e9183332c95A6A3C37b89E8301', // an earlier run of the same script, same owner
+};
+const XSWAP_V1_SET = new Set(Object.values(XSWAP_V1).map((a) => a.toLowerCase()));
+export const isXswapV1 = (a) => XSWAP_V1_SET.has(String(a || '').toLowerCase());
+const XSWAP_FILE = DEPLOY.xswap || {};
+const xswapIntents = process.env.XSWAP_INTENTS || XSWAP_FILE.intents || XSWAP_V1.intents;
+const xswapAsks = process.env.XSWAP_ASKS || XSWAP_FILE.asks || XSWAP_V1.asks;
+const xswapEnv = String(process.env.XSWAP_ENABLED ?? '').trim();
+const xswapFlag = xswapEnv ? /^(1|true|yes|on)$/i.test(xswapEnv) : XSWAP_FILE.enabled === true;
+const xswapIsV1 = isXswapV1(xswapIntents) || isXswapV1(xswapAsks);
+const xswapAddrsOk = [xswapIntents, xswapAsks].every((a) => /^0x[0-9a-fA-F]{40}$/.test(a) && !/^0x0{40}$/.test(a));
+/** An owner a deployment can name: a real address, not zero, not forge-std's keyless default sender. */
+export const validXswapOwner = (a) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a) && !/^0x0{40}$/.test(a)
+  && a.toLowerCase() !== FORGE_DEFAULT_SENDER.toLowerCase();
+const xswapExpectedOwner = process.env.XSWAP_OWNER || XSWAP_FILE.owner || null;
 export const XSWAP = {
-  intents: process.env.XSWAP_INTENTS || DEPLOY.xswap?.intents || '0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35',
-  asks: process.env.XSWAP_ASKS || DEPLOY.xswap?.asks || '0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13',
+  intents: xswapIntents,
+  asks: xswapAsks,
   xmoney: process.env.XSWAP_XMONEY || L3.xMoney,
   chainId: PARENT_CHAIN_ID,
+  // The owner the deployment says it set. tools/xswap.mjs checks owner() on chain against it before any new swap.
+  expectedOwner: xswapExpectedOwner,
+  source: process.env.XSWAP_INTENTS || process.env.XSWAP_ASKS ? 'env' : XSWAP_FILE.intents ? 'deployment file' : 'built-in v1 defaults',
+  v1: xswapIsV1,
+  flag: xswapFlag,
+  addressesOk: xswapAddrsOk,
+  // New swaps (open, ask, bid, claim, accept, delivered) only when switched on, on real addresses, never on v1, and
+  // only with an expected owner to check owner() against. The live owner() check in tools/xswap.mjs runs on top of this.
+  enabled: xswapFlag && !xswapIsV1 && xswapAddrsOk && validXswapOwner(xswapExpectedOwner),
 };
 
 // Until the XMoney vault's timelocked setBridgeSystem points it at this chain's inbox, deposits reach xGas through

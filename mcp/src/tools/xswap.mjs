@@ -1,5 +1,5 @@
-import { encodeAbiParameters, encodeFunctionData, isAddress, keccak256, parseUnits, formatUnits } from 'viem';
-import { XSWAP, PARENT_CHAIN_ID, parent, ZERO } from '../config.mjs';
+import { encodeAbiParameters, encodeFunctionData, isAddress, keccak256, parseUnits, formatUnits, parseAbi, parseTransaction, toFunctionSelector } from 'viem';
+import { XSWAP, PARENT_CHAIN_ID, parent, ZERO, FORGE_DEFAULT_SENDER, isXswapV1, validXswapOwner } from '../config.mjs';
 import { ERC20_ABI, XSWAP_INTENTS_ABI, XSWAP_ASKS_ABI } from '../abis.mjs';
 import { fmtXMoney, parseXMoney } from '../money.mjs';
 import { prepared, renderApproval, reply } from '../approval.mjs';
@@ -129,6 +129,194 @@ async function askOf(id) {
 }
 const either = async (id) => (await intentOf(id)) || (await askOf(id));
 
+/**
+ * A memo is whatever the person who opened the swap wrote on chain. Only the five order fields survive, each checked
+ * for type (chain id, kind, token address, integer amount, recipient address), and the result is re-hashed against
+ * the on-chain want/give hash. Free text in a memo never reaches the reply.
+ */
+function orderFromMemo(memo, hash) {
+  let o;
+  try { o = JSON.parse(String(memo)); } catch { return null; }
+  if (!o || typeof o !== 'object') return null;
+  const dst = Number(o.dstChainId);
+  const kind = Object.prototype.hasOwnProperty.call(KIND, o.kind) ? o.kind : null;
+  const token = o.token === undefined || o.token === null ? undefined : isAddress(String(o.token)) ? String(o.token) : null;
+  const amount = /^\d{1,78}$/.test(String(o.amount)) ? String(o.amount) : null;
+  const to = isAddress(String(o.to)) ? String(o.to) : null;
+  if (!Number.isSafeInteger(dst) || dst <= 0 || !kind || token === null || !amount || !to) return null;
+  const clean = { dstChainId: dst, kind, token, amount, to };
+  let matches = false;
+  try { matches = wantHash(clean) === hash; } catch { /* malformed: stays false */ }
+  return { ...clean, matches_hash: matches };
+}
+
+// ───────────────────────────── who can rule on a dispute ─────────────────────────────
+
+const OWNER_ABI = parseAbi([
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
+  'function getThreshold() view returns (uint256)',
+  'function getOwners() view returns (address[])',
+]);
+
+/** owner() of one escrow, and what kind of thing it is: nobody, a Safe, one key, or some other contract. */
+async function ownerOf(contract) {
+  const [owner, pending] = await Promise.all([
+    parent.readContract({ address: contract, abi: OWNER_ABI, functionName: 'owner' }).catch(() => null),
+    // Ownable2Step (the redeploy) answers pendingOwner(); v1's single-step Ownable does not.
+    parent.readContract({ address: contract, abi: OWNER_ABI, functionName: 'pendingOwner' }).catch(() => undefined),
+  ]);
+  if (!owner) return { contract, owner: null, kind: 'unknown' };
+  const two = pending === undefined ? { two_step: false } : { two_step: true, pending_owner: pending === ZERO ? null : pending };
+  if (owner.toLowerCase() === FORGE_DEFAULT_SENDER.toLowerCase()) return { contract, owner, kind: 'nobody', why: 'forge_default_sender', ...two };
+  if (owner === ZERO) return { contract, owner, kind: 'nobody', why: 'renounced', ...two };
+  return { ...(await ownerKind(contract, owner)), ...two };
+}
+
+/** What kind of thing an owner address is: a Safe, one key (EIP-7702 delegated or not), or some other contract. */
+async function ownerKind(contract, owner) {
+  const code = await parent.getCode({ address: owner }).catch(() => null);
+  // EIP-7702: a delegated EOA carries 0xef0100 ++ delegate as code, and its key still signs. That is one key, not a Safe.
+  if (code && /^0xef0100[0-9a-f]{40}$/i.test(code)) return { contract, owner, kind: 'eoa', delegated: true };
+  if (code && code !== '0x') {
+    const [threshold, signers] = await Promise.all([
+      parent.readContract({ address: owner, abi: OWNER_ABI, functionName: 'getThreshold' }).catch(() => null),
+      parent.readContract({ address: owner, abi: OWNER_ABI, functionName: 'getOwners' }).catch(() => null),
+    ]);
+    // A working Safe, as the deploy script requires: at least one signer, and no more required than it has.
+    if (threshold !== null && Array.isArray(signers) && threshold > 0n && BigInt(signers.length) >= threshold) {
+      return { contract, owner, kind: 'safe', threshold: Number(threshold), signers: [...signers] };
+    }
+    return { contract, owner, kind: 'contract' };
+  }
+  return { contract, owner, kind: 'eoa' };
+}
+
+let arbiterCache = { at: 0, value: null };
+async function arbiter() {
+  if (arbiterCache.value && Date.now() - arbiterCache.at < 60_000) return arbiterCache.value;
+  const [out, inn] = await Promise.all([ownerOf(XSWAP.intents), ownerOf(XSWAP.asks)]);
+  const value = { out, in: inn };
+  if (out.kind !== 'unknown' && inn.kind !== 'unknown') arbiterCache = { at: Date.now(), value };
+  return value;
+}
+
+const pendingNote = (o) => (o.pending_owner ? ` A handover to ${o.pending_owner} is pending; it takes effect only when that address calls acceptOwnership().` : '');
+const expected = (o) => (XSWAP.expectedOwner && o.owner
+  ? (o.owner.toLowerCase() === XSWAP.expectedOwner.toLowerCase() ? ' It matches the owner this connector is configured to expect.' : ` This connector is configured to expect ${XSWAP.expectedOwner} instead, so treat this as unverified.`)
+  : '');
+
+/** Who resolves disputes on one escrow, in words. */
+function whoRules(o) {
+  switch (o.kind) {
+    case 'nobody':
+      return o.why === 'forge_default_sender'
+        ? `Nobody. owner() is ${o.owner}, forge-std's default sender (derived from the string "foundry default caller", not from a key), so no one can sign as it. That is what a forge script produces when it reads msg.sender before it starts broadcasting, which is what the v1 deploy script did. resolve(), setParams() and transferOwnership() can never be called here: a disputed swap on this contract stays frozen forever, escrow and bond both.`
+        : 'Nobody. owner() is the zero address (ownership was renounced), so resolve() can never be called and a disputed swap stays frozen forever.';
+    case 'safe':
+      return `The Safe ${o.owner}: ${o.threshold} of its ${o.signers.length} signers (${o.signers.join(', ')}) must sign each ruling.${expected(o)}${pendingNote(o)}`;
+    case 'eoa':
+      return `The single key ${o.owner}. Whoever holds it decides every dispute on this contract alone.${expected(o)}${pendingNote(o)}`;
+    case 'contract':
+      return `The contract ${o.owner}, which does not answer like a Safe, so nobody can say who, if anyone, can make it rule. The deploy script refuses an owner like this, and so does this connector for new swaps.${expected(o)}${pendingNote(o)}`;
+    default:
+      return `Unknown: owner() could not be read from ${o.contract} just now.`;
+  }
+}
+
+const HANDOVER = {
+  two: 'transferOwnership, which only names a pending owner: it takes over when it calls acceptOwnership(), so a handover to an address nobody signs for never happens. renounceOwnership() is disabled and always reverts.',
+  one: 'transferOwnership, which takes effect at once, and renounceOwnership (renouncing, or handing over to an address nobody signs for, would leave disputes unresolvable for good).',
+};
+const ownerPowers = (arb) => ({
+  out: `On the intents contract (X Money out) the owner can: resolve(id, forUser) on a disputed intent, and only a disputed one (for the user, the escrow and the solver's bond go to the user; for the solver, it settles as if never disputed); setParams: challenge window 10 min to 7 days, solver bond 25% to 200% of the escrow, protocol fee up to 2%, and the treasury the fee goes to; ${HANDOVER[arb.out.two_step ? 'two' : 'one']} It cannot move any other swap's money, withdraw anyone's credit, pause or upgrade the contract.`,
+  in: `On the asks contract (X Money in) the owner can: resolve(id, forBuyer) on a disputed ask, and only a disputed one (for the buyer, their payment and bond go back; for the seller, it settles and the buyer's bond goes to the seller); setParams: challenge window 10 min to 7 days, bidding 30 s to 1 day, buyer bond 10% to 200%, protocol fee up to 2%, and the treasury; ${HANDOVER[arb.in.two_step ? 'two' : 'one']} It cannot move any other swap's money, withdraw anyone's credit, pause or upgrade the contract.`,
+});
+const PARAMS_IN_FLIGHT = 'Parameter changes reach swaps already in flight: the fee is computed at settlement from the rate at that moment, and the challenge window is read whenever a dispute or a settle is checked. A bond is fixed when its bid lands.';
+const BURN_NOTE = XSWAP.v1
+  ? 'xMoney burns 0.01% of every transfer. These v1 contracts book the amount sent, not the amount that arrives, so they can owe slightly more than they hold and the last withdrawal can come up short.'
+  : 'xMoney burns 0.01% of every transfer, on the way into the escrow and again on the way out. The escrow books what actually arrives.';
+
+// ───────────────────────────── the pause ─────────────────────────────
+
+/** Why new swaps are off, or null when the configuration allows them (the live owner check still follows). */
+function pausedReason() {
+  if (XSWAP.v1) {
+    return `XSwap is paused for new swaps. The escrow contracts this connector points at (intents ${XSWAP.intents}, asks ${XSWAP.asks}, Robinhood Chain 4663) have owner() = ${FORGE_DEFAULT_SENDER}, forge-std's default sender, which no one holds a key for: their deploy script read msg.sender before it started broadcasting. Only the owner can resolve a dispute, so on these contracts a disputed swap would stay frozen forever, escrow and bond both. Replacement contracts with a real owner are prepared but not deployed yet.`;
+  }
+  if (!XSWAP.addressesOk) return `XSwap is paused: the configured escrow addresses (intents ${XSWAP.intents}, asks ${XSWAP.asks}) are not both valid addresses.`;
+  if (!XSWAP.flag) {
+    return `XSwap is switched off on this host: XSWAP_ENABLED is not set, and the deployment file's xswap block does not say "enabled": true. Contracts: intents ${XSWAP.intents}, asks ${XSWAP.asks} (from the ${XSWAP.source}).`;
+  }
+  if (!validXswapOwner(XSWAP.expectedOwner)) {
+    const why = XSWAP.expectedOwner
+      ? `the configured expected owner ${XSWAP.expectedOwner} (XSWAP_OWNER or xswap.owner) is not an address anyone can sign for`
+      : 'no expected owner is configured (XSWAP_OWNER, or "owner" in the deployment file\'s xswap block)';
+    return `XSwap is switched off on this host: ${why}. New swaps only open once owner() on both escrows can be checked against the owner the deployment says it set.`;
+  }
+  return null;
+}
+/**
+ * What still works while new swaps are off. Dispute is only a way out when someone can rule on it: on a contract whose
+ * owner is nobody (v1), it freezes the escrow and the bond forever, so it is not listed as an exit there.
+ */
+export function stillWorks(arb) {
+  const nobody = XSWAP.v1 || arb?.out?.kind === 'nobody' || arb?.in?.kind === 'nobody';
+  return nobody
+    ? 'Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, withdraw). Dispute is NOT a way out on these contracts: nobody can rule on it, so it freezes the escrow and the bond forever, and the disputing side never gets its X Money back. Its only effect is that the other side is never paid either.'
+    : 'Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, dispute inside the window, withdraw).';
+}
+
+/** Steps that start a swap or move one closer to a dispute: they need a switched-on XSwap with a real owner. */
+const GATED_ACTIONS = new Set(['bid', 'claim', 'accept', 'delivered']);
+const selectorsOf = (abi, names) => abi.filter((x) => x.type === 'function' && names.includes(x.name)).map((f) => toFunctionSelector(f));
+const GATED_SELECTORS = new Set([
+  ...selectorsOf(XSWAP_INTENTS_ABI, ['open', 'openWith', 'bid', 'claim', 'accept']),
+  ...selectorsOf(XSWAP_ASKS_ABI, ['ask', 'bid', 'accept', 'delivered']),
+]);
+
+/**
+ * What is wrong with the live owners, if anything: nobody can sign, unreadable, a contract that is not a Safe, no
+ * expected owner configured, or not the owner configured. Only a Safe or a key that matches the configured owner passes.
+ */
+export function ownerProblems(arb) {
+  const problems = [];
+  if (!validXswapOwner(XSWAP.expectedOwner)) {
+    problems.push('No expected owner is configured (XSWAP_OWNER, or "owner" in the deployment file\'s xswap block), so owner() cannot be verified.');
+  }
+  for (const [label, o] of [['intents', arb.out], ['asks', arb.in]]) {
+    if (o.kind === 'nobody' || o.kind === 'unknown' || o.kind === 'contract') problems.push(`${label}: ${whoRules(o)}`);
+    else if (validXswapOwner(XSWAP.expectedOwner) && o.owner.toLowerCase() !== XSWAP.expectedOwner.toLowerCase()) {
+      problems.push(`${label}: owner() is ${o.owner}, but this connector is configured to expect ${XSWAP.expectedOwner} (XSWAP_OWNER or xswap.owner in the deployment file).`);
+    }
+  }
+  return problems;
+}
+
+async function assertXswapOpen(what, nothing = 'Nothing was prepared.') {
+  const paused = pausedReason();
+  const arb = await arbiter().catch(() => null);
+  if (paused) throw new Error(`${what} refused. ${paused} ${stillWorks(arb)} ${nothing}`);
+  const problems = ownerProblems(arb || { out: { kind: 'unknown', contract: XSWAP.intents }, in: { kind: 'unknown', contract: XSWAP.asks } });
+  if (problems.length) throw new Error(`${what} refused: no verified owner can resolve disputes on these contracts. ${problems.join(' ')} ${stillWorks(arb)} ${nothing}`);
+}
+
+/** submit_xswap relays anything signed. It still will not relay a new swap, bid or claim to a contract that is paused. */
+async function assertRelayAllowed(raws) {
+  const configured = new Set([XSWAP.intents, XSWAP.asks].map((a) => a.toLowerCase()));
+  for (const raw of raws) {
+    let tx;
+    try { tx = parseTransaction(raw); } catch { continue; } // not a transaction: the RPC rejects it
+    const to = tx.to ? tx.to.toLowerCase() : null;
+    const sel = String(tx.data || tx.input || '0x').slice(0, 10).toLowerCase();
+    if (!to || !GATED_SELECTORS.has(sel)) continue;
+    if (isXswapV1(to)) {
+      throw new Error(`submit_xswap refused: this transaction starts or advances a swap on ${to}, a v1 XSwap contract whose owner() is ${FORGE_DEFAULT_SENDER}, an address no one holds a key for. A dispute there could never be resolved. Nothing was sent.`);
+    }
+    if (configured.has(to)) await assertXswapOpen('submit_xswap', 'Nothing was sent.');
+  }
+}
+
 async function terms() {
   const [iw, ib, ibond, ifee, aw, ab, abond, afee] = await Promise.all([
     readI('window'), readI('bidding'), readI('bondBps'), readI('feeBps'),
@@ -157,16 +345,38 @@ export const tools = [
   },
   {
     name: 'xswap_terms',
-    description: 'The escrow\'s own numbers on both directions: bidding time, challenge window, solver bond and protocol fee, read from the contracts.',
+    description: 'The escrow\'s own terms on both directions, read from the contracts: bidding time, challenge window, bond and protocol fee, who can resolve a dispute (owner() read live) and what that owner can and cannot do, and whether new swaps are open on this connector.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
-      const t = await terms();
+      const [t, arb] = await Promise.all([terms(), arbiter()]);
       const line = (d, t2) => `${d}: bidding ${secs(t2.bidding_s)}, challenge window ${secs(t2.window_s)}, bond ${Number(t2.bond_bps) / 100}% of the escrow, protocol fee ${Number(t2.fee_bps) / 100}% of what the solver charges.`;
+      const paused = pausedReason();
+      const sameOwner = arb.out.owner && arb.in.owner && arb.out.owner.toLowerCase() === arb.in.owner.toLowerCase();
+      const rules = sameOwner
+        ? [`Who resolves disputes (both contracts): ${whoRules(arb.out)}`]
+        : [`Who resolves disputes, X Money out: ${whoRules(arb.out)}`, `Who resolves disputes, X Money in: ${whoRules(arb.in)}`];
+      const nobody = arb.out.kind === 'nobody' || arb.in.kind === 'nobody';
+      const problems = paused ? [] : ownerProblems(arb);
       return reply([
+        paused ? `PAUSED. ${paused} ${stillWorks(arb)}`
+          : problems.length ? `NOT OPEN: no verified owner can resolve disputes. ${problems.join(' ')} ${stillWorks(arb)}`
+            : 'New swaps are open on this connector.',
         line('X Money out (you pay X Money, an asset lands elsewhere)', t.out),
         line('X Money in (you hand over an asset, X Money lands here)', t.in),
+        ...rules,
+        ...(nobody ? [] : [ownerPowers(arb).out, ownerPowers(arb).in, PARAMS_IN_FLIGHT]),
+        BURN_NOTE,
         PERMISSIONLESS,
-      ].join('\n'), { ...t, intents: XSWAP.intents, asks: XSWAP.asks, xmoney: XSWAP.xmoney, chain_id: XSWAP.chainId });
+      ].join('\n'), {
+        ...t,
+        new_swaps_open: !paused && !problems.length,
+        paused_reason: paused || (problems.length ? problems.join(' ') : null),
+        arbiter: { out: arb.out, in: arb.in },
+        forge_default_sender: FORGE_DEFAULT_SENDER,
+        expected_owner: XSWAP.expectedOwner,
+        dispute_is_a_way_out: !nobody,
+        intents: XSWAP.intents, asks: XSWAP.asks, xmoney: XSWAP.xmoney, chain_id: XSWAP.chainId, address_source: XSWAP.source,
+      });
     },
   },
   {
@@ -189,14 +399,18 @@ export const tools = [
       const amount = parseXMoney(args.xmoney_amount);
       const t = (await terms()).out;
       const maxFee = (amount * BigInt(t.fee_bps)) / BPS;
+      const paused = pausedReason();
       return reply([
+        ...(paused ? [`PAUSED: this is a quote only; prepare_xswap_out will refuse. ${paused}`] : []),
         `Deliver ${o._label} on ${o._chain.slug}${o.to === ZERO ? '' : ` to ${o.to}`}.`,
         `You escrow ${fmtXMoney(amount)} X Money. That is the most it can cost you: solvers bid down from it, and every bit the bidding saves comes back to you when the job settles.`,
         `Protocol fee at most ${fmtXMoney(maxFee)} X Money (${t.fee_bps / 100}% of what the winning solver actually charges, not of your escrow).`,
         `Bidding runs ${secs(t.bidding_s)}; the solver posts ${t.bond_bps / 100}% of the escrow as bond; you have ${secs(t.window_s)} after delivery to dispute.`,
-        `If nobody delivers by your deadline, you refund in full.`,
+        `If nobody delivers by your deadline, you get the escrow back.`,
+        BURN_NOTE,
+        `Disputes are ruled on by the contract's owner; xswap_terms says who that is.`,
         NOT_A_BRIDGE,
-      ].join('\n'), { order: memoOf(o), want_hash: wantHash(o), escrow_wei: amount, max_fee_wei: maxFee, terms: t });
+      ].join('\n'), { order: memoOf(o), want_hash: wantHash(o), escrow_wei: amount, max_fee_wei: maxFee, terms: t, paused_reason: paused });
     },
   },
   {
@@ -218,6 +432,7 @@ export const tools = [
       additionalProperties: false,
     },
     async handler(args) {
+      await assertXswapOpen('prepare_xswap_out');
       if (!isAddress(args.from)) throw new Error('`from` must be an address.');
       const o = orderFrom(args);
       const amount = parseXMoney(args.xmoney_amount);
@@ -225,10 +440,11 @@ export const tools = [
       const deadline = BigInt(Math.floor(Date.now() / 1000) + mins * 60);
       const id = args.id || freshId(args.from);
 
-      const [bal, allowance, t] = await Promise.all([
+      const [bal, allowance, t, arb] = await Promise.all([
         parent.readContract({ address: XSWAP.xmoney, abi: ERC20_ABI, functionName: 'balanceOf', args: [args.from] }),
         parent.readContract({ address: XSWAP.xmoney, abi: ERC20_ABI, functionName: 'allowance', args: [args.from, XSWAP.intents] }),
         terms(),
+        arbiter(),
       ]);
       if (bal < amount) throw new Error(`That wallet holds ${fmtXMoney(bal)} X Money and this intent escrows ${fmtXMoney(amount)}. Bridge in first, or escrow less.`);
 
@@ -257,7 +473,7 @@ export const tools = [
           `nobody delivers by ${new Date(Number(deadline) * 1000).toISOString()}: refund in full`,
         ],
         irreversible: 'Once you confirm delivery, the escrow pays the solver and cannot be clawed back. Before that, a dispute inside the window returns your escrow and the solver\'s bond.',
-        notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'This connector cannot see the destination chain. Check the asset arrived yourself before confirming.'],
+        notes: [PERMISSIONLESS, NOT_A_BRIDGE, `Disputes are ruled on by: ${whoRules(arb.out)}`, BURN_NOTE, 'This connector cannot see the destination chain. Check the asset arrived yourself before confirming.'],
         steps,
       });
       return reply(renderApproval(p), { ...p, intent_id: id, order: JSON.parse(memoOf(o)), want_hash: wantHash(o), deadline: Number(deadline), submit_with: 'submit_xswap' });
@@ -281,13 +497,14 @@ export const tools = [
       additionalProperties: false,
     },
     async handler(args) {
+      await assertXswapOpen('prepare_xswap_in');
       if (!isAddress(args.from)) throw new Error('`from` must be an address.');
       const o = orderFrom({ ...args, to: ZERO }, { recipientOptional: true });
       const floor = parseXMoney(args.want_xmoney);
       const mins = Math.max(10, Number(args.deadline_minutes ?? 120));
       const deadline = BigInt(Math.floor(Date.now() / 1000) + mins * 60);
       const id = args.id || freshId(args.from);
-      const t = (await terms()).in;
+      const [{ in: t }, arb] = await Promise.all([terms(), arbiter()]);
 
       const p = prepared({
         action: `Sell ${o._label} on ${o._chain.slug} for X Money`,
@@ -305,6 +522,7 @@ export const tools = [
         notes: [
           'The recipient is not part of the hash on this side: the buyer tells you where to send after they win, and disputes if it never lands.',
           'Posting the ask moves nothing. The buyer escrows first.',
+          `Disputes are ruled on by: ${whoRules(arb.in)}`,
           PERMISSIONLESS,
         ],
         steps: [{
@@ -330,6 +548,12 @@ export const tools = [
         : [`X Money in · ${s.state}.`, `${s.seller} wants at least ${s.floor} X Money.`,
            s.buyer ? `Buyer ${s.buyer} has ${s.best_bid} escrowed, bond ${s.buyer_bond}.` : 'No bid yet.',
            `${clock(s.bidding_ends_in, 'bidding ends')}, ${clock(s.deadline_in, 'deadline')}.`];
+      if (s.state_code === 4) { // Disputed, on both contracts
+        const arb = await arbiter();
+        const ruler = s.side === 'out' ? arb.out : arb.in;
+        L.push(`Disputed. Who can rule on it: ${whoRules(ruler)}`);
+        s.arbiter = ruler;
+      }
       return reply(L.join('\n'), s);
     },
   },
@@ -343,7 +567,7 @@ export const tools = [
     },
     async handler({ address, lookback_blocks = 400_000, limit = 20 }) {
       if (!isAddress(address)) throw new Error(`Not an address: ${address}`);
-      const head = await parent.getBlockNumber();
+      const head = await parent.getBlockNumber({ cacheTime: 0 }); // a cached head can miss the swap that just landed
       const fromBlock = head > BigInt(lookback_blocks) ? head - BigInt(lookback_blocks) : 0n;
       const ev = (abi, name) => abi.find((a) => a.type === 'event' && a.name === name);
       const [opened, asked] = await Promise.all([
@@ -364,12 +588,14 @@ export const tools = [
       for (const r of rows) {
         const s = r.side === 'out' ? await intentOf(r.l.args.id) : await askOf(r.l.args.id);
         if (!s) continue;
-        try { s.order = JSON.parse(r.l.args.memo); } catch { /* memo is free text; the hash is the truth */ }
+        const order = orderFromMemo(r.l.args.memo, s.side === 'out' ? s.want : s.give); // typed fields only, re-hashed
+        if (order) s.order = order;
         swaps.push(s);
       }
+      const what = (s, h) => (!s.order ? `see ${h} hash` : `${s.order.kind} on chain ${s.order.dstChainId}${s.order.matches_hash ? '' : ' (memo does NOT match the on-chain hash)'}`);
       const line = (s) => (s.side === 'out'
-        ? `${s.id.slice(0, 10)}… out · ${s.escrowed} X Money → ${s.order ? `${s.order.kind} on chain ${s.order.dstChainId}` : 'see want hash'} · ${s.state}`
-        : `${s.id.slice(0, 10)}… in · ${s.order ? `${s.order.kind} on chain ${s.order.dstChainId}` : 'see give hash'} → ${s.floor}+ X Money · ${s.state}`);
+        ? `${s.id.slice(0, 10)}… out · ${s.escrowed} X Money → ${what(s, 'want')} · ${s.state}`
+        : `${s.id.slice(0, 10)}… in · ${what(s, 'give')} → ${s.floor}+ X Money · ${s.state}`);
       return reply(`${swaps.length} swap${swaps.length > 1 ? 's' : ''}:\n${swaps.map(line).join('\n')}${waiting}`, { swaps, credit_out: creditOut, credit_in: creditIn });
     },
   },
@@ -395,7 +621,7 @@ export const tools = [
   },
   {
     name: 'prepare_xswap_action',
-    description: 'The rest of a swap\'s life as unsigned transactions: bid on it as a solver, claim a delivery, accept the best bid, confirm, dispute inside the window, refund a dead intent, cancel an ask, mark an ask delivered, settle, or pull your credit. Anyone can solve; the bond is the permission. Signs nothing.',
+    description: 'The rest of a swap\'s life as unsigned transactions: bid on it as a solver, claim a delivery, accept the best bid, confirm, dispute inside the window, refund a dead intent, cancel an ask, mark an ask delivered, settle, or pull your credit. Anyone can solve; the bond is the permission. While XSwap is paused, bid, claim, accept and delivered refuse and the ways out keep working. On a contract nobody can rule on (xswap_terms says), dispute is not a way out: it freezes the swap\'s escrow and bond forever. Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -410,6 +636,7 @@ export const tools = [
       required: ['action'], additionalProperties: false,
     },
     async handler({ id, action, reason, proof, side, from, ask }) {
+      if (GATED_ACTIONS.has(action)) await assertXswapOpen(`prepare_xswap_action ${action}`);
       if (action === 'withdraw') {
         const which = side === 'in' ? XSWAP.asks : XSWAP.intents;
         const abi = side === 'in' ? XSWAP_ASKS_ABI : XSWAP_INTENTS_ABI;
@@ -427,7 +654,10 @@ export const tools = [
       const out = s.side === 'out';
       const to = out ? XSWAP.intents : XSWAP.asks;
       const abi = out ? XSWAP_INTENTS_ABI : XSWAP_ASKS_ABI;
-      const t = (await terms())[out ? 'out' : 'in'];
+      const [allTerms, arb] = await Promise.all([terms(), arbiter()]);
+      const t = allTerms[out ? 'out' : 'in'];
+      const ruler = out ? arb.out : arb.in;
+      const unresolvable = ruler.kind === 'nobody';
 
       const spec = {
         accept: {
@@ -447,7 +677,9 @@ export const tools = [
         dispute: {
           fn: 'dispute', args: [id, String(reason || '')],
           title: 'Dispute this delivery',
-          note: `Must be inside the ${secs(t.window_s)} window. The arbiter can only ever move this one swap's money.`,
+          note: unresolvable
+            ? `Must be inside the ${secs(t.window_s)} window. On this contract NOBODY can rule on a dispute (${whoRules(ruler)}). Disputing freezes this swap's escrow and bond permanently: you do not get your X Money back, and the other side is never paid either.`
+            : `Must be inside the ${secs(t.window_s)} window. The owner rules on it: ${whoRules(ruler)} It can only ever move this one swap's money.`,
           irreversible: null,
           require: () => { if (!reason) throw new Error('Say what went wrong: the reason is on chain and it is what the arbiter reads.'); },
         },
@@ -542,6 +774,7 @@ export const tools = [
     async handler({ signed_tx, signed_txs, idempotency_key }) {
       const kind = 'xswap';
       const chainId = PARENT_CHAIN_ID;
+      await assertRelayAllowed(Array.isArray(signed_txs) && signed_txs.length ? signed_txs : [signed_tx].filter(Boolean));
       const res = Array.isArray(signed_txs) && signed_txs.length
         ? await submitBatch({ chainId, signedTxs: signed_txs, idempotencyKey: idempotency_key, kind })
         : await submitRaw({ chainId, signedTx: signed_tx, idempotencyKey: idempotency_key, kind });

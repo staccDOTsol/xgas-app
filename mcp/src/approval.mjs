@@ -1,4 +1,5 @@
 import { json } from './money.mjs';
+import { OPEN, UNTRUSTED_NOTE } from './untrusted.mjs';
 
 /**
  * The connector never signs. Every write comes back as this envelope: an unsigned
@@ -69,9 +70,15 @@ export function renderApproval(p) {
   return L.join('\n');
 }
 
-/** MCP tool result: readable text first, exact data after. */
+/**
+ * MCP tool result: readable text first, exact data after. When anything in it came from a third party (wrapped in
+ * «» by untrusted.mjs), say so right under the text, before the JSON block, so unwrap() still finds the JSON.
+ */
 export function reply(text, data) {
-  const body = data === undefined ? text : `${text}\n\n\`\`\`json\n${json(data)}\n\`\`\``;
+  const payload = data === undefined ? '' : json(data);
+  const flagged = String(text).includes(OPEN) || payload.includes(OPEN);
+  const head = flagged ? `${text}\n\n${UNTRUSTED_NOTE}` : text;
+  const body = data === undefined ? head : `${head}\n\n\`\`\`json\n${payload}\n\`\`\``;
   return { content: [{ type: 'text', text: body }] };
 }
 
