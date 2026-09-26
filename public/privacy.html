@@ -32,6 +32,7 @@ p,li{color:#d5deea}ul{padding-left:1.2rem}hr{border:none;border-top:1px solid va
   <ul>
     <li><strong>Wallet and chain data.</strong> Public blockchain addresses, transaction hashes, and on-chain state you ask the Services to read or prepare. This data is already public on the relevant networks.</li>
     <li><strong>Account / auth data (if you sign in).</strong> If you use Sign in with X, we may receive identifiers and profile fields X provides, and may associate a Privy-managed wallet with that session for agent use. That path is optional.</li>
+    <li><strong>Linked accounts via Plaid (optional).</strong> If you choose to check a desk payment with Plaid, you link an account through Plaid Inc. and we receive read-only access to that account's names, last four digits and recent transactions (about 30 days). We use it only to look for the payment of the trade you ask about. We store Plaid's access token encrypted, never your bank login, and keep a one-way fingerprint of a matched transaction so it cannot be counted for two trades. We do not keep your transaction history. If you publish a Plaid receipt to a dispute, the matched transaction's date, amount, description and account last four digits become public. Unlinking removes the connection at Plaid and here. Plaid's handling of your data is governed by the <a href="https://plaid.com/legal/#end-user-privacy-policy">Plaid End User Privacy Policy</a>.</li>
     <li><strong>Technical logs.</strong> IP address, user agent, timestamps, request paths, and error logs needed to operate, secure, and debug the Services.</li>
     <li><strong>Communications.</strong> Email or messages you send us (including the support address above).</li>
     <li><strong>What we do not collect by design.</strong> We do not ask for seed phrases or private keys. We do not process card payments or hold fiat as a platform. On/off ramps available through the stack are peer-to-peer between users.</li>
@@ -50,7 +51,7 @@ p,li{color:#d5deea}ul{padding-left:1.2rem}hr{border:none;border-top:1px solid va
   <p>Fiat-facing or off-chain settlement legs that users arrange through the desk or ramps are strictly peer-to-peer. Dispute handling is designed to be resolved among users through the protocol’s mechanisms, without platform interference in the commercial outcome between counterparties. We are not a bank, escrow agent for fiat, or payment processor for those P2P legs.</p>
 
   <h2>5. Sharing</h2>
-  <p>We may share information with infrastructure providers strictly as needed to host the Services (for example cloud hosting, auth/wallet infrastructure such as Privy or X OAuth, and analytics-free operational logging). We may disclose information if required by law or to protect the safety, integrity, or rights of users or the Services.</p>
+  <p>We may share information with infrastructure providers strictly as needed to host the Services (for example cloud hosting, auth/wallet infrastructure such as Privy or X OAuth, Plaid for accounts you choose to link, and analytics-free operational logging). We may disclose information if required by law or to protect the safety, integrity, or rights of users or the Services.</p>
 
   <h2>6. On-chain permanence</h2>
   <p>Transactions you broadcast are public and generally irreversible. Deleting an account with us (if any) does not erase blockchain history.</p>

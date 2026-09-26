@@ -5,6 +5,7 @@ import { UserWallet } from '../types';
 import { CONTRACT_ADDRESSES, ROBINHOOD_OTC_ABI, ROBINHOOD_OTC_SIDE, ROBINHOOD_OTC_STATUS } from '../contracts/abis';
 import { publicClient, sendOnChainTx, switchNetwork, xLoginUrl, L3_CHAIN_ID, TxError } from '../contracts/web3Client';
 import { RobinhoodArbiters } from './RobinhoodArbiters';
+import { PlaidCheck } from './PlaidCheck';
 
 // ---------------------------------------------------------------------------
 // Robinhood desk: dollars on X Money (off-chain, X account to X account) <-> native ETH on Robinhood Chain #4663.
@@ -1021,6 +1022,21 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
           <div className="text-[10px] text-slate-500">
             The contract does not verify these handles: whoever opened the order or the trade typed them.{!viewer && <> {iAmSeller ? `Release only for a payment from exactly @${t.buyerXHandle} with the memo ${memo}. A payment from anyone else, even for the right amount, is not this trade.` : `Pay exactly @${t.sellerXHandle} with the memo ${memo}.`}</>}
           </div>
+        )}
+
+        {!viewer && (t.status === ROBINHOOD_OTC_STATUS.OPEN || t.status === ROBINHOOD_OTC_STATUS.PAID || t.status === ROBINHOOD_OTC_STATUS.DISPUTED) && (
+          <PlaidCheck
+            tradeId={t.id}
+            side={iAmSeller ? 'seller' : 'buyer'}
+            xHandle={handle}
+            partyHandle={iAmSeller ? t.sellerXHandle : t.buyerXHandle}
+            counterparty={iAmSeller ? t.buyerXHandle : t.sellerXHandle}
+            dollars={dollars}
+            disputed={t.status === ROBINHOOD_OTC_STATUS.DISPUTED}
+            busy={!!busy}
+            canPublish={myEvidence < MAX_EVIDENCE_PER_PARTY}
+            onPublish={(uri) => sendArb(`Submit Plaid receipt for trade #${t.id}`, 'submitEvidence', [BigInt(t.id), uri])}
+          />
         )}
 
         {t.status === ROBINHOOD_OTC_STATUS.OPEN && (

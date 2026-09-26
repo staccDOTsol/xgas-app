@@ -13,6 +13,7 @@ import { createServer as createMcpServer, isHostable, hostableFor, VERSION as MC
 import { runAs, OPERATOR } from './mcp/src/actor.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createRobinhoodOg } from './server/og/robinhood.mjs';
+import { createPlaid } from './server/plaid.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1881,6 +1882,27 @@ const robinhoodOg = createRobinhoodOg({
   fallbackPng: path.join(__dirname, 'dist', 'og.png'),
 });
 robinhoodOg.mountImages(app);
+
+// Plaid, read-only: a desk party links the account their X Money dollars move through and the host looks for the
+// trade's payment there (server/plaid.mjs). Off unless PLAID_CLIENT_ID and PLAID_SECRET are set.
+const plaid = createPlaid({
+  dataDir: DATA_DIR,
+  sessionSecret: SESSION_SECRET,
+  currentUser,
+  origin: PUBLIC_ORIGIN,
+  readTrade: async (tradeId) => {
+    if (!ROBINHOOD_OTC) return { status: 503, error: 'The Robinhood OTC desk is not deployed yet.' };
+    try {
+      const trade = await l3Client.readContract({ address: ROBINHOOD_OTC, abi: OTC_VIEW_ABI, functionName: 'getTrade', args: [tradeId] });
+      if (!trade || trade.seller === ZERO_ADDRESS) return { status: 404, error: `There is no trade #${tradeId} on the desk.` };
+      return { trade };
+    } catch (e) {
+      const reverted = /revert|execution reverted|returned no data/i.test(`${e.shortMessage || ''} ${e.message || ''}`);
+      return reverted ? { status: 404, error: `There is no trade #${tradeId} on the desk.` } : { status: 502, error: `Could not read Robinhood Chain: ${e.shortMessage || e.message}` };
+    }
+  },
+});
+plaid.mount(app);
 const ROBINHOOD_PAGES = { '/robinhood': 'desk', '/robinhood/post': 'post', '/robinhood/trades': 'trades', '/robinhood/arbiters': 'arbiters' };
 app.get(['/robinhood', '/robinhood/post', '/robinhood/trades', '/robinhood/arbiters', '/robinhood/order/:id', '/robinhood/offer/:id', '/robinhood/trade/:id'], async (req, res, next) => {
   let html;
