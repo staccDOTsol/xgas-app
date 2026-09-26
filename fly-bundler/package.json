@@ -1,0 +1,15 @@
+{
+  "name": "xgas-bundler",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ERC-4337 bundler (Pimlico Alto) for the xGas L4, chain 466302",
+  "type": "module",
+  "scripts": {
+    "start": "sh ./entrypoint.sh",
+    "deploy-simulations": "node scripts/deploy-simulations.mjs",
+    "test:fork": "sh test/fork-e2e.sh"
+  },
+  "dependencies": {
+    "@pimlico/alto": "0.0.21"
+  }
+}

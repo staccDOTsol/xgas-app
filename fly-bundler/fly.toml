@@ -1,0 +1,43 @@
+# ERC-4337 bundler for the xGas L4 (chain 466302). Deploy from this directory:
+#   fly deploy --ha=false
+# Exactly ONE machine: Alto keeps its mempool in memory and two machines would race the same executor nonces.
+app = "xgas-bundler"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Nitro node over Fly's private network (xgas-l4 is in the same org as xgas); its public URL is https://xgas-l4.fly.dev
+  RPC_URL = "http://xgas-l4.internal:8449"
+  EXPECTED_CHAIN_ID = "466302"
+  # Fill these in after contracts/script/DeployXgasAA.s.sol and scripts/deploy-simulations.mjs have run
+  # (addresses, not secrets). Startup refuses to run while any is empty.
+  ENTRYPOINTS = "0x78546FE8666E4fD4b67C764cdEa7619C6037B870"
+  PIMLICO_SIMULATION_CONTRACT = "0xa16fdef4d58d6428835c3759e2652b3c3488d84c"
+  ENTRYPOINT_SIMULATION_CONTRACT_V7 = "0x7eb803a33222e5969b40b35f31f7ba14de44da3a"
+  # Secrets, never here: fly secrets set EXECUTOR_PRIVATE_KEYS=0x... UTILITY_PRIVATE_KEY=0x...
+
+[http_service]
+  internal_port = 4337
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 400
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

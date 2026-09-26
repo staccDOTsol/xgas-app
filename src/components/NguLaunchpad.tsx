@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { BaseError, formatEther, parseEther } from 'viem';
 import { NGU_TOKEN_ABI, NGU_LAUNCHER_ABI } from '../contracts/nguAbis';
 import { l4Addresses } from '../contracts/abis';
-import { l4PublicClient, sendOnChainTx, encodeAbiCall, loadL4Info, L4_CHAIN_ID } from '../contracts/web3Client';
+import { l4PublicClient, encodeAbiCall, loadL4Info, L4_CHAIN_ID } from '../contracts/web3Client';
+import { sendL4Tx } from '../contracts/gas';
+import { L4GasPanel } from './L4GasPanel';
 import { UserWallet } from '../types';
 import { trueMaxLoss, contractSkew } from '../utils/nguRisk';
 import { Rocket, TrendingUp, TrendingDown, Plus, RefreshCw, AlertTriangle, Wallet, Info } from 'lucide-react';
@@ -110,7 +112,7 @@ function TokenCard({ token, wallet, onTrade }: { token: NguTokenState; wallet: U
         address: addr(token.address), abi: NGU_TOKEN_ABI, functionName: 'quoteBuy', args: [qty],
       });
       const enc = encodeAbiCall(NGU_TOKEN_ABI, 'buy', [qty, addr(wallet.address)], token.address, formatEther(cost), L4_CHAIN_ID);
-      await sendOnChainTx({ to: token.address, data: enc.calldata, valueWei: BigInt(enc.valueWei), waitForConfirmation: true });
+      await sendL4Tx({ to: token.address, data: enc.calldata, valueWei: BigInt(enc.valueWei), waitForConfirmation: true });
       onTrade();
     } catch (e: any) {
       setErr(e?.message || 'Buy failed');
@@ -128,7 +130,7 @@ function TokenCard({ token, wallet, onTrade }: { token: NguTokenState; wallet: U
       });
       const minOut = (payout * 9950n) / 10000n; // 0.5% slippage tolerance
       const enc = encodeAbiCall(NGU_TOKEN_ABI, 'sell', [qty, addr(wallet.address), minOut], token.address, '0', L4_CHAIN_ID);
-      await sendOnChainTx({ to: token.address, data: enc.calldata, waitForConfirmation: true });
+      await sendL4Tx({ to: token.address, data: enc.calldata, waitForConfirmation: true });
       onTrade();
     } catch (e: any) {
       setErr(e?.message || 'Sell failed');
@@ -252,7 +254,7 @@ function LaunchForm({ launcher, wallet, onConnectWallet, onLaunched }: { launche
         [name.trim(), symbol.trim().toUpperCase(), ms, bp, step, beta, sq],
         launcher, seedValue || '0', L4_CHAIN_ID,
       );
-      await sendOnChainTx({ to: launcher, data: enc.calldata, valueWei: BigInt(enc.valueWei), waitForConfirmation: true });
+      await sendL4Tx({ to: launcher, data: enc.calldata, valueWei: BigInt(enc.valueWei), waitForConfirmation: true });
       setOpen(false); onLaunched();
     } catch (e: any) {
       setErr(e?.message || 'Launch failed');
@@ -365,6 +367,7 @@ export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; 
             <Wallet className="w-4 h-4 text-emerald-400" /> Connect wallet to launch & trade
           </button>
         )}
+        {wallet.connected && <L4GasPanel owner={wallet.address} />}
         <LaunchForm launcher={launcher} wallet={wallet} onConnectWallet={onConnectWallet} onLaunched={load} />
         {loading ? (
           <div className="text-center text-xs font-mono text-slate-500 py-8">loading tokens…</div>

@@ -30,6 +30,8 @@ import { UserWallet } from '../types';
 import { CONTRACT_ADDRESSES, l4Addresses } from '../contracts/abis';
 import { OrbitL4Explorer } from './OrbitL4Explorer';
 import { publicClient, l4PublicClient, sendOnChainTx, encodeAbiCall, fetchL4XMoneyBalance, loadL4Info, waitForL4Credit, fetchWithdrawals, executeWithdrawal, type Withdrawal, L3_CHAIN_ID, L4_CHAIN_ID } from '../contracts/web3Client';
+import { sendL4Tx, useL4Gas, isOwnAddress } from '../contracts/gas';
+import { L4GasPanel } from './L4GasPanel';
 import { sounds } from '../utils/audio';
 import confetti from 'canvas-confetti';
 import { formatEther, parseEther, parseAbi } from 'viem';
@@ -194,6 +196,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   xHandle = null
 }) => {
   const [activeTab, setActiveTabState] = useState<TabId>(() => tabFromLocation());
+  // Which gas pays L4 writes (xMoney, or XGAS.DEV through a paymaster); orders made from the xGas account count as yours.
+  const { plan: gasPlan } = useL4Gas(wallet.connected ? wallet.address : '');
+  const isMine = (addr: string) => wallet.connected && isOwnAddress(addr, wallet.address, gasPlan);
   const [deepOrderId, setDeepOrderId] = useState<number | null>(() => parseRoute().orderId);
   const [deepTradeId, setDeepTradeId] = useState<number | null>(() => parseRoute().tradeId);
   const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
@@ -620,7 +625,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       const rawXMoney = parseEther(vaultAmount);
       if (rawXMoney <= 0n) throw new Error('Enter an $xMoney amount');
       const wCall = encodeAbiCall(ARBSYS_ABI, 'withdrawEth', [wallet.address], CONTRACT_ADDRESSES.ARB_SYS, formatEther(rawXMoney));
-      await sendOnChainTx({ to: CONTRACT_ADDRESSES.ARB_SYS, data: wCall.calldata, valueWei: rawXMoney, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      await sendL4Tx({ to: CONTRACT_ADDRESSES.ARB_SYS, data: wCall.calldata, valueWei: rawXMoney, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
       sounds.playConnect();
       setBridgeStatus('Withdrawal queued on the L4. It shows below as "pending" until Robinhood confirms the assertion, then "claimable".');
       await refreshL4Balance();
@@ -673,7 +678,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     if (!wallet.connected) { onConnectWallet(); return; }
     try {
       const c = encodeAbiCall(FOMO_ABI, 'claimDividendsForRound', [BigInt(round)], l4Addresses.fomo);
-      await sendOnChainTx({ to: l4Addresses.fomo, data: c.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      await sendL4Tx({ to: l4Addresses.fomo, data: c.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
       sounds.playConnect();
       confetti({ particleCount: 50, spread: 70 });
       await refreshL4Balance();
@@ -701,7 +706,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
       if (orderSideToCreate === 'ASK') {
         const askCall = encodeAbiCall(ESCROW_ABI, 'createSellAsk', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], l4Addresses.escrow);
-        const res = await sendOnChainTx({
+        const res = await sendL4Tx({
           to: l4Addresses.escrow,
           data: askCall.calldata,
           valueWei: rawUnits,
@@ -716,7 +721,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         }
       } else {
         const bidCall = encodeAbiCall(ESCROW_ABI, 'createBuyBid', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], l4Addresses.escrow);
-        const res = await sendOnChainTx({
+        const res = await sendL4Tx({
           to: l4Addresses.escrow,
           data: bidCall.calldata,
           from: wallet.address,
@@ -753,7 +758,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
       if (selectedOrderForTrade.side === 'ASK') {
         const takeAskCall = encodeAbiCall(ESCROW_ABI, 'fillSellAsk', [BigInt(selectedOrderForTrade.id), rawUnits, handle], l4Addresses.escrow);
-        const res = await sendOnChainTx({
+        const res = await sendL4Tx({
           to: l4Addresses.escrow,
           data: takeAskCall.calldata,
           from: wallet.address,
@@ -767,7 +772,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         }
       } else {
         const takeBidCall = encodeAbiCall(ESCROW_ABI, 'fillBuyBid', [BigInt(selectedOrderForTrade.id), rawUnits, handle], l4Addresses.escrow);
-        const res = await sendOnChainTx({
+        const res = await sendL4Tx({
           to: l4Addresses.escrow,
           data: takeBidCall.calldata,
           valueWei: rawUnits,
@@ -799,7 +804,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
     try {
       const releaseCall = encodeAbiCall(ESCROW_ABI, 'releaseTrade', [BigInt(tradeId)], l4Addresses.escrow);
-      const res = await sendOnChainTx({
+      const res = await sendL4Tx({
         to: l4Addresses.escrow,
         data: releaseCall.calldata,
         from: wallet.address,
@@ -826,7 +831,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     }
     try {
       const cancelCall = encodeAbiCall(ESCROW_ABI, 'cancelOrder', [BigInt(orderId)], l4Addresses.escrow);
-      await sendOnChainTx({
+      await sendL4Tx({
         to: l4Addresses.escrow,
         data: cancelCall.calldata,
         from: wallet.address,
@@ -853,7 +858,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       const priceWei = await l4PublicClient.readContract({ address: l4Addresses.fomo as `0x${string}`, abi: FOMO_ABI, functionName: 'getKeyPrice' });
       const costWei = priceWei * count;
       const buyCall = encodeAbiCall(FOMO_ABI, 'buyKeys', [fomoXHandle.replace('@', ''), count], l4Addresses.fomo, formatEther(costWei));
-      const res = await sendOnChainTx({
+      const res = await sendL4Tx({
         to: l4Addresses.fomo,
         data: buyCall.calldata,
         valueWei: costWei,
@@ -882,7 +887,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
     try {
       const claimCall = encodeAbiCall(FOMO_ABI, 'claimDividends', [], l4Addresses.fomo);
-      const res = await sendOnChainTx({
+      const res = await sendL4Tx({
         to: l4Addresses.fomo,
         data: claimCall.calldata,
         from: wallet.address,
@@ -909,7 +914,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     }
     try {
       const jackpotCall = encodeAbiCall(FOMO_ABI, 'claimJackpot', [], l4Addresses.fomo);
-      const res = await sendOnChainTx({
+      const res = await sendL4Tx({
         to: l4Addresses.fomo,
         data: jackpotCall.calldata,
         from: wallet.address,
@@ -942,7 +947,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   const handleWithdrawJackpotOnChain = async () => {
     try {
       const call = encodeAbiCall(FOMO_ABI, 'withdrawJackpot', [wallet.address], l4Addresses.fomo);
-      await sendOnChainTx({ to: l4Addresses.fomo, data: call.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      await sendL4Tx({ to: l4Addresses.fomo, data: call.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
       setMyJackpotOwed(0n);
       sounds.playConnect();
       confetti({ particleCount: 120, spread: 120 });
@@ -1170,6 +1175,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           </button>
         </div>
       </div>
+
+      {wallet.connected && (activeTab === 'otc' || activeTab === 'fomo3d') && <L4GasPanel owner={wallet.address} />}
 
       {/* 2.5 TAB: REAL L4 EXPLORER */}
       {activeTab === 'explorer' && <OrbitL4Explorer />}
@@ -1409,7 +1416,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                       {filteredOrders.map(order => {
                         const spreadPct = ((order.fiatRateBps - 10000) / 100).toFixed(1);
                         const unitPrice = (order.fiatRateBps / 10000).toFixed(3);
-                        const mine = wallet.connected && order.maker.toLowerCase() === wallet.address.toLowerCase();
+                        const mine = isMine(order.maker);
                         return (
                           <div key={order.id} className="py-3 space-y-2">
                             <div className="flex items-center justify-between gap-2">
@@ -1510,7 +1517,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                                 ${order.minAmount} – ${order.maxAmount}
                               </td>
                               <td className="py-3 text-right">
-                                {wallet.connected && order.maker.toLowerCase() === wallet.address.toLowerCase() ? (
+                                {isMine(order.maker) ? (
                                   <button
                                     onClick={() => handleCancelOrderOnChain(order.id)}
                                     className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 border border-rose-500/40 text-rose-300 font-bold transition-all text-xs cursor-pointer"

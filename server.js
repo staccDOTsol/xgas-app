@@ -13,6 +13,7 @@ import { createServer as createMcpServer, isHostable, hostableFor, VERSION as MC
 import { runAs, OPERATOR } from './mcp/src/actor.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createRobinhoodOg } from './server/og/robinhood.mjs';
+import { createPaymasterService, resolveConfig as resolvePaymasterConfig } from './server/paymaster/service.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1895,6 +1896,27 @@ app.get(['/robinhood', '/robinhood/post', '/robinhood/trades', '/robinhood/arbit
   }
   res.type('html').send(html);
 });
+
+// ---------------------------------------------------------------------------
+// L4 gas paid in XGAS.DEV (ERC-4337 v0.7 paymaster; server/paymaster/, wire format in server/paymaster/spec.md)
+//   POST /api/paymaster/466302          ERC-7677 JSON-RPC (pm_getPaymasterStubData, pm_getPaymasterData)
+//   GET  /api/paymaster/466302/status   config, live XGAS.DEV rate, debit worker; ?payer=0x... for one payer
+//   POST /api/bundler/466302            allowlisted proxy to the Alto bundler (BUNDLER_URL)
+// Off (503 on the RPC) until PAYMASTER_SIGNER_KEY, the paymaster address and a debit wallet are all set.
+// ---------------------------------------------------------------------------
+const paymasterRobinhoodClient = createPublicClient({ chain: robinhoodChain, transport: viemHttp(L3_RPC, { timeout: 20_000 }) });
+const paymasterL4Client = createPublicClient({ transport: viemHttp(L4_RPC_INTERNAL, { timeout: 15_000 }) });
+const paymaster = createPaymasterService({
+  config: resolvePaymasterConfig({ env: { ...process.env, PUBLIC_ORIGIN }, deploy: DEPLOY }),
+  l4: paymasterL4Client,
+  rh: paymasterRobinhoodClient,
+  ethFairPrice,
+  dataDir: DATA_DIR,
+  ipOf: (req) => ipLimitKey(clientIp(req)),
+});
+app.use(paymaster.router);
+app.use(paymaster.errorPaths, paymaster.errorHandler);
+paymaster.start();
 
 // Legal pages (static HTML in dist from public/); clean URLs for app-store / Meta forms
 app.get(['/privacy', '/privacy.html'], (_req, res) => {
