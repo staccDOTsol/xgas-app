@@ -118,3 +118,46 @@ export const XSWAP = {
   xmoney: process.env.XSWAP_XMONEY || L3.xMoney,
   chainId: PARENT_CHAIN_ID,
 };
+
+// Until the XMoney vault's timelocked setBridgeSystem points it at this chain's inbox, deposits reach xGas through
+// EarlyDepositor (USDG -> vault.enterRollupToL2 -> this chain's inbox, one retryable to the named recipient).
+// The deployment file names it; the constant is the live helper on Robinhood, in case an older file lacks the key.
+export const EARLY_DEPOSITOR = L3.earlyDepositor || '0x36e52831ba473e9374bad7cc22ed942a99b4d431';
+
+/**
+ * Are the configured RPCs the chains this deployment describes? A stale XGAS_RPC (say, the retired 466301
+ * sequencer) would have every write tool prepare against the wrong chain. Checked once at start, logged loudly,
+ * and consulted by every write tool. A mismatch is final for the process; an unreachable RPC is re-checked
+ * after a short pause so a transient outage does not lock writes forever.
+ */
+let chainCheck = { at: 0, promise: null, result: null };
+const RECHECK_MS = 15_000;
+export function checkChains() {
+  const r = chainCheck.result;
+  if (r && (r.ok || r.mismatch)) return Promise.resolve(r);
+  if (chainCheck.promise && Date.now() - chainCheck.at < RECHECK_MS) return chainCheck.promise;
+  chainCheck.at = Date.now();
+  chainCheck.promise = (async () => {
+    const read = (client) => client.getChainId().then((id) => ({ id }), (e) => ({ error: e.shortMessage || e.message }));
+    const [l4, par] = await Promise.all([read(xgas), read(parent)]);
+    const problems = [];
+    if (l4.error) problems.push(`could not read eth_chainId from the xGas RPC ${XGAS_RPC} (${l4.error})`);
+    else if (l4.id !== XGAS_CHAIN_ID) problems.push(`the xGas RPC ${XGAS_RPC} is chain ${l4.id}, but the deployment is chain ${XGAS_CHAIN_ID}`);
+    if (par.error) problems.push(`could not read eth_chainId from the parent RPC ${PARENT_RPC} (${par.error})`);
+    else if (par.id !== PARENT_CHAIN_ID) problems.push(`the parent RPC ${PARENT_RPC} is chain ${par.id}, but the deployment's parent is chain ${PARENT_CHAIN_ID}`);
+    const mismatch = (!l4.error && l4.id !== XGAS_CHAIN_ID) || (!par.error && par.id !== PARENT_CHAIN_ID);
+    const result = { ok: problems.length === 0, mismatch, l4ChainId: l4.id ?? null, parentChainId: par.id ?? null, problems };
+    chainCheck.result = result;
+    if (result.ok) console.error(`[xgas-mcp] RPC check: xGas ${XGAS_RPC} is chain ${l4.id}, parent ${PARENT_RPC} is chain ${par.id}.`);
+    else console.error(`[xgas-mcp] !!! RPC CHECK FAILED: ${problems.join('; ')}. Write tools will refuse until this is fixed (set XGAS_RPC / XGAS_PARENT_RPC or XGAS_DEPLOYMENT). !!!`);
+    return result;
+  })();
+  return chainCheck.promise;
+}
+
+/** Throws a clear error unless both RPCs are confirmed to be the deployment's chains. */
+export async function assertChains(toolName) {
+  const r = await checkChains();
+  if (r.ok) return;
+  throw new Error(`${toolName} refused: ${r.problems.join('; ')}. Nothing was prepared or sent. Fix XGAS_RPC / XGAS_PARENT_RPC (or XGAS_DEPLOYMENT) and restart.`);
+}

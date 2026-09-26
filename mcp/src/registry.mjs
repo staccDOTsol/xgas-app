@@ -8,8 +8,22 @@ import { tools as nguTools } from './tools/ngu.mjs';
 import { tools as rampTools } from './tools/ramps.mjs';
 import { tools as walletTools } from './tools/wallet.mjs';
 import { tools as xswapTools } from './tools/xswap.mjs';
+import { assertChains } from './config.mjs';
 
-export const ALL_TOOLS = [...chainTools, ...bridgeTools, ...otcTools, ...nguTools, ...rampTools, ...xswapTools, ...walletTools];
+/**
+ * Tools that prepare, sign or broadcast something. Each one refuses unless the configured RPCs are the
+ * deployment's chains (config.checkChains), so a stale RPC cannot turn a prepare into a transaction for
+ * the wrong chain. Reads stay available so the problem can be diagnosed.
+ */
+export const isWriteTool = (name) =>
+  /^(prepare_|submit_|post_|take_|release_|reclaim_|cancel_|launch_)/.test(name)
+  || ['claim_exit', 'ramp_start', 'wallet_execute'].includes(name);
+
+const guard = (t) => (isWriteTool(t.name)
+  ? { ...t, handler: async (args) => { await assertChains(t.name); return t.handler(args); } }
+  : t);
+
+export const ALL_TOOLS = [...chainTools, ...bridgeTools, ...otcTools, ...nguTools, ...rampTools, ...xswapTools, ...walletTools].map(guard);
 
 const seen = new Set();
 const dupes = ALL_TOOLS.map((t) => t.name).filter((n) => (seen.has(n) ? true : (seen.add(n), false)));

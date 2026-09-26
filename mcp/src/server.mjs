@@ -4,11 +4,16 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ALL_TOOLS, TOOLS_BY_NAME } from './registry.mjs';
+import { checkChains } from './config.mjs';
 
 // One version number, the published one. A hard-coded copy here would drift the day it mattered.
 export const VERSION = JSON.parse(
   fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
 ).version;
+
+// Server start, for both transports: stdio (src/index.mjs) and the hosted app (server.js) import this module
+// at boot. Check the RPCs' chain ids now and log loudly on a mismatch; write tools re-consult the memoized result.
+checkChains();
 
 /**
  * One MCP server, whatever the transport. stdio (src/index.mjs) gets the whole tool set;

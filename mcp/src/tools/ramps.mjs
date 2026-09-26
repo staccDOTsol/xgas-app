@@ -3,7 +3,7 @@ import { L3, L4_MISSING, l4Address, XGAS_API, parent, xgas } from '../config.mjs
 import { ESCROW_ABI, VAULT_ABI } from '../abis.mjs';
 import { expectedCents, fmtUsdg, fmtXMoney, parseUsdg, parseXMoney, usd } from '../money.mjs';
 import { reply } from '../approval.mjs';
-import { enterMath, exitMath } from './bridge.mjs';
+import { enterQuote, exitMath } from './bridge.mjs';
 import { order, trade, tradeSplit } from './otc.mjs';
 import { createRamp, getRamp, listRamps, updateRamp } from '../ramps-store.mjs';
 
@@ -52,14 +52,24 @@ async function quoteIn({ source, amount }) {
   const paths = [];
 
   if (source === 'usdg_robinhood') {
-    const m = await enterMath(parseUsdg(amount));
+    const m = await enterQuote(parseUsdg(amount));
+    const viaHelper = m.path === 'early_depositor';
+    const credit = m.tooSmall ? null : (m.guaranteed ?? m.l3Deposit);
     paths.push({
       path_id: 'in:usdg_enter',
       title: 'USDG on the parent chain → $xMoney on xGas',
-      steps: ['approve USDG to the vault (if allowance is short)', 'enterRollup — one transaction does the rake, the burn and the bridge'],
+      steps: viaHelper
+        ? ['approve exactly the amount to EarlyDepositor (if allowance is short)', 'EarlyDepositor.deposit — one transaction mints from the vault and bridges to your address (used until the vault\'s timelocked switch)']
+        : ['approve USDG to the vault (if allowance is short)', 'enterRollup — one transaction does the rake, the burn and the bridge'],
       you_pay: `${fmtUsdg(m.usdgWei)} USDG`,
-      net: `${fmtXMoney(m.net)} $xMoney as native gas`,
-      fees: [`${fmtUsdg(m.usdgRake)} USDG to the Fanout (0.01%)`, `${fmtXMoney(m.entryBurn)} xMoney entry burn (0.01%)`],
+      net: m.tooSmall ? 'nothing: the deposit does not cover the L3 gas prepayment, so it would revert' : `${m.about != null ? `about ${fmtXMoney(m.about)}` : `at least ${fmtXMoney(credit)}`} $xMoney as native gas`,
+      fees: [
+        `${fmtUsdg(m.usdgRake)} USDG to the Fanout (0.01%)`,
+        `${fmtXMoney(m.entryBurn)} xMoney entry burn (0.01%)`,
+        ...(viaHelper ? [`${fmtXMoney(m.inboxTax)} xMoney transfer tax into the inbox (0.01%, until the vault switch)`] : []),
+        'L3 gas for the auto-redeem (a few millionths of an xMoney)',
+      ],
+      ...(m.path == null ? { unavailable: m.route.note } : m.tooSmall ? { unavailable: 'amount too small: it does not cover the L3 gas prepayment' } : {}),
       timing: '~1 minute',
       trust: TRUST.vault,
       tools: ['quote_enter', 'prepare_enter', 'submit_enter', 'get_enter_status'],

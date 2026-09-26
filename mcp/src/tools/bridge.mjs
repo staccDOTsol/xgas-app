@@ -1,9 +1,9 @@
 import { encodeFunctionData, decodeEventLog, isAddress, parseAbi } from 'viem';
 import {
   L3, L4, PARENT_CHAIN_ID, XGAS_CHAIN_ID, XGAS_API, parent, xgas, ZERO,
-  BURN_BPS, FANOUT_RAKE_BPS, SCALE_FACTOR, DEPLOY, FAST_CONFIRM_SAFE, VALIDATORS, LEGACY,
+  BURN_BPS, FANOUT_RAKE_BPS, SCALE_FACTOR, DEPLOY, FAST_CONFIRM_SAFE, VALIDATORS, LEGACY, EARLY_DEPOSITOR,
 } from '../config.mjs';
-import { ERC20_ABI, VAULT_ABI, ARBSYS_ABI } from '../abis.mjs';
+import { ERC20_ABI, VAULT_ABI, ARBSYS_ABI, EARLY_DEPOSITOR_ABI } from '../abis.mjs';
 import { fmtUsdg, fmtXMoney, parseUsdg, parseXMoney } from '../money.mjs';
 import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitBatch, submitRaw } from '../idempotency.mjs';
@@ -11,32 +11,56 @@ import { submitBatch, submitRaw } from '../idempotency.mjs';
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const amount = (d) => ({ type: 'string', description: d });
 const BPS = 10000n;
-// Deposits are open on 466302. Set XGAS_DEPOSITS_PAUSED=1 to close them from the connector side.
-// Independently of this switch, prepare_enter refuses while the vault's inbox is not this chain's inbox.
+// Deposits are open on 466302 by default: before the vault switch through EarlyDepositor, after it through
+// vault.enterRollup. Set XGAS_DEPOSITS_PAUSED=1 to close them from the connector side.
 const DEPOSITS_PAUSED = ['1', 'true', 'yes'].includes(String(process.env.XGAS_DEPOSITS_PAUSED || '').toLowerCase());
 const DEPOSITS_PAUSED_MSG = 'Deposits are paused on this connector by its operator (XGAS_DEPOSITS_PAUSED). Nothing was prepared or sent.';
 
+// EarlyDepositor's INBOX is a compile-time constant; read it once and keep it.
+let helperInboxCache = null;
+async function helperInbox() {
+  if (!helperInboxCache) {
+    helperInboxCache = await parent.readContract({ address: EARLY_DEPOSITOR, abi: EARLY_DEPOSITOR_ABI, functionName: 'INBOX' });
+  }
+  return helperInboxCache;
+}
+
 /**
- * Where the vault sends deposits right now. enterRollup creates its ticket on vault.inbox(), so if that is
- * not this chain's inbox (for example before the timelocked setBridgeSystem executes), an enter lands on a
- * different chain than the one this connector reads.
+ * Which contract a deposit goes through right now. vault.enterRollup creates its ticket on vault.inbox(); until the
+ * timelocked setBridgeSystem points that at this chain's inbox, an enterRollup would go to the retired chain. In that
+ * window deposits go through EarlyDepositor, which mints from the vault and opens the retryable on this chain's inbox
+ * itself. path is 'vault', 'early_depositor', or null when neither can be shown to reach this chain.
  */
 async function vaultRoute() {
   const expected = L3.inbox || null;
+  const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+  let inbox;
   try {
-    const inbox = await parent.readContract({ address: L3.xMoney, abi: VAULT_ABI, functionName: 'inbox' });
-    const ok = !!expected && inbox.toLowerCase() === expected.toLowerCase();
-    return {
-      vault_inbox: inbox,
-      this_chain_inbox: expected,
-      routes_to_this_chain: ok,
-      note: ok
-        ? `The vault sends deposits to inbox ${inbox}, which is xGas ${XGAS_CHAIN_ID}.`
-        : `The vault sends deposits to inbox ${inbox}, but xGas ${XGAS_CHAIN_ID} uses inbox ${expected}. An enter right now would not arrive on this chain, so prepare_enter will not build one until the vault is switched.`,
-    };
+    inbox = await parent.readContract({ address: L3.xMoney, abi: VAULT_ABI, functionName: 'inbox' });
   } catch (e) {
-    return { vault_inbox: null, this_chain_inbox: expected, routes_to_this_chain: null, note: `Could not read the vault's inbox (${e.shortMessage || e.message}).` };
+    return { path: null, vault_inbox: null, this_chain_inbox: expected, routes_to_this_chain: null, note: `Could not read the vault's inbox (${e.shortMessage || e.message}), so this connector cannot tell which route reaches xGas ${XGAS_CHAIN_ID}. Nothing will be prepared until it can.` };
   }
+  if (same(inbox, expected)) {
+    return {
+      path: 'vault', vault_inbox: inbox, this_chain_inbox: expected, routes_to_this_chain: true,
+      note: `The vault sends deposits to inbox ${inbox}, which is xGas ${XGAS_CHAIN_ID}: deposits use vault.enterRollup.`,
+    };
+  }
+  let hInbox = null;
+  let err = null;
+  try { hInbox = await helperInbox(); } catch (e) { err = e.shortMessage || e.message; }
+  const helperOk = same(hInbox, expected);
+  return {
+    path: helperOk ? 'early_depositor' : null,
+    vault_inbox: inbox,
+    this_chain_inbox: expected,
+    routes_to_this_chain: false,
+    early_depositor: EARLY_DEPOSITOR,
+    early_depositor_inbox: hInbox,
+    note: helperOk
+      ? `The vault's own enterRollup still targets inbox ${inbox}, not xGas ${XGAS_CHAIN_ID}'s inbox ${expected} (the vault's timelocked switch has not executed). Deposits go through EarlyDepositor ${EARLY_DEPOSITOR}, which mints from the vault and opens the retryable on this chain's inbox itself.`
+      : `The vault targets inbox ${inbox}, not xGas ${XGAS_CHAIN_ID}'s inbox ${expected}, and EarlyDepositor ${EARLY_DEPOSITOR} ${err ? `could not be read (${err})` : `targets inbox ${hInbox}`}. No deposit route reaches this chain right now, so nothing will be prepared.`,
+  };
 }
 
 // EIP-7702: an EOA that has delegated to code carries 0xef0100 || delegate as its code.
@@ -45,12 +69,15 @@ const DELEGATION_PREFIX = '0xef0100';
 const ALIAS_WARNING = 'Do not bridge by calling inbox.depositERC20 directly from a smart account, including an EIP-7702 '
   + 'delegated EOA, or through a relayer or bundler: when the caller has code or is not tx.origin, the Inbox credits the '
   + 'ALIASED address (yours plus 0x1111000000000000000000000000000000001111) on xGas, not yours. This tool uses '
-  + 'vault.enterRollup, which names the recipient as the ticket destination, so the $xMoney lands at the recipient shown here.';
+  + 'EarlyDepositor.deposit until the vault switch and vault.enterRollup after it; both name the recipient as the ticket '
+  + 'destination, so the $xMoney lands at the recipient shown here.';
 async function accountKind(address) {
-  const code = await parent.getCode({ address }).catch(() => null);
-  if (code == null) return 'unknown';
-  if (code === '0x') return 'eoa';
-  return code.toLowerCase().startsWith(DELEGATION_PREFIX) ? 'eip7702' : 'contract';
+  // viem returns undefined (not '0x') for an address with no code; only a failed read is 'unknown'.
+  let code;
+  try { code = await parent.getCode({ address }); } catch { return 'unknown'; }
+  if (!code || code === '0x') return 'eoa';
+  // EarlyDepositor accepts exactly this shape (23 bytes, 0xef0100 || delegate) and rejects any other code.
+  return code.toLowerCase().startsWith(DELEGATION_PREFIX) && code.length === 2 + 23 * 2 ? 'eip7702' : 'contract';
 }
 
 /** Mirrors XMoney._deposit + _grossXMoneyFor exactly, against live reserve and supply. */
@@ -68,6 +95,64 @@ async function enterMath(usdgWei) {
   const bufferToBridge = entryBurn / 2n;
   const burnToDead = entryBurn - bufferToBridge;
   return { usdgWei, usdgRake, netUsdgToReserve, gross, entryBurn, net, bufferToBridge, burnToDead, usdgReserve, circulating };
+}
+
+// A plain value retry on 466302 uses about 21.2k gas (NodeInterface estimate). Only for the "about" figure;
+// the guaranteed minimum below does not depend on it.
+const EST_REDEEM_GAS = 21_200n;
+
+/**
+ * What actually lands on xGas, per route.
+ *   early_depositor: the vault mints `net` to the helper; the helper -> inbox transfer pays the 1 bp xMoney tax
+ *     (the new inbox is not yet a bridge-system address), so the deposit D = net - net/1e4. The helper's retryable
+ *     pays l2CallValue = D - gasLimit*maxFeePerGas and refunds the unused gas to the recipient (never aliased).
+ *   vault: D = net (inbox is bridge-system, untaxed); l2CallValue = D - l3GasLimit*l3MaxFeePerGas, unused gas refunded
+ *     to the recipient, or to its alias when the recipient has code on the parent chain.
+ * guaranteed = l2CallValue; about = D - ~21.2k * current L3 base fee.
+ */
+async function enterQuote(usdgWei, route) {
+  const r = route || await vaultRoute();
+  const early = r.path === 'early_depositor';
+  const read = (address, abi, functionName) => parent.readContract({ address, abi, functionName });
+  const gas = early
+    ? Promise.all([read(EARLY_DEPOSITOR, EARLY_DEPOSITOR_ABI, 'defaultGasLimit'), read(EARLY_DEPOSITOR, EARLY_DEPOSITOR_ABI, 'defaultMaxFeePerGas')])
+    : Promise.all([read(L3.xMoney, VAULT_ABI, 'l3GasLimit'), read(L3.xMoney, VAULT_ABI, 'l3MaxFeePerGas')]);
+  const [m, [gasLimit, maxFeePerGas], l3BaseFee] = await Promise.all([
+    enterMath(usdgWei),
+    gas.catch(() => [null, null]),
+    xgas.getBlock().then((b) => b.baseFeePerGas ?? null).catch(() => null),
+  ]);
+  const inboxTax = early ? (m.net * BURN_BPS) / BPS : 0n;
+  const l3Deposit = m.net - inboxTax;
+  const gasPrepay = gasLimit != null && maxFeePerGas != null ? gasLimit * maxFeePerGas : null;
+  const tooSmall = gasPrepay != null && l3Deposit <= gasPrepay;
+  const guaranteed = gasPrepay != null && !tooSmall ? l3Deposit - gasPrepay : null;
+  const redeemFee = l3BaseFee != null ? EST_REDEEM_GAS * l3BaseFee : null;
+  const about = !tooSmall && redeemFee != null && l3Deposit > redeemFee ? l3Deposit - redeemFee : null;
+  return { ...m, path: r.path, early, inboxTax, l3Deposit, gasLimit, maxFeePerGas, gasPrepay, tooSmall, guaranteed, l3BaseFee, redeemFee, about, route: r };
+}
+
+/** One line on what lands, for quotes and approval screens. */
+function creditLine(q, { refundAliased = false } = {}) {
+  if (q.tooSmall) return `nothing: the deposit (${fmtXMoney(q.l3Deposit)} xMoney) does not cover the L3 gas prepayment (${fmtXMoney(q.gasPrepay)}), so it would revert`;
+  if (refundAliased && q.guaranteed != null) return `${fmtXMoney(q.guaranteed)} $xMoney as native gas on xGas L4 (the unused-gas refund goes to the aliased address, not the recipient)`;
+  if (q.about != null && q.guaranteed != null) return `about ${fmtXMoney(q.about)} $xMoney as native gas on xGas L4 (at least ${fmtXMoney(q.guaranteed)})`;
+  if (q.guaranteed != null) return `at least ${fmtXMoney(q.guaranteed)} $xMoney as native gas on xGas L4`;
+  return `${fmtXMoney(q.l3Deposit)} $xMoney minus L3 gas (the retryable gas parameters could not be read)`;
+}
+
+function creditFees(q) {
+  const fees = [
+    { label: 'USDG rake to the Fanout', amount: `${fmtUsdg(q.usdgRake)} USDG`, note: '0.01%' },
+    { label: 'xMoney entry burn', amount: `${fmtXMoney(q.entryBurn)} xMoney`, note: `0.01%: ${fmtXMoney(q.burnToDead)} to 0x…dEaD, ${fmtXMoney(q.bufferToBridge)} minted to the vault's bridge as solvency buffer` },
+  ];
+  if (q.early) fees.push({ label: 'xMoney transfer tax into the inbox', amount: `${fmtXMoney(q.inboxTax)} xMoney`, note: '0.01%, burned: until the vault switch the new inbox is not a tax-exempt bridge address' });
+  fees.push({
+    label: 'L3 gas for the auto-redeem',
+    amount: q.redeemFee != null ? `about ${fmtXMoney(q.redeemFee)} xMoney` : 'a few millionths of an xMoney',
+    note: q.gasPrepay != null ? `${fmtXMoney(q.gasPrepay)} is prepaid (${q.gasLimit} gas at ${q.maxFeePerGas} wei) and the unused part is refunded` : 'prepaid out of the deposit, unused part refunded',
+  });
+  return fees;
 }
 
 /** Mirrors XMoney.exitRollup, and adds the bridge-exit transfer burn the user pays on the way out. */
@@ -246,11 +331,6 @@ function humanDuration(seconds) {
   return `${h}h${m ? ` ${m}m` : ''}`;
 }
 
-const ENTER_TIMELINE = [
-  'vault_locked: the parent transaction confirms and USDG is in the vault',
-  'ticket_created: the vault creates an auto-redeeming retryable ticket to your address on xGas',
-  'landed_on_xgas: ~1 minute later the $xMoney arrives as native gas; excess L4 gas is refunded to you',
-];
 
 const exitTimeline = (w) => [
   'burned_on_xgas: ArbSys.withdrawEth burns your native $xMoney and emits L2ToL1Tx (minutes)',
@@ -264,34 +344,56 @@ const exitTimeline = (w) => [
   'usdg_redeemed: exitRollup burns the parent xMoney and pays USDG',
 ];
 
+const enterTimeline = (early) => [
+  early
+    ? 'minted_and_sent: the parent transaction confirms; EarlyDepositor has pulled your USDG, minted $xMoney from the vault and handed it to the xGas inbox'
+    : 'vault_locked: the parent transaction confirms and USDG is in the vault',
+  `ticket_created: ${early ? 'EarlyDepositor' : 'the vault'} creates an auto-redeeming retryable ticket to your address on xGas`,
+  'landed_on_xgas: ~1 minute later the $xMoney arrives as native gas; unused L3 gas is refunded to you',
+];
+
 export const tools = [
   {
     name: 'quote_enter',
-    description: 'Quote USDG → $xMoney on xGas: the USDG rake, the entry burn and its split, and the net $xMoney that lands as native gas. Read-only, nothing is signed.',
+    description: 'Quote USDG → $xMoney on xGas: which route deposits take right now (EarlyDepositor until the vault switch, vault.enterRollup after), the USDG rake, the entry burn, the pre-switch inbox transfer tax, the L3 gas, and the $xMoney that lands as native gas. Read-only, nothing is signed.',
     inputSchema: { type: 'object', properties: { usdg_amount: amount('USDG to bridge in, e.g. "250" or "250.50".') }, required: ['usdg_amount'], additionalProperties: false },
     async handler({ usdg_amount }) {
-      const [m, route] = await Promise.all([enterMath(parseUsdg(usdg_amount)), vaultRoute()]);
+      const q = await enterQuote(parseUsdg(usdg_amount));
+      const route = q.route;
+      const via = q.early ? `EarlyDepositor ${EARLY_DEPOSITOR}` : q.path === 'vault' ? `vault.enterRollup (${L3.xMoney})` : 'no route (see vault_route)';
       const data = {
-        you_pay: `${fmtUsdg(m.usdgWei)} USDG`,
-        you_receive: `${fmtXMoney(m.net)} $xMoney on xGas L4 (native gas)`,
-        fees: {
-          usdg_rake_to_fanout: `${fmtUsdg(m.usdgRake)} USDG (0.01%)`,
-          xmoney_entry_burn: `${fmtXMoney(m.entryBurn)} xMoney (0.01%)`,
-          burn_to_dead: fmtXMoney(m.burnToDead),
-          minted_to_bridge_as_buffer: fmtXMoney(m.bufferToBridge),
+        route: q.path,
+        via,
+        you_pay: `${fmtUsdg(q.usdgWei)} USDG`,
+        you_receive: creditLine(q),
+        fees: Object.fromEntries(creditFees(q).map((f) => [f.label, `${f.amount}${f.note ? ` (${f.note})` : ''}`])),
+        amounts: {
+          minted_xmoney: fmtXMoney(q.net),
+          inbox_transfer_tax: fmtXMoney(q.inboxTax),
+          deposited_to_xgas: fmtXMoney(q.l3Deposit),
+          l3_gas_prepay: q.gasPrepay != null ? fmtXMoney(q.gasPrepay) : null,
+          guaranteed_credit: q.guaranteed != null ? fmtXMoney(q.guaranteed) : null,
+          estimated_credit: q.about != null ? fmtXMoney(q.about) : null,
         },
-        vault_state: { usdg_reserve: fmtUsdg(m.usdgReserve), circulating_xmoney: fmtXMoney(m.circulating) },
+        vault_state: { usdg_reserve: fmtUsdg(q.usdgReserve), circulating_xmoney: fmtXMoney(q.circulating) },
         eta: '~1 minute to land on xGas',
         vault_route: route,
         deposits_paused: DEPOSITS_PAUSED,
         smart_account_warning: ALIAS_WARNING,
-        raw: { net_wei: m.net, gross_wei: m.gross, usdg_rake_raw: m.usdgRake },
+        raw: {
+          net_minted_wei: q.net, l3_deposit_wei: q.l3Deposit, guaranteed_wei: q.guaranteed, estimated_wei: q.about,
+          gross_wei: q.gross, usdg_rake_raw: q.usdgRake,
+        },
       };
       return reply(
-        `Pay ${fmtUsdg(m.usdgWei)} USDG → receive ${fmtXMoney(m.net)} $xMoney as native gas on xGas L4, ~1 minute.\nFees: ${fmtUsdg(m.usdgRake)} USDG to the Fanout, ${fmtXMoney(m.entryBurn)} xMoney entry burn (${fmtXMoney(m.burnToDead)} dead, ${fmtXMoney(m.bufferToBridge)} to the bridge buffer).\nYou arrive holding gas; there is no faucet step.`
-          + (route.routes_to_this_chain === false ? `\nNot open yet: ${route.note}` : '')
+        `Pay ${fmtUsdg(q.usdgWei)} USDG → receive ${creditLine(q)}, ~1 minute. Route: ${via}.\n`
+          + `Fees: ${fmtUsdg(q.usdgRake)} USDG to the Fanout, ${fmtXMoney(q.entryBurn)} xMoney entry burn`
+          + (q.early ? `, ${fmtXMoney(q.inboxTax)} xMoney transfer tax into the inbox (until the vault switch)` : '')
+          + `, and the L3 gas for the auto-redeem${q.redeemFee != null ? ` (about ${fmtXMoney(q.redeemFee)})` : ''}.\n`
+          + 'You arrive holding gas; there is no faucet step.'
+          + (q.path == null ? `\nNot open right now: ${route.note}` : q.early ? `\n${route.note}` : '')
           + (DEPOSITS_PAUSED ? `\n${DEPOSITS_PAUSED_MSG}` : '')
-          + '\nBridge through prepare_enter (vault.enterRollup with an explicit recipient), not a direct inbox deposit: from a smart account or EIP-7702 wallet a direct deposit lands at an aliased address.',
+          + '\nBridge through prepare_enter (it names the recipient explicitly), not a direct inbox deposit: from a smart account or EIP-7702 wallet a direct deposit lands at an aliased address.',
         data,
       );
     },
@@ -299,13 +401,13 @@ export const tools = [
 
   {
     name: 'prepare_enter',
-    description: 'Prepare the unsigned transactions for USDG → $xMoney. Returns an ERC-20 approve first when allowance is short, then vault.enterRollup with an explicit recipient (safe from smart accounts and EIP-7702 wallets, unlike a direct inbox deposit). Refuses while the vault does not route to this chain. Signs nothing.',
+    description: 'Prepare the unsigned transactions for USDG → $xMoney. Until the XMoney vault\'s timelocked switch to this chain\'s inbox, that is USDG.approve(EarlyDepositor, exact amount) then EarlyDepositor.deposit(amount, recipient); after it, USDG.approve(vault) then vault.enterRollup(amount, recipient). The approve is skipped when allowance already covers the amount. Both name the recipient explicitly (safe from smart accounts and EIP-7702 wallets, unlike a direct inbox deposit). Refuses when no route reaches this chain. Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
         usdg_amount: amount('USDG to bridge in.'),
         from: { ...addr, description: 'The address that will sign and hold the USDG.' },
-        l3_recipient: { ...addr, description: 'Who receives $xMoney on xGas. Defaults to `from`. Required when `from` is a contract wallet (not an EOA or an EIP-7702 EOA), because the same address on xGas is not necessarily yours.' },
+        l3_recipient: { ...addr, description: 'Who receives $xMoney on xGas. Defaults to `from`. Must be an EOA or an EIP-7702 delegated EOA: a contract wallet address (Safe or similar) has no key on xGas, and EarlyDepositor rejects it.' },
       },
       required: ['usdg_amount', 'from'],
       additionalProperties: false,
@@ -318,78 +420,110 @@ export const tools = [
       if (!isAddress(recipient)) throw new Error(`l3_recipient is not an address: ${l3_recipient}`);
       const usdgWei = parseUsdg(usdg_amount);
 
-      const [balance, allowance, route, fromKind, recipientKind] = await Promise.all([
+      const route = await vaultRoute();
+      if (route.path == null) {
+        return reply(`Nothing prepared. ${route.note}`, { blocked: 'no_route_to_this_chain', ...route });
+      }
+      const early = route.path === 'early_depositor';
+      const spender = early ? EARLY_DEPOSITOR : L3.xMoney;
+
+      const [balance, allowance, fromKind, recipientKind] = await Promise.all([
         parent.readContract({ address: L3.usdg, abi: ERC20_ABI, functionName: 'balanceOf', args: [from] }),
-        parent.readContract({ address: L3.usdg, abi: ERC20_ABI, functionName: 'allowance', args: [from, L3.xMoney] }),
-        vaultRoute(),
+        parent.readContract({ address: L3.usdg, abi: ERC20_ABI, functionName: 'allowance', args: [from, spender] }),
         accountKind(from),
         explicitRecipient ? accountKind(recipient) : null,
       ]);
-      const recipientHasCode = ['eip7702', 'contract'].includes(explicitRecipient ? recipientKind : fromKind);
-      if (route.routes_to_this_chain !== true) {
-        return reply(`Nothing prepared. ${route.note}`, { blocked: 'vault_not_routed_to_this_chain', ...route });
-      }
+      const rKind = explicitRecipient ? recipientKind : fromKind;
       if (fromKind === 'contract' && !explicitRecipient) {
         return reply(
-          `Nothing prepared. ${from} is a contract wallet on the parent chain, and the same address on xGas is not necessarily controlled by you. Pass l3_recipient explicitly (an address you control on xGas).`,
+          `Nothing prepared. ${from} is a contract wallet on the parent chain, and the same address on xGas is not necessarily controlled by you. Pass l3_recipient explicitly (an EOA you control on xGas).`,
           { blocked: 'contract_sender_needs_explicit_recipient', from, from_kind: fromKind },
         );
+      }
+      if (early && rKind === 'contract') {
+        return reply(
+          `Nothing prepared. ${recipient} is a contract on the parent chain (not an EOA or an EIP-7702 delegated EOA). EarlyDepositor rejects it (RecipientIsContract), because a contract address has no key on xGas and funds sent there would be unreachable. Pass an EOA you control as l3_recipient.`,
+          { blocked: 'recipient_is_contract', recipient, recipient_kind: rKind },
+        );
+      }
+      if (rKind === 'unknown') {
+        return reply(`Nothing prepared. Could not read ${recipient}'s code on the parent chain, so this connector cannot tell whether it is a contract that has no key on xGas. Retry.`,
+          { blocked: 'recipient_kind_unknown', recipient });
       }
       if (balance < usdgWei) {
         return reply(`${from} holds ${fmtUsdg(balance)} USDG on the parent chain but this enter needs ${fmtUsdg(usdgWei)}. Nothing prepared.`,
           { blocked: 'insufficient_usdg', holds: fmtUsdg(balance), needs: fmtUsdg(usdgWei) });
       }
 
-      const m = await enterMath(usdgWei);
+      const q = await enterQuote(usdgWei, route);
+      if (q.tooSmall) {
+        return reply(`Nothing prepared. ${fmtUsdg(usdgWei)} USDG deposits ${fmtXMoney(q.l3Deposit)} xMoney, which does not cover the L3 gas prepayment of ${fmtXMoney(q.gasPrepay)}; the deposit would revert. Deposit more.`,
+          { blocked: 'deposit_too_small', l3_deposit: fmtXMoney(q.l3Deposit), gas_prepay: fmtXMoney(q.gasPrepay) });
+      }
+      // Through the vault, the Inbox aliases the refund addresses of a recipient with code; EarlyDepositor never does.
+      const refundAliased = !early && ['eip7702', 'contract'].includes(rKind);
+
       const steps = [];
       if (allowance < usdgWei) {
         steps.push({
-          label: `Approve the vault to spend ${fmtUsdg(usdgWei)} USDG`,
+          label: `Approve ${early ? 'EarlyDepositor' : 'the vault'} to spend exactly ${fmtUsdg(usdgWei)} USDG`,
           chainId: PARENT_CHAIN_ID,
           to: L3.usdg,
-          data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [L3.xMoney, usdgWei] }),
+          data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [spender, usdgWei] }),
           value: 0n,
         });
       }
-      steps.push({
-        label: `enterRollup ${fmtUsdg(usdgWei)} USDG to ${recipient}`,
-        chainId: PARENT_CHAIN_ID,
-        to: L3.xMoney,
-        data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'enterRollup', args: [usdgWei, recipient] }),
-        value: 0n,
-      });
+      steps.push(early
+        ? {
+          label: `EarlyDepositor.deposit ${fmtUsdg(usdgWei)} USDG to ${recipient} on xGas ${XGAS_CHAIN_ID}`,
+          chainId: PARENT_CHAIN_ID,
+          to: EARLY_DEPOSITOR,
+          data: encodeFunctionData({ abi: EARLY_DEPOSITOR_ABI, functionName: 'deposit', args: [usdgWei, recipient] }),
+          value: 0n,
+        }
+        : {
+          label: `enterRollup ${fmtUsdg(usdgWei)} USDG to ${recipient}`,
+          chainId: PARENT_CHAIN_ID,
+          to: L3.xMoney,
+          data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'enterRollup', args: [usdgWei, recipient] }),
+          value: 0n,
+        });
 
       const p = prepared({
         action: 'Bridge in: USDG → $xMoney on xGas L4',
         asset: 'USDG (parent chain) → native $xMoney (xGas L4)',
         amount: `${fmtUsdg(usdgWei)} USDG in`,
-        counterparty: `XMoney vault ${L3.xMoney}`,
-        fees: [
-          { label: 'USDG rake to the Fanout', amount: `${fmtUsdg(m.usdgRake)} USDG`, note: '0.01%' },
-          { label: 'xMoney entry burn', amount: `${fmtXMoney(m.entryBurn)} xMoney`, note: `0.01%: ${fmtXMoney(m.burnToDead)} to 0x…dEaD, ${fmtXMoney(m.bufferToBridge)} minted to the bridge as solvency buffer` },
-        ],
-        net: `${fmtXMoney(m.net)} $xMoney as native gas on xGas L4`,
-        timeline: ENTER_TIMELINE,
-        irreversible: 'enterRollup locks your USDG in the vault. Getting it back means the full exit path (withdraw on xGas, wait for the assertion window on the parent, execute the Outbox, then exitRollup).',
+        counterparty: early
+          ? `EarlyDepositor ${EARLY_DEPOSITOR} (no owner, holds nothing between calls), minting from the XMoney vault ${L3.xMoney}`
+          : `XMoney vault ${L3.xMoney}`,
+        fees: creditFees(q),
+        net: creditLine(q, { refundAliased }),
+        timeline: enterTimeline(early),
+        irreversible: `${early ? 'EarlyDepositor.deposit' : 'enterRollup'} locks your USDG in the vault. Getting it back means the full exit path (withdraw on xGas, wait for the assertion window on the parent, execute the Outbox, then exitRollup).`,
         notes: [
           allowance < usdgWei
-            ? 'Two signatures: the approve must confirm before enterRollup is sent.'
+            ? `Two signatures: the approve (exact amount, not unlimited) must confirm before ${early ? 'deposit' : 'enterRollup'} is sent.`
             : 'Allowance is already sufficient; one signature.',
-          `The $xMoney is credited to ${recipient} on xGas ${XGAS_CHAIN_ID}: enterRollup names it as the ticket destination, so the deposit itself is not aliased.`,
+          ...(early ? [route.note, 'EarlyDepositor sends the minted $xMoney to the xGas inbox; until the vault switch that transfer pays the 0.01% xMoney tax, shown in the fees.'] : []),
+          `The $xMoney is credited to ${recipient} on xGas ${XGAS_CHAIN_ID}: ${early ? 'EarlyDepositor' : 'enterRollup'} names it as the ticket destination, so the deposit itself is not aliased.`,
           ...(fromKind === 'eip7702' ? [`${from} is an EIP-7702 delegated account. ${ALIAS_WARNING}`] : []),
-          ...(recipientHasCode
+          ...(early && rKind === 'eip7702'
+            ? [`${recipient} is an EIP-7702 delegated account. EarlyDepositor opens the ticket with unaliased refund addresses, so the gas refund also goes to ${recipient}, which the same key controls on xGas.`]
+            : []),
+          ...(refundAliased
             ? [`${recipient} has code on the parent chain, so the Inbox aliases the ticket's refund addresses: the small unused-gas refund goes to the aliased address, and if the auto-redeem ever fails only the aliased address can cancel the ticket. Anyone can still redeem it, which delivers to ${recipient}.`]
             : []),
         ],
         steps,
       });
+      p.route = route.path;
       return reply(renderApproval(p), p);
     },
   },
 
   {
     name: 'submit_enter',
-    description: 'Broadcast the signed enter transactions in order (approve, then enterRollup). The idempotency key makes a retry return the first result instead of sending twice.',
+    description: 'Broadcast the signed enter transactions in order (approve, then EarlyDepositor.deposit or vault.enterRollup, as prepare_enter returned them). The idempotency key makes a retry return the first result instead of sending twice.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -414,11 +548,11 @@ export const tools = [
 
   {
     name: 'get_enter_status',
-    description: 'Where a USDG → $xMoney bridge-in stands: vault_locked, ticket_created, landed_on_xgas. Pass the recipient balance you recorded before entering to get proof of landing rather than a guess.',
+    description: 'Where a USDG → $xMoney bridge-in stands: vault_locked, ticket_created, landed_on_xgas. Reads both routes (EarlyDepositor.deposit and vault.enterRollup). Pass the recipient balance you recorded before entering to get proof of landing rather than a guess.',
     inputSchema: {
       type: 'object',
       properties: {
-        tx_hash: { type: 'string', description: 'The enterRollup transaction hash on the parent chain.' },
+        tx_hash: { type: 'string', description: 'The deposit (EarlyDepositor.deposit or enterRollup) transaction hash on the parent chain.' },
         balance_before_wei: { type: 'string', description: "Optional: the recipient's xGas balance in wei just before entering. Without it the connector reports the ticket but will not claim the funds landed." },
       },
       required: ['tx_hash'],
@@ -431,39 +565,59 @@ export const tools = [
       if (receipt.status !== 'success') return reply(`Parent tx ${tx_hash} reverted. No USDG was locked.`, { status: 'reverted', tx_hash });
 
       let entered = null;
+      let early = null;
       for (const log of receipt.logs) {
-        if (log.address.toLowerCase() !== L3.xMoney.toLowerCase()) continue;
+        const at = log.address.toLowerCase();
         try {
-          const d = decodeEventLog({ abi: VAULT_ABI, data: log.data, topics: log.topics });
-          if (d.eventName === 'RollupEntered') entered = d.args;
+          if (at === EARLY_DEPOSITOR.toLowerCase()) {
+            const d = decodeEventLog({ abi: EARLY_DEPOSITOR_ABI, data: log.data, topics: log.topics });
+            if (d.eventName === 'EarlyDeposit') early = d.args;
+          } else if (at === L3.xMoney.toLowerCase()) {
+            const d = decodeEventLog({ abi: VAULT_ABI, data: log.data, topics: log.topics });
+            if (d.eventName === 'RollupEntered') entered = d.args;
+          }
         } catch { /* not our event */ }
       }
-      if (!entered) return reply(`Parent tx ${tx_hash} succeeded but carries no RollupEntered event, so this is not an enterRollup.`, { status: 'not_an_enter', tx_hash });
+      // An EarlyDepositor tx also carries the vault's RollupEntered, but that one names the helper as recipient.
+      const norm = early
+        ? {
+          route: 'early_depositor', recipient: early.l3Recipient, expected: early.l2CallValue, ticket: early.ticketId,
+          usdg_in: fmtUsdg(early.usdgIn), minted: fmtXMoney(early.xMoneyMinted), deposited: fmtXMoney(early.l3Deposit),
+          raked: entered ? fmtUsdg(entered.usdgRaked) : null, burned: entered ? fmtXMoney(entered.xMoneyBurned) : null,
+          ticketed: true,
+        }
+        : entered
+          ? {
+            route: 'vault', recipient: entered.l3Recipient, expected: entered.xMoneyBridged, ticket: entered.retryableTicketId,
+            usdg_in: fmtUsdg(entered.usdgIn), minted: null, deposited: null,
+            raked: fmtUsdg(entered.usdgRaked), burned: fmtXMoney(entered.xMoneyBurned),
+            ticketed: !!(entered.retryableTicketId && entered.retryableTicketId !== 0n),
+          }
+          : null;
+      if (!norm) return reply(`Parent tx ${tx_hash} succeeded but carries neither an EarlyDeposit nor a RollupEntered event, so it is not a deposit.`, { status: 'not_an_enter', tx_hash });
 
-      const recipient = entered.l3Recipient;
-      const expected = entered.xMoneyBridged;
-      const live = await xgas.getBalance({ address: recipient });
+      const live = await xgas.getBalance({ address: norm.recipient });
       const before = balance_before_wei ? BigInt(balance_before_wei) : null;
-      const landed = before !== null && live - before >= expected;
-
-      const status = entered.retryableTicketId && entered.retryableTicketId !== 0n
-        ? (landed ? 'landed_on_xgas' : 'ticket_created')
-        : 'vault_locked';
+      const landed = before !== null && live - before >= norm.expected;
+      const status = norm.ticketed ? (landed ? 'landed_on_xgas' : 'ticket_created') : 'vault_locked';
       const data = {
         status,
+        route: norm.route,
         tx_hash,
-        recipient,
-        usdg_in: fmtUsdg(entered.usdgIn),
-        xmoney_bridged: fmtXMoney(expected),
-        usdg_raked: fmtUsdg(entered.usdgRaked),
-        xmoney_burned: fmtXMoney(entered.xMoneyBurned),
-        retryable_ticket_id: entered.retryableTicketId,
+        recipient: norm.recipient,
+        usdg_in: norm.usdg_in,
+        xmoney_minted: norm.minted,
+        xmoney_deposited_to_xgas: norm.deposited,
+        xmoney_bridged_call_value: fmtXMoney(norm.expected),
+        usdg_raked: norm.raked,
+        xmoney_burned: norm.burned,
+        retryable_ticket_id: norm.ticket,
         recipient_xgas_balance: fmtXMoney(live),
         proof: before === null
           ? 'No balance_before_wei was given, so landing is unverified. Call again with the pre-enter balance, or just check get_balance.'
-          : landed ? `Balance rose by at least ${fmtXMoney(expected)}.` : 'Balance has not risen by the bridged amount yet; the auto-redeem usually takes about a minute.',
+          : landed ? `Balance rose by at least ${fmtXMoney(norm.expected)}.` : 'Balance has not risen by the bridged amount yet; the auto-redeem usually takes about a minute.',
       };
-      return reply(`${status}: ${fmtUsdg(entered.usdgIn)} USDG in, ${fmtXMoney(expected)} $xMoney to ${recipient}. ${data.proof}`, data);
+      return reply(`${status}: ${norm.usdg_in} USDG in via ${norm.route === 'early_depositor' ? 'EarlyDepositor' : 'the vault'}, at least ${fmtXMoney(norm.expected)} $xMoney to ${norm.recipient}. ${data.proof}`, data);
     },
   },
 
@@ -684,4 +838,4 @@ export const tools = [
   },
 ];
 
-export { enterMath, exitMath };
+export { enterMath, enterQuote, exitMath, vaultRoute };

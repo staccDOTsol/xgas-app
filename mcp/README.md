@@ -56,7 +56,7 @@ Environment overrides, all optional:
 | `XGAS_RPC` | `publicRpcUrl` from the deployment | xGas L4 RPC |
 | `XGAS_API` | `https://xgas.dev` | the host that runs the Outbox executor and serves `/api/l4-info` |
 | `XGAS_NGU_LAUNCHER` | unset | the NguLauncher address, until it is in the deployment file |
-| `XGAS_DEPOSITS_PAUSED` | unset (deposits open) | set to `1` to make `prepare_enter` and `submit_enter` refuse |
+| `XGAS_DEPOSITS_PAUSED` | unset (deposits open, through EarlyDepositor or the vault) | set to `1` to make `prepare_enter` and `submit_enter` refuse |
 | `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
 | `XSWAP_INTENTS` | `0xf8B4…9a35` | the X-Money-in escrow on the parent chain |
 | `XSWAP_ASKS` | `0x0a33…Cd13` | the X-Money-out escrow on the parent chain |
@@ -77,10 +77,39 @@ its exits and Outbox claims keep working, and the deployment file keeps its addr
 - **Validation is permissionless.** The validator whitelist is disabled. Anyone who runs a node
   and posts the stake can assert and challenge. If the xGas validators stop, exits do not depend
   on them, but they then wait the full challenge window.
-- **Deposits.** `prepare_enter` builds `vault.enterRollup(amount, recipient)` and refuses while
-  the vault's inbox is not this chain's inbox. Do not deposit by calling `inbox.depositERC20`
-  directly from a smart account or an EIP-7702 delegated EOA: the Inbox credits the aliased
-  address, not yours. `enterRollup` names the recipient explicitly, so it is safe from either.
+- **Deposits go through EarlyDepositor until the vault switch.** The XMoney vault
+  (`0xa924…a97E`) still points `enterRollup` at the retired 466301 inbox until its timelocked
+  `setBridgeSystem` executes (executable 2026-09-27 08:33Z). Every enter tool reads
+  `vault.inbox()` live:
+  - while it is not this chain's inbox (`0xa708…8146`), `prepare_enter` builds
+    `USDG.approve(EarlyDepositor, exact amount)` then `EarlyDepositor.deposit(amount, recipient)`.
+    EarlyDepositor (`l3.earlyDepositor`, `0x36e5…4d431`; no owner, holds nothing between calls)
+    mints from the vault with `enterRollupToL2`, sends the $xMoney to the 466302 inbox and opens one
+    retryable to the recipient. `quote_enter` charges what that costs: the 0.01% USDG rake, the
+    0.01% entry burn, the 0.01% xMoney transfer tax on the helper-to-inbox transfer (the new inbox
+    is not tax-exempt until the switch), and the L3 gas for the auto-redeem. It quotes a
+    guaranteed minimum (the ticket's call value) and an estimate (the deposit minus about 21.2k gas
+    at the current L3 base fee, since unused gas is refunded to the recipient).
+  - once it is, `prepare_enter` builds `USDG.approve(vault)` then `vault.enterRollup(amount, recipient)`,
+    with no transfer tax.
+  - if neither route can be shown to reach 466302, nothing is prepared.
+  The approve is for the exact amount and is skipped when the allowance already covers it.
+  `get_enter_status` reads both an `EarlyDeposit` and a `RollupEntered`.
+- **The EIP-7702 alias warning.** Do not deposit by calling `inbox.depositERC20` directly from a
+  smart account, from an EIP-7702 delegated EOA, or through a relayer or bundler: when the caller
+  has code or is not `tx.origin`, the Inbox credits the *aliased* address (yours plus
+  `0x1111000000000000000000000000000000001111`), which your key does not control on xGas. Both
+  routes above name the recipient explicitly, so the deposit lands at the recipient. The recipient
+  must be an EOA or an EIP-7702 delegated EOA: EarlyDepositor rejects any other contract
+  (`RecipientIsContract`), because a Safe or similar address has no key on xGas, and
+  `prepare_enter` refuses one before you sign. EarlyDepositor also leaves the ticket's refund
+  addresses unaliased, so a 7702 recipient gets its gas refund too. Through the vault a 7702
+  recipient's refund goes to the aliased address, and the approval screen says so.
+- **RPC chain check.** On start (stdio and hosted) the connector reads `eth_chainId` from the
+  configured xGas RPC and parent RPC. If either is not the deployment's chain (466302, parent
+  4663), it logs loudly and every write tool (`prepare_*`, `submit_*`, OTC and NGU writes,
+  `claim_exit`, `ramp_start`, `wallet_execute`) refuses with the reason. Read tools keep working
+  so the problem can be seen. An unreachable RPC also blocks writes and is re-checked after 15 s.
 - **L4 contracts.** Anything missing from `l4.*` is reported by `get_chain_info`, and every
   `prepare_*` refuses to build a transaction with no target rather than hand a wallet a contract
   creation.
@@ -174,6 +203,12 @@ never claims the money moved.
 ## Verification
 
 `npm run check` exercises the real MCP stdio transport against both live chains.
+
+`npm run check:deployment` checks the app's deployment file, and `prepublishOnly` runs the same
+check on the copy it packs. It exits non-zero on the wrong chain id, a missing core address, any
+null or empty `l4.*` app address, a missing `l3.earlyDepositor`, or a `_placeholders` key anywhere
+in the file. `ALLOW_PLACEHOLDERS=1` turns the last three into warnings, for a local look at a chain
+that is still being deployed; never publish with it.
 
 The NGU tools have no launcher on xGas yet, so they were verified against a local
 anvil at the xGas chain id (466302 now) with a real `NguLauncher` and curve: buy with buffer,

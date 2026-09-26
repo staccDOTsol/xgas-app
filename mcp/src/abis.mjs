@@ -21,6 +21,9 @@ export const VAULT_ABI = parseAbi([
   'function inbox() view returns (address)',
   'function l4GasLimit() view returns (uint256)',
   'function l4MaxFeePerGas() view returns (uint256)',
+  // The deployed vault (0xa924…a97E) names its retryable gas params l3*, not l4*.
+  'function l3GasLimit() view returns (uint256)',
+  'function l3MaxFeePerGas() view returns (uint256)',
   'function totalXMoneyBurned() view returns (uint256)',
   'function totalUsdgRakedToFanout() view returns (uint256)',
   'function totalUsdgDeposited() view returns (uint256)',
@@ -28,6 +31,19 @@ export const VAULT_ABI = parseAbi([
   'function totalBridgeBuffer() view returns (uint256)',
   'event RollupEntered(address indexed user, address indexed l3Recipient, uint256 usdgIn, uint256 xMoneyBridged, uint256 usdgRaked, uint256 xMoneyBurned, uint256 retryableTicketId)',
   'event RollupExited(address indexed user, uint256 xMoneyBurned, uint256 usdgReturned, uint256 usdgRaked)',
+]);
+
+// EarlyDepositor on Robinhood: USDG -> vault.enterRollupToL2 -> this chain's ERC20Inbox, one retryable to the
+// recipient (never aliased). Source: relaunch-466302/early/src/EarlyDepositor.sol.
+export const EARLY_DEPOSITOR_ABI = parseAbi([
+  'function deposit(uint256 usdgAmount, address l3Recipient) returns (uint256 ticketId)',
+  'function INBOX() view returns (address)',
+  'function defaultGasLimit() view returns (uint256)',
+  'function defaultMaxFeePerGas() view returns (uint256)',
+  'function bridgeDeficit() view returns (uint256)',
+  'event EarlyDeposit(address indexed sender, address indexed l3Recipient, uint256 indexed ticketId, uint256 usdgIn, uint256 xMoneyMinted, uint256 l3Deposit, uint256 l2CallValue, uint256 bridgeReceived, uint256 gasLimit, uint256 maxFeePerGas)',
+  'error RecipientIsContract(address recipient)',
+  'error DepositTooSmall(uint256 l3Deposit, uint256 gasPrepay)',
 ]);
 
 export const ARBSYS_ABI = parseAbi([
