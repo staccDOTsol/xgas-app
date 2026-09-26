@@ -93,6 +93,7 @@ const DEPOSITS_PAUSED_MSG = 'Deposits are paused for now. Nothing you already ho
 // XMoney: the vault + gas token on Robinhood. enterRollup bridges to the Orbit L4 in the same tx.
 const XUSD_VAULT_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
+  'function inbox() view returns (address)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function enterRollup(uint256 usdgAmount, address l3Recipient) returns (uint256)',
   'function exitRollup(uint256 xMoneyAmount) returns (uint256)',
@@ -541,6 +542,12 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     try {
       const rawUnits = BigInt(Math.round(parseFloat(vaultAmount) * 1e6));
       if (rawUnits <= 0n) throw new Error('Enter a USDG amount');
+      // enterRollup sends to whatever inbox the vault holds. Until its timelocked setBridgeSystem points it at this
+      // chain's inbox, a deposit would go to the retired chain (whose inbox is paused, so it would just revert).
+      const vaultInbox = await publicClient.readContract({ address: CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`, abi: XUSD_VAULT_ABI, functionName: 'inbox' });
+      if (vaultInbox.toLowerCase() !== CONTRACT_ADDRESSES.ORBIT_INBOX.toLowerCase()) {
+        throw new Error(`Deposits open once the XMoney vault points at chain #${L4_CHAIN_ID}. That switch sits on the vault's public 24 hour timelock and can execute from 2026-09-27 08:33 UTC. Nothing was sent.`);
+      }
       // Say what is actually missing before the wallet does. Without this, USDG's InsufficientFunds revert
       // reaches the user as "execution reverted for an unknown reason".
       const who = wallet.address as `0x${string}`;
