@@ -1,6 +1,7 @@
 // Auto-generated from forge artifacts (NguToken.sol / NguLauncher.sol).
 // Trimmed to the functions/events the frontend uses.
 export const NGU_TOKEN_ABI = [
+  {"type": "function","name": "BUYBACK_BPS","inputs": [],"outputs": [{"name": "","type": "uint16","internalType": "uint16"}],"stateMutability": "view"},
   {"type": "function","name": "balanceOf","inputs": [{"name": "account","type": "address","internalType": "address"}],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
   {"type": "function","name": "basePrice","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
   {"type": "function","name": "betaBps","inputs": [],"outputs": [{"name": "","type": "uint16","internalType": "uint16"}],"stateMutability": "view"},
@@ -32,6 +33,7 @@ export const NGU_TOKEN_ABI = [
 export const NGU_LAUNCHER_ABI = [
   {"type": "function","name": "allTokens","inputs": [{"name": "","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "","type": "address","internalType": "address"}],"stateMutability": "view"},
   {"type": "function","name": "allTokensLength","inputs": [],"outputs": [{"name": "","type": "uint256","internalType": "uint256"}],"stateMutability": "view"},
+  {"type": "function","name": "buybackSink","inputs": [],"outputs": [{"name": "","type": "address","internalType": "address"}],"stateMutability": "view"},
   {"type": "function","name": "fanoutSink","inputs": [],"outputs": [{"name": "","type": "address","internalType": "address"}],"stateMutability": "view"},
   {"type": "function","name": "isNguToken","inputs": [{"name": "","type": "address","internalType": "address"}],"outputs": [{"name": "","type": "bool","internalType": "bool"}],"stateMutability": "view"},
   {"type": "function","name": "launch","inputs": [{"name": "name","type": "string","internalType": "string"},{"name": "symbol","type": "string","internalType": "string"},{"name": "maxSupply","type": "uint256","internalType": "uint256"},{"name": "basePrice","type": "uint256","internalType": "uint256"},{"name": "stepBps","type": "uint16","internalType": "uint16"},{"name": "betaBps","type": "uint16","internalType": "uint16"},{"name": "seedQty","type": "uint256","internalType": "uint256"}],"outputs": [{"name": "token","type": "address","internalType": "address"}],"stateMutability": "payable"},

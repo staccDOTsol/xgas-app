@@ -1,7 +1,12 @@
 # Run your own xgas Orbit L4 node (chain 466301)
 
 The xgas Orbit L4 is an Arbitrum Orbit (Nitro, AnyTrust) chain whose parent is Robinhood Chain (#4663).
-Anyone can run a full node and verify state independently of xgas.dev.
+Anyone can run a full node and verify state independently of xgas.dev, as long as the node can fetch batch data.
+
+> **Status, 26 Sep 2026: the batch-data endpoint is down.** The rest-aggregator URL below
+> (https://xgas.dev/das) does not answer, because the DAS port is not exposed on the node host.
+> Until it is restored, a third-party node cannot fetch batch data and cannot sync past the
+> batches it already has. This note will be removed when the endpoint is back.
 
     docker run --rm -it -v $PWD/xgas-node:/home/user/.arbitrum -p 8547:8547 \
       offchainlabs/nitro-node:v3.11.4-7d5ac27 \

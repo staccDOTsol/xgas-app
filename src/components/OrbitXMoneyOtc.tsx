@@ -85,6 +85,11 @@ const USDG_ABI = parseAbi([
   'function approve(address spender, uint256 amount) returns (bool)'
 ]);
 
+// Deposits are paused while xgas moves to a new chain: exits on this one are waiting on a stalled validator,
+// so new money should not go in. Flip back to false after the relaunch.
+const DEPOSITS_PAUSED = true;
+const DEPOSITS_PAUSED_MSG = 'Deposits are paused while xgas moves to a new chain. Exits on this chain are waiting on a stalled validator, so no new money should go in. Existing holders are being refunded in USDG by the founder.';
+
 // XMoney: the vault + gas token on Robinhood. enterRollup bridges to the Orbit L4 in the same tx.
 const XUSD_VAULT_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
@@ -109,6 +114,7 @@ const ESCROW_ABI = parseAbi([
   'function nextTradeId() view returns (uint256)',
   'function totalXMoneyBurned() view returns (uint256)',
   'function totalXMoneyRakedToFanout() view returns (uint256)',
+  'function totalXMoneyToBuyback() view returns (uint256)',
   'function totalSettledVolumeXMoney() view returns (uint256)',
   'function orders(uint256) view returns (address maker, string makerXHandle, uint8 side, uint256 availableXMoney, uint256 fiatRateBps, uint256 minAmount, uint256 maxAmount, bool active)',
   'function trades(uint256) view returns (uint256 orderId, uint8 side, address seller, string sellerXHandle, address buyer, string buyerXHandle, uint256 xMoneyAmount, uint256 expectedCents, uint256 deadline, bool completed, bool cancelled)',
@@ -131,6 +137,7 @@ const FOMO_ABI = parseAbi([
   'function currentLeaderXHandle() view returns (string)',
   'function totalBurned() view returns (uint256)',
   'function totalFanoutRaked() view returns (uint256)',
+  'function totalBuyback() view returns (uint256)',
   'function players(address) view returns (uint256 keys, uint256 rewardDebt, uint256 pendingDividends, string xHandle)',
   'function pendingDividendsOf(address) view returns (uint256)',
   'function pendingDividendsOfRound(uint256 round, address) view returns (uint256)',
@@ -228,6 +235,17 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   const [bridgeStatus, setBridgeStatus] = useState<string | null>(null);
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [executorEnabled, setExecutorEnabled] = useState<boolean>(false);
+  // Whether the batch-data endpoint answers, from GET /api/health's das field; null until known.
+  const [dasUp, setDasUp] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (activeTab !== 'specs') return;
+    let alive = true;
+    fetch('/api/health')
+      .then(r => (r.ok ? r.json() : null))
+      .then(h => { if (alive) setDasUp(typeof h?.das === 'boolean' ? h.das : null); })
+      .catch(() => { if (alive) setDasUp(null); });
+    return () => { alive = false; };
+  }, [activeTab]);
   const [pastRoundDividends, setPastRoundDividends] = useState<{ round: number; amount: number }[]>([]);
 
   // Vault On-Ramp / Off-Ramp State
@@ -515,6 +533,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   // $xMoney to your address on the xgas Orbit L4 through the canonical Inbox (retryable ticket, auto-redeemed).
   const handleMintXMoney = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (DEPOSITS_PAUSED) {
+      alert(DEPOSITS_PAUSED_MSG);
+      return;
+    }
     if (!wallet.connected) {
       onConnectWallet();
       return;
@@ -525,13 +547,26 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     try {
       const rawUnits = BigInt(Math.round(parseFloat(vaultAmount) * 1e6));
       if (rawUnits <= 0n) throw new Error('Enter a USDG amount');
-      const before = await l4PublicClient.getBalance({ address: wallet.address as `0x${string}` }).catch(() => 0n);
+      // Say what is actually missing before the wallet does. Without this, USDG's InsufficientFunds revert
+      // reaches the user as "execution reverted for an unknown reason".
+      const who = wallet.address as `0x${string}`;
+      const [usdgBal, ethBal] = await Promise.all([
+        publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: parseAbi(['function balanceOf(address) view returns (uint256)']), functionName: 'balanceOf', args: [who] }),
+        publicClient.getBalance({ address: who }),
+      ]);
+      if (usdgBal < rawUnits) {
+        throw new Error(`You have ${(Number(usdgBal) / 1e6).toFixed(2)} USDG on Robinhood Chain, and this deposit needs ${(Number(rawUnits) / 1e6).toFixed(2)}. xgas only takes USDG on Robinhood Chain (#4663); USDG on Ethereum or any other chain has to be bridged there first.`);
+      }
+      if (ethBal < 20_000_000_000_000n) {
+        throw new Error('You need a little plain ETH on Robinhood Chain for gas (about 0.00002 ETH covers a deposit). WETH does not pay gas; unwrap some first.');
+      }
+      const before = await l4PublicClient.getBalance({ address: who }).catch(() => 0n);
 
-      // 1) Approve USDG once (max) so later entries are a single transaction
+      // 1) Approve exactly this deposit, never an unlimited allowance (same as the MCP enter path)
       const allowance = await publicClient.readContract({ address: CONTRACT_ADDRESSES.USDG as `0x${string}`, abi: parseAbi(['function allowance(address,address) view returns (uint256)']), functionName: 'allowance', args: [wallet.address as `0x${string}`, CONTRACT_ADDRESSES.XMONEY_USD_L3 as `0x${string}`] });
       if (allowance < rawUnits) {
         setBridgeStatus('Approving USDG on Robinhood…');
-        const approveCall = encodeAbiCall(USDG_ABI, 'approve', [CONTRACT_ADDRESSES.XMONEY_USD_L3, 2n ** 256n - 1n], CONTRACT_ADDRESSES.USDG, '0', L3_CHAIN_ID);
+        const approveCall = encodeAbiCall(USDG_ABI, 'approve', [CONTRACT_ADDRESSES.XMONEY_USD_L3, rawUnits], CONTRACT_ADDRESSES.USDG, '0', L3_CHAIN_ID);
         await sendOnChainTx({ to: CONTRACT_ADDRESSES.USDG, data: approveCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
       }
 
@@ -547,7 +582,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         setBridgeStatus('Deposit is on Robinhood but the L4 credit is taking longer than expected. It will arrive; check back shortly.');
       } else {
         setBridgeStatus(null);
-        sounds.playBuyApe();
+        sounds.playConnect();
         confetti({ particleCount: 70, spread: 90 });
         setUserXMoneyBalance(Number(formatEther(after)));
       }
@@ -575,7 +610,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       if (rawXMoney <= 0n) throw new Error('Enter an $xMoney amount');
       const wCall = encodeAbiCall(ARBSYS_ABI, 'withdrawEth', [wallet.address], CONTRACT_ADDRESSES.ARB_SYS, formatEther(rawXMoney));
       await sendOnChainTx({ to: CONTRACT_ADDRESSES.ARB_SYS, data: wCall.calldata, valueWei: rawXMoney, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
-      sounds.playBuyApe();
+      sounds.playConnect();
       setBridgeStatus('Withdrawal queued on the L4. It shows below as "pending" until Robinhood confirms the assertion, then "claimable".');
       await refreshL4Balance();
       fetchWithdrawals(wallet.address).then(w => { setWithdrawals(w.withdrawals); setExecutorEnabled(w.executorEnabled); }).catch(() => {});
@@ -592,7 +627,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     setIsSubmittingTx(true);
     try {
       const r = await executeWithdrawal(w.txHash, w.position);
-      sounds.playBuyApe();
+      sounds.playConnect();
       setBridgeStatus(r.alreadyExecuted ? 'Already claimed.' : `Claimed on Robinhood: ${w.amount} $xMoney is now in your wallet on L3. Redeem it for USDG below.`);
       fetchWithdrawals(wallet.address).then(x => setWithdrawals(x.withdrawals)).catch(() => {});
     } catch (err: any) {
@@ -611,7 +646,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       if (bal <= 0n) throw new Error('No $xMoney on Robinhood to redeem');
       const redeemCall = encodeAbiCall(XUSD_VAULT_ABI, 'exitRollup', [bal], CONTRACT_ADDRESSES.XMONEY_USD_L3, '0', L3_CHAIN_ID);
       await sendOnChainTx({ to: CONTRACT_ADDRESSES.XMONEY_USD_L3, data: redeemCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
-      sounds.playBuyApe();
+      sounds.playConnect();
       confetti({ particleCount: 70, spread: 90 });
       setBridgeStatus('Redeemed: USDG is back in your wallet on Robinhood Chain.');
       setUserL3XMoney(0);
@@ -628,7 +663,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     try {
       const c = encodeAbiCall(FOMO_ABI, 'claimDividendsForRound', [BigInt(round)], l4Addresses.fomo);
       await sendOnChainTx({ to: l4Addresses.fomo, data: c.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
-      sounds.playBuyApe();
+      sounds.playConnect();
       confetti({ particleCount: 50, spread: 70 });
       await refreshL4Balance();
     } catch (err: any) {
@@ -664,7 +699,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           waitForConfirmation: true
         });
         if (res.txHash) {
-          sounds.playBuyApe();
+          sounds.playConnect();
           confetti({ particleCount: 50, spread: 70 });
           setIsCreateOrderModalOpen(false);
         }
@@ -678,7 +713,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           waitForConfirmation: true
         });
         if (res.txHash) {
-          sounds.playBuyApe();
+          sounds.playConnect();
           confetti({ particleCount: 50, spread: 70 });
           setIsCreateOrderModalOpen(false);
         }
@@ -715,7 +750,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           waitForConfirmation: true
         });
         if (res.txHash) {
-          sounds.playBuyApe();
+          sounds.playConnect();
           confetti({ particleCount: 60, spread: 80 });
           closeOrder();
         }
@@ -730,7 +765,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           waitForConfirmation: true
         });
         if (res.txHash) {
-          sounds.playBuyApe();
+          sounds.playConnect();
           confetti({ particleCount: 60, spread: 80 });
           closeOrder();
         }
@@ -744,7 +779,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     }
   };
 
-  // ON-CHAIN WRITE (L4): Release Escrow (0.01% burn to 0xdead + 0.01% rake to Fanout, 99.98% to buyer)
+  // ON-CHAIN WRITE (L4): Release Escrow (0.01% burn to 0xdead + 0.01% rake to Fanout + 0.02% XGAS.DEV buyback, 99.96% to buyer)
   const handleReleaseTradeOnChain = async (tradeId: number) => {
     if (!wallet.connected) {
       onConnectWallet();
@@ -762,7 +797,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       });
 
       if (res.txHash) {
-        sounds.playBuyApe();
+        sounds.playConnect();
         confetti({ particleCount: 70, spread: 90 });
       }
       await refreshL4Balance();
@@ -787,7 +822,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         chainId: L4_CHAIN_ID,
         waitForConfirmation: true
       });
-      sounds.playBuyApe();
+      sounds.playConnect();
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Cancel order error:', err);
@@ -817,7 +852,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       });
 
       if (res.txHash) {
-        sounds.playBuyApe();
+        sounds.playConnect();
         confetti({ particleCount: 50, spread: 70 });
       }
       await refreshL4Balance();
@@ -845,7 +880,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       });
 
       if (res.txHash) {
-        sounds.playBuyApe();
+        sounds.playConnect();
         confetti({ particleCount: 50, spread: 70 });
       }
       await refreshL4Balance();
@@ -871,7 +906,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         waitForConfirmation: true
       });
       if (res.txHash) {
-        sounds.playBuyApe();
+        sounds.playConnect();
         confetti({ particleCount: 120, spread: 120 });
       }
       await refreshL4Balance();
@@ -922,7 +957,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-mono border border-cyan-500/40 flex items-center gap-1 transition-colors"
               >
                 <Award className="w-3 h-3" />
-                <span>0.01% TO STACC FANOUT</span>
+                <span>0.01% TO STACC WIZARDS FEE FANOUT</span>
                 <ExternalLink className="w-2.5 h-2.5" />
               </a>
               <a
@@ -933,6 +968,16 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               >
                 <Flame className="w-3 h-3" />
                 <span>0.01% SUPPLY BURN TO 0xdead</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+              <a
+                href={`https://robinhoodchain.blockscout.com/token/${CONTRACT_ADDRESSES.XGAS_DEV}`}
+                target="_blank"
+                rel="noreferrer"
+                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-mono border border-emerald-500/30 flex items-center gap-1 transition-colors"
+              >
+                <Flame className="w-3 h-3" />
+                <span>0.02% XGAS.DEV BUY & BURN</span>
                 <ExternalLink className="w-2.5 h-2.5" />
               </a>
             </div>
@@ -1145,6 +1190,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   Locks USDG in the Robinhood vault; the vault sends net $xMoney through the canonical Orbit Inbox to your address on the L4. Lands in about a minute. 0.01% Fanout + 0.01% burn.
                 </p>
 
+                {DEPOSITS_PAUSED && (
+                  <p className="text-[11px] leading-relaxed text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">{DEPOSITS_PAUSED_MSG}</p>
+                )}
                 <form onSubmit={handleMintXMoney} className="flex items-center gap-2">
                   <div className="relative flex-1">
                     <span className="absolute left-3 top-2.5 text-slate-500 font-bold">$</span>
@@ -1160,7 +1208,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   </div>
                   <button
                     type="submit"
-                    disabled={isSubmittingTx}
+                    disabled={isSubmittingTx || DEPOSITS_PAUSED}
                     className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-md shadow-emerald-500/20 cursor-pointer shrink-0"
                   >
                     <span className="sm:hidden">Enter → L4</span><span className="hidden sm:inline">Enter Rollup → L4</span>
@@ -1263,7 +1311,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                       <span>$xMoney P2P OTC Order Book</span>
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Sellers deposit $xMoney into escrow; buyers send fiat on X Money. 0.01% raked to Fanout, 0.01% burned to 0xdead.
+                      Sellers deposit $xMoney into escrow; buyers send fiat on X Money. 0.01% raked to Fanout, 0.01% burned to 0xdead, 0.02% buys and burns XGAS.DEV.
                     </p>
                   </div>
 
@@ -1502,6 +1550,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                             <span>0.01% Burn: <strong className="text-amber-400">${((trade.xMoneyAmount * 1) / 10000).toFixed(4)}</strong></span>
                             <span>•</span>
                             <span>0.01% Fanout Rake: <strong className="text-cyan-400">${((trade.xMoneyAmount * 1) / 10000).toFixed(4)}</strong></span>
+                            <span>•</span>
+                            <span>0.02% XGAS.DEV Buy & Burn: <strong className="text-emerald-400">${((trade.xMoneyAmount * 2) / 10000).toFixed(4)}</strong></span>
                           </div>
                         </div>
 
@@ -1517,7 +1567,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                           </a>
 
                           <a
-                            href={`https://x.com/intent/post?text=${encodeURIComponent(`Settling Trade #${trade.id} on @xgas_dev! @${trade.buyerXHandle} -> @${trade.sellerXHandle} on @XMoney. 0.01% burned to 0xdead + 0.01% to Stacc Fanout. xgas.dev`)}`}
+                            href={`https://x.com/intent/post?text=${encodeURIComponent(`Settling Trade #${trade.id} on @xgas_dev! @${trade.buyerXHandle} -> @${trade.sellerXHandle} on @XMoney. 0.01% burned to 0xdead + 0.01% to Stacc Wizards Fee Fanout + 0.02% XGAS.DEV buy & burn. xgas.dev`)}`}
                             target="_blank"
                             rel="noreferrer"
                             className="p-1.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
@@ -1609,7 +1659,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                     rel="noreferrer"
                     className="p-2.5 rounded-lg bg-[#141a29] hover:bg-[#1a2336] border border-[#1e2538] flex items-center justify-between text-slate-300 transition-colors"
                   >
-                    <span className="text-slate-400">Stacc Wizards Fanout:</span>
+                    <span className="text-slate-400">Stacc Wizards Fee Fanout:</span>
                     <span className="text-cyan-400 font-bold flex items-center gap-1">
                       <span>0x04C9...36e</span>
                       <ExternalLink className="w-3 h-3" />
@@ -1630,7 +1680,20 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   </a>
 
                   <a
-                    href={`https://x.com/intent/post?text=${encodeURIComponent(`Trading @XMoney P2P on @xgas_dev L4! Every single trade burns 1 bp to 0xdead and rakes 1 bp to @staccpad Stacc Wizards Fanout on Robinhood Chain. xgas.dev`)}`}
+                    href={`https://robinhoodchain.blockscout.com/token/${CONTRACT_ADDRESSES.XGAS_DEV}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-2.5 rounded-lg bg-[#141a29] hover:bg-[#1a2336] border border-[#1e2538] flex items-center justify-between text-slate-300 transition-colors"
+                  >
+                    <span className="text-slate-400">XGAS.DEV Buy & Burn:</span>
+                    <span className="text-emerald-400 font-bold flex items-center gap-1">
+                      <span>{CONTRACT_ADDRESSES.XGAS_DEV.slice(0, 6)}...{CONTRACT_ADDRESSES.XGAS_DEV.slice(-3)}</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </span>
+                  </a>
+
+                  <a
+                    href={`https://x.com/intent/post?text=${encodeURIComponent(`Trading @XMoney P2P on @xgas_dev L4! Every single trade burns 1 bp to 0xdead, rakes 1 bp to the @staccpad Stacc Wizards Fee Fanout on Robinhood Chain, and spends 2 bp buying and burning XGAS.DEV. xgas.dev`)}`}
                     target="_blank"
                     rel="noreferrer"
                     className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-500/20 to-cyan-500/20 hover:brightness-110 border border-blue-500/40 text-cyan-300 font-bold flex items-center justify-center gap-2 transition-colors mt-2 font-sans"
@@ -1645,11 +1708,14 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               <div className="bg-gradient-to-b from-[#111726] to-[#0d111c] border border-amber-500/30 rounded-2xl p-4 shadow-xl">
                 <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-2 font-mono">
                   <Flame className="w-4 h-4" />
-                  <span>On-Chain Deflationary Mechanics</span>
+                  <span>On-Chain Fee Mechanics</span>
                 </div>
-                <h4 className="text-sm font-bold text-white mb-2 font-display">Dual 0.01% Fee Structure</h4>
+                <h4 className="text-sm font-bold text-white mb-2 font-display">0.04% Fee Structure</h4>
                 <p className="text-xs text-slate-400 leading-relaxed space-y-2 font-sans">
-                  Every trade burns 0.01% of $xMoney supply straight to <code className="text-amber-400 font-mono">0xdead</code> and routes 0.01% directly to the <code className="text-cyan-400 font-mono">HomecomingDividendVault</code>.
+                  Every release sends 0.01% of the trade to <code className="text-amber-400 font-mono">0xdead</code> on the L4, 0.01% to the <code className="text-cyan-400 font-mono" title="0x652125E71C7f209e640C0069e4a5e77FAfa99b4B">FanoutSink 0x6521...9b4B</code> on xgas, which bridges to the Stacc Wizards Fee Fanout on Robinhood once it holds 0.01 xMoney, and 0.02% to buy and burn <code className="text-emerald-400 font-mono">XGAS.DEV</code> on Robinhood.
+                </p>
+                <p className="text-xs text-slate-500 leading-relaxed mt-2 font-sans">
+                  This is not deflation. Burns on the L4 do not reduce the supply the vault counts, and each vault deposit also mints 0.0001 unbacked xMoney to pay L4 delivery gas. The burns are small: NAV rose about 0.018% in the last week. r/s (vault USDG over circulating xMoney) is a division, not a forecast.
                 </p>
 
                 <div className="mt-4 p-3 rounded-xl bg-black/40 border border-amber-500/20 space-y-2 font-mono text-xs">
@@ -1665,9 +1731,13 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                     <span>0.01% Fanout Rake:</span>
                     <span>-$0.01</span>
                   </div>
+                  <div className="flex justify-between text-emerald-400">
+                    <span>0.02% XGAS.DEV Buy & Burn:</span>
+                    <span>-$0.02</span>
+                  </div>
                   <div className="flex justify-between text-emerald-400 font-bold border-t border-slate-800 pt-1">
                     <span>Net Delivered:</span>
-                    <span>$99.98</span>
+                    <span>$99.96</span>
                   </div>
                 </div>
               </div>
@@ -1761,7 +1831,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   )}
                 </div>
 
-                <div className="text-[11px] text-slate-400 flex items-center justify-center gap-4">
+                <div className="text-[11px] text-slate-400 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
                   <span>55% Dividends</span>
                   <span>•</span>
                   <span>35% Jackpot</span>
@@ -1769,6 +1839,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <span className="text-amber-400">0.01% Burn</span>
                   <span>•</span>
                   <span className="text-cyan-400">0.01% Fanout Rake</span>
+                  <span>•</span>
+                  <span className="text-emerald-400">0.02% XGAS.DEV Buy & Burn</span>
                 </div>
               </div>
             </div>
@@ -1847,15 +1919,21 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[11px] leading-relaxed text-slate-300">
               <div className="space-y-2">
                 <div className="text-emerald-400 font-bold uppercase tracking-wider">What is verifiable</div>
-                <p>xgas Orbit L4 (#{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}) is an Arbitrum Orbit AnyTrust chain. Every batch is posted to the SequencerInbox on Robinhood Chain and every state assertion to the Rollup contract; anyone can run a node from <a href="/chain-info.json" className="text-cyan-400 hover:underline">chain-info.json</a> (see <a href="/RUN-A-NODE.md" className="text-cyan-400 hover:underline">RUN-A-NODE.md</a>) and verify without trusting xgas.dev.</p>
+                <p>xgas Orbit L4 (#{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}) is an Arbitrum Orbit AnyTrust chain. Every batch is posted to the SequencerInbox on Robinhood Chain and every state assertion to the Rollup contract. A node configured from <a href="/chain-info.json" className="text-cyan-400 hover:underline">chain-info.json</a> (see <a href="/RUN-A-NODE.md" className="text-cyan-400 hover:underline">RUN-A-NODE.md</a>) can verify the chain without trusting xgas.dev, but only if it can fetch batch data.</p>
+                {dasUp === false
+                  ? <p className="text-amber-300">The batch-data endpoint xgas.dev/das is unreachable right now, so third-party nodes cannot sync.</p>
+                  : dasUp === true
+                    ? <p className="text-slate-400">The batch-data endpoint xgas.dev/das is answering.</p>
+                    : <p className="text-slate-400">Batch data is served at xgas.dev/das.</p>}
                 <p>Deposits go through the canonical Orbit Inbox; exits go through the Outbox on Robinhood. The site executes Outbox claims as a convenience, but the call is permissionless.</p>
-                <p className="text-slate-400">What you do trust today: a single sequencer (ordering, liveness) and a single-member data committee, both operated by xgas.dev. Neither can mint, freeze or take funds.</p>
+                <p className="text-slate-400">What you do trust today: a single sequencer (ordering, liveness), a single-member data committee, and a single validator (<a href="https://robinhoodchain.blockscout.com/address/0x0d61D8e07a6210b0F082DAB784062c9c583BA647" target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">0x0d61...A647</a>) that is also the fast confirmer, all operated by xgas.dev. If that validator stops asserting, exits wait.</p>
               </div>
               <div className="space-y-2">
                 <div className="text-amber-400 font-bold uppercase tracking-wider">Admin powers</div>
                 <p>The L4 escrow, War of Attrition and router are ownerless: no owner, pause, upgrade, role or withdraw path. Source: <a href="/source/XMoneyEscrow.sol" className="text-cyan-400 hover:underline">escrow</a>, <a href="/source/FomoAttritionL4.sol" className="text-cyan-400 hover:underline">game</a>, <a href="/source/XGasRouter.sol" className="text-cyan-400 hover:underline">router</a>.</p>
-                <p>The XMoney vault (<a href="/source/XMoney.sol" className="text-cyan-400 hover:underline">source</a>) has exactly two owner functions: setBridgeSystem (inbox/bridge addresses) and setL4RetryableParams (gas for the L4 leg). Minting only happens inside enterRollup / migrate against USDG actually received; the owner cannot mint, pause or withdraw the reserve.</p>
-                <p>Owner = a 24-hour <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_TIMELOCK}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">TimelockController</a>: any change is queued publicly and waits a day before it can execute.</p>
+                <p>The XMoney vault (<a href="/source/XMoney.sol" className="text-cyan-400 hover:underline">source</a>) has exactly two owner functions: setBridgeSystem (inbox/bridge addresses) and setL3RetryableParams (gas for the L4 leg). Minting only happens inside enterRollup / migrate, and the owner cannot pause or withdraw the reserve. Not every mint is backed: each deposit also mints 0.0001 xMoney with no USDG behind it to pay L4 delivery gas, and the owner sets that size through the timelock.</p>
+                <p>Vault owner = a 24-hour <a href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_TIMELOCK}`} target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">TimelockController</a>: any change is queued publicly and waits a day before it can execute. The timelock owns only the vault and the XGAS.DEV buyback.</p>
+                <p className="text-slate-400">The chain owner key (<a href="https://robinhoodchain.blockscout.com/address/0xC3D6cED85829b5FA236515C21B3161B7e2cEB14F" target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline">0xC3D6...B14F</a>) holds the UpgradeExecutor role and can upgrade the Bridge, Inbox and Outbox on Robinhood with no timelock.</p>
               </div>
               <div className="space-y-2">
                 <div className="text-cyan-400 font-bold uppercase tracking-wider">Units &amp; accounting</div>
@@ -1893,7 +1971,14 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
                 <span className="text-slate-500">0.01% Protocol Rake:</span>
                 <a href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e" target="_blank" rel="noreferrer" className="text-cyan-400 hover:underline flex items-center gap-1">
-                  <span>Stacc Wizards Fanout</span>
+                  <span>Stacc Wizards Fee Fanout</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
+                <span className="text-slate-500">0.02% L4 Buy & Burn:</span>
+                <a href={`https://robinhoodchain.blockscout.com/token/${CONTRACT_ADDRESSES.XGAS_DEV}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline flex items-center gap-1">
+                  <span>XGAS.DEV</span>
                   <ExternalLink className="w-2.5 h-2.5" />
                 </a>
               </div>
@@ -2047,7 +2132,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
               <div className="p-3 rounded-xl bg-black/40 border border-slate-800 text-[11px] text-slate-400 space-y-1">
                 <div>Price Rate: <strong className="text-emerald-400">${(1 + parseFloat(newOrderSpread || '0') / 100).toFixed(3)} USD / 1 xMoney</strong></div>
-                <div>0.01% Burn on Release + 0.01% Stacc Fanout Rake</div>
+                <div>0.01% Burn on Release + 0.01% Stacc Wizards Fee Fanout Rake + 0.02% XGAS.DEV Buy & Burn</div>
               </div>
 
               <button

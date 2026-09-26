@@ -13,10 +13,12 @@ contract XGasRouterTest is Test {
     // The L4 rake lands in a FanoutSink that bridges to the Robinhood fanout; the sink IS the fanout here.
     address public constant PARENT_FANOUT = 0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8;
     address public FANOUT;
+    address public BUYBACK;
 
     function setUp() public {
         FANOUT = address(new FanoutSink(PARENT_FANOUT));
-        router = new XGasRouter(payable(FANOUT));
+        BUYBACK = address(new FanoutSink(makeAddr("xgasDevBuyback")));
+        router = new XGasRouter(payable(FANOUT), payable(BUYBACK));
         vm.deal(alice, 100 ether);
     }
 
@@ -28,18 +30,22 @@ contract XGasRouterTest is Test {
         // Alice routes 10 native gas to Bob
         // 1 bp (0.01%) = 0.001 ether burned to DEAD
         // 1 bp (0.01%) = 0.001 ether raked to FANOUT
-        // 9.998 ether delivered to Bob
+        // 2 bp (0.02%) = 0.002 ether to the XGAS.DEV buyback sink
+        // 9.996 ether delivered to Bob
         vm.prank(alice);
-        (uint256 net, uint256 burn, uint256 rake) = router.sendValue{value: 10 ether}(bob, "p2p_payment");
+        (uint256 net, uint256 burn, uint256 rake, uint256 buyback) = router.sendValue{value: 10 ether}(bob, "p2p_payment");
 
         assertEq(burn, 0.001 ether);
         assertEq(rake, 0.001 ether);
-        assertEq(net, 9.998 ether);
+        assertEq(buyback, 0.002 ether);
+        assertEq(net, 9.996 ether);
         assertEq(DEAD.balance - deadBefore, 0.001 ether);
         assertEq(FANOUT.balance - fanoutBefore, 0.001 ether);
-        assertEq(bob.balance - bobBefore, 9.998 ether);
+        assertEq(BUYBACK.balance, 0.002 ether);
+        assertEq(bob.balance - bobBefore, 9.996 ether);
         assertEq(router.totalNativeBurned(), 0.001 ether);
         assertEq(router.totalFanoutRaked(), 0.001 ether);
+        assertEq(router.totalBuyback(), 0.002 ether);
         assertEq(router.totalNativeRouted(), 10 ether);
     }
 }

@@ -2,7 +2,7 @@
 // is deployed on xGas yet. Start one first:
 //   anvil --port 8599 --chain-id 466301
 //   forge create src/NguLauncher.sol:NguLauncher --rpc-url http://127.0.0.1:8599 \
-//     --private-key <anvil key 0> --broadcast --constructor-args <fanoutSink>
+//     --private-key <anvil key 0> --broadcast --constructor-args <fanoutSink> <buybackSink>
 //   cast send <launcher> 'launch(string,string,uint256,uint256,uint16,uint16,uint256)' ... --value 0.05ether
 // then: XGAS_RPC=http://127.0.0.1:8599 XGAS_NGU_LAUNCHER=<launcher> TOKEN=<token> node scripts/ngu-roundtrip.mjs
 import { createWalletClient, createPublicClient, http, parseEther, formatEther } from 'viem';

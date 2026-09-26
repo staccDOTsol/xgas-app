@@ -1,7 +1,8 @@
 import { encodeFunctionData, isAddress } from 'viem';
-import { XGAS_CHAIN_ID, xgas, nguLauncher, ZERO } from '../config.mjs';
+import { L4, XGAS_CHAIN_ID, xgas, nguLauncher, ZERO, BUYBACK_BPS } from '../config.mjs';
 import { NGU_TOKEN_ABI, NGU_LAUNCHER_ABI, NGU_LIMITS } from '../abis.mjs';
 import { fmtXMoney, parseXMoney } from '../money.mjs';
+import { trueMaxLoss, pct, contractSkew } from '../nguRisk.mjs';
 import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
 import { submitRaw } from '../idempotency.mjs';
 
@@ -15,17 +16,38 @@ const NO_LAUNCHER = [
 
 const read = (token, fn, args = []) => xgas.readContract({ address: token, abi: NGU_TOKEN_ABI, functionName: fn, args });
 
+// Curves launched before the XGAS.DEV buyback have no BUYBACK_BPS(), and the first launcher has no buybackSink():
+// the call reverts, and the buyback is 0. Any other failure (RPC down) is a real error and propagates.
+const zeroIfReverted = (e) => {
+  if (e?.walk?.((x) => x.name === 'ContractFunctionRevertedError' || x.name === 'ContractFunctionZeroDataError')) return 0;
+  throw e;
+};
+const buybackBpsOf = (token) => read(token, 'BUYBACK_BPS').then(Number, zeroIfReverted);
+// The live worst case, plus the contract's own figure when it disagrees (either direction).
+const riskText = (s) => `${s.max_loss_pct}${s.contract_note ? `, ${s.contract_note}` : ''}`;
+const feeText = (buybackBps) => `0.01% burn + 0.01% FanoutSink${buybackBps ? ` + ${(buybackBps / 100).toFixed(2)}% XGAS.DEV buy & burn` : ''}`;
+
 async function tokenState(token, who) {
   const fns = ['name', 'symbol', 'floor', 'nextPrice', 'lastPrice', 'basePrice', 'reserve', 'supply', 'minted', 'maxSupply', 'maxLossBps', 'betaBps', 'stepBps', 'seedQty'];
-  const vals = await Promise.all(fns.map((f) => read(token, f)));
+  const [vals, buybackBps] = await Promise.all([Promise.all(fns.map((f) => read(token, f))), buybackBpsOf(token)]);
   const s = Object.fromEntries(fns.map((f, i) => [f, vals[i]]));
   const balance = who && isAddress(who) ? await read(token, 'balanceOf', [who]) : null;
+  // The headline risk is computed from live state; the contract's maxLossBps() understates it on deployed curves.
+  const risk = trueMaxLoss({ nextPrice: s.nextPrice, reserve: s.reserve, supply: s.supply, buybackBps });
+  const lossBps = risk ? risk.lossBps : Number(s.maxLossBps);
+  const skew = contractSkew(lossBps, s.maxLossBps);
   return {
     token,
     name: s.name,
     symbol: s.symbol,
-    max_loss_bps: Number(s.maxLossBps),
-    max_loss_pct: `${(Number(s.maxLossBps) / 100).toFixed(2)}%`,
+    max_loss_bps: lossBps,
+    max_loss_pct: pct(lossBps),
+    max_loss_basis: 'live: buy 1 at nextPrice, sell it straight back at min(floor after the buy, that price), fees on both legs',
+    contract_max_loss_bps: Number(s.maxLossBps),
+    contract_max_loss_pct: pct(Number(s.maxLossBps)),
+    contract_skew: skew,
+    contract_note: skew ? `contract reports ${pct(Number(s.maxLossBps))} (${skew})` : null,
+    sell_back_proceeds_xmoney: risk ? fmtXMoney(risk.proceeds) : null,
     floor_xmoney: fmtXMoney(s.floor),
     next_price_xmoney: fmtXMoney(s.nextPrice),
     last_price_xmoney: fmtXMoney(s.lastPrice),
@@ -39,6 +61,8 @@ async function tokenState(token, who) {
     beta_bps: Number(s.betaBps),
     step_bps: Number(s.stepBps),
     seed_qty: s.seedQty.toString(),
+    buyback_bps: buybackBps,
+    fees_per_trade: `${feeText(buybackBps)} on every buy and sell`,
     your_balance_tokens: balance === null ? null : (balance / 10n ** 18n).toString(),
     raw: { floor: s.floor, nextPrice: s.nextPrice, maxSupply: s.maxSupply, minted: s.minted, supply: s.supply },
   };
@@ -54,20 +78,28 @@ function wholeTokens(qty) {
 export const tools = [
   {
     name: 'list_ngu_tokens',
-    description: 'Every NGU curve launched on xGas, newest first, each with its worst-case loss, floor, next price and remaining supply. Read-only.',
+    description: 'Every NGU curve launched on xGas (the current launcher\'s newest first, then the legacy launcher\'s), each with its worst-case loss, fees, floor, next price and remaining supply. Read-only.',
     inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 20.' } }, additionalProperties: false },
     async handler({ limit = 20 }) {
       const launcher = await nguLauncher();
       if (!launcher) return reply(NO_LAUNCHER, { launcher: null, tokens: [] });
-      const n = await xgas.readContract({ address: launcher, abi: NGU_LAUNCHER_ABI, functionName: 'allTokensLength' });
-      if (n === 0n) return reply('The launcher is live but nothing has been launched on it yet.', { launcher, tokens: [] });
-      const idx = Array.from({ length: Number(n) }, (_, i) => Number(n) - 1 - i).slice(0, limit);
-      const addrs = await Promise.all(idx.map((i) => xgas.readContract({ address: launcher, abi: NGU_LAUNCHER_ABI, functionName: 'allTokens', args: [BigInt(i)] })));
+      // The first launcher's curves (0.01% + 0.01%, no XGAS.DEV buyback) still trade; list them after the current one's.
+      // Launching only ever goes through the current launcher.
+      const legacy = L4.legacy2bp?.nguLauncher && L4.legacy2bp.nguLauncher !== ZERO ? L4.legacy2bp.nguLauncher : null;
+      const addrs = [];
+      for (const la of [launcher, legacy]) {
+        if (!la || addrs.length >= limit) continue;
+        const n = await xgas.readContract({ address: la, abi: NGU_LAUNCHER_ABI, functionName: 'allTokensLength' });
+        const idx = Array.from({ length: Number(n) }, (_, i) => Number(n) - 1 - i).slice(0, limit - addrs.length);
+        const found = await Promise.all(idx.map((i) => xgas.readContract({ address: la, abi: NGU_LAUNCHER_ABI, functionName: 'allTokens', args: [BigInt(i)] })));
+        for (const a of found) if (!addrs.some((x) => x.toLowerCase() === a.toLowerCase())) addrs.push(a);
+      }
+      if (!addrs.length) return reply('The launcher is live but nothing has been launched on it yet.', { launcher, legacy_launcher: legacy, tokens: [] });
       const tokens = await Promise.all(addrs.map((a) => tokenState(a).catch((e) => ({ token: a, error: e.shortMessage || e.message }))));
       const lines = tokens.map((t) => t.error
         ? `  ${t.token}: unreadable (${t.error})`
-        : `  ${t.symbol} ${t.token} — worst case if you sell straight back: ${t.max_loss_pct}; next ${t.next_price_xmoney}, floor ${t.floor_xmoney}, ${t.remaining}/${t.max_supply} left`);
-      return reply(`${tokens.length} curve(s) on the launcher:\n${lines.join('\n')}`, { launcher, tokens });
+        : `  ${t.symbol} ${t.token}: worst case if you buy and sell straight back ${riskText(t)}; next ${t.next_price_xmoney}, floor ${t.floor_xmoney}, ${t.remaining}/${t.max_supply} left; fees ${t.buyback_bps ? `${((2 + t.buyback_bps) / 100).toFixed(2)}%` : '0.02% (pre-buyback curve)'}`);
+      return reply(`${tokens.length} curve(s) on the launcher${legacy ? 's' : ''}:\n${lines.join('\n')}`, { launcher, legacy_launcher: legacy, tokens });
     },
   },
 
@@ -86,9 +118,9 @@ export const tools = [
       if (!code || code === '0x') return reply(`Nothing is deployed at ${token_address} on xGas 466301.`, { token: token_address, exists: false });
       const s = await tokenState(token_address, holder);
       return reply(
-        `${s.name} (${s.symbol}) — worst case if you buy then sell straight back: ${s.max_loss_pct}.\n` +
+        `${s.name} (${s.symbol}). Worst case if you buy then sell straight back: ${riskText(s)}.\n` +
         `Next price ${s.next_price_xmoney} $xMoney, redemption floor ${s.floor_xmoney}, reserve ${s.reserve_xmoney}.\n` +
-        `${s.minted}/${s.max_supply} minted${s.sold_out ? ' — SOLD OUT' : `, ${s.remaining} left`}. β=${s.beta_bps}bps, step=${s.step_bps}bps.`,
+        `${s.minted}/${s.max_supply} minted${s.sold_out ? ', SOLD OUT' : `, ${s.remaining} left`}. β=${s.beta_bps}bps, step=${s.step_bps}bps. Fees: ${s.fees_per_trade}.`,
         s,
       );
     },
@@ -96,7 +128,7 @@ export const tools = [
 
   {
     name: 'quote_ngu_buy',
-    description: 'Cost to mint whole tokens on an NGU curve. Leads with maxLossBps — the worst case for buying and selling straight back. Read-only.',
+    description: 'Cost to mint whole tokens on an NGU curve. Leads with the worst case for buying and selling straight back, computed from live state (the contract\'s own maxLossBps understates it). Read-only.',
     inputSchema: {
       type: 'object',
       properties: { token_address: addr, qty: { type: 'integer', minimum: 1, maximum: 50, description: 'Whole tokens. The contract caps 50 per transaction.' } },
@@ -112,20 +144,32 @@ export const tools = [
       const cost = await read(token_address, 'quoteBuy', [q]);
       const burn = (cost * 1n) / BPS;
       const fanout = (cost * 1n) / BPS;
+      const buyback = (cost * BigInt(s.buyback_bps)) / BPS;
       const data = {
         worst_case_if_you_sell_straight_back: s.max_loss_pct,
         max_loss_bps: s.max_loss_bps,
+        contract_max_loss_bps: s.contract_max_loss_bps,
+        contract_note: s.contract_note,
         token: token_address, symbol: s.symbol, qty,
         cost_xmoney: fmtXMoney(cost), cost_wei: cost,
         avg_per_token: fmtXMoney(cost / q),
-        fees: { burn: fmtXMoney(burn), fanout_sink: fmtXMoney(fanout), note: '0.01% + 0.01% of the price; the rest backs the floor' },
+        fees: {
+          burn: fmtXMoney(burn), fanout_sink: fmtXMoney(fanout),
+          ...(s.buyback_bps && { xgas_dev_buyback: fmtXMoney(buyback) }),
+          note: `${feeText(s.buyback_bps)} of the price; the rest backs the floor`,
+        },
         floor_after_context: `Redemption floor right now is ${s.floor_xmoney} $xMoney per token`,
-        why: `The gap is β, not the fee: at β=${s.beta_bps}bps the buy price sits above the floor by design. Fees are 2bps of the ${s.max_loss_pct}.`,
+        why: `Fees are only ${2 + s.buyback_bps}bps of the ${s.max_loss_pct}. The rest is the gap between the next price (${s.next_price_xmoney}) and what one token redeems for straight after (${s.sell_back_proceeds_xmoney})` +
+          (s.contract_skew === 'understated'
+            ? `: the step has carried the price above floor/β, so the β=${s.beta_bps}bps bound behind maxLossBps no longer holds.`
+            : s.contract_skew === 'overstated'
+              ? `: the floor sits closer to the price than β=${s.beta_bps}bps assumes, so maxLossBps overstates the loss.`
+              : `, which β=${s.beta_bps}bps bounds by design.`),
       };
       return reply(
-        `Worst case if you sell straight back: ${s.max_loss_pct}.\n` +
+        `Worst case if you sell straight back: ${riskText(s)}.\n` +
         `${qty} ${s.symbol} costs ${fmtXMoney(cost)} $xMoney (${fmtXMoney(cost / q)} each). Floor is ${s.floor_xmoney}.\n` +
-        `Fees: ${fmtXMoney(burn)} burned, ${fmtXMoney(fanout)} to the FanoutSink.`,
+        `Fees: ${fmtXMoney(burn)} burned, ${fmtXMoney(fanout)} to the FanoutSink${s.buyback_bps ? `, ${fmtXMoney(buyback)} to buy and burn XGAS.DEV` : ''}.`,
         data,
       );
     },
@@ -164,10 +208,11 @@ export const tools = [
         fees: [
           { label: 'Burn', amount: `${fmtXMoney((cost * 1n) / BPS)} xMoney`, note: '0.01% to 0x…dEaD' },
           { label: 'FanoutSink', amount: `${fmtXMoney((cost * 1n) / BPS)} xMoney`, note: '0.01%' },
+          ...(s.buyback_bps ? [{ label: 'XGAS.DEV buy & burn', amount: `${fmtXMoney((cost * BigInt(s.buyback_bps)) / BPS)} xMoney`, note: '0.02%, bridged to Robinhood to buy and burn XGAS.DEV' }] : []),
         ],
         net: `${qty} ${s.symbol}, redeemable right now at ${s.floor_xmoney} $xMoney each`,
         timeline: ['One transaction on xGas'],
-        irreversible: `Worst case if you sell straight back: ${s.max_loss_pct} (maxLossBps ${s.max_loss_bps}). That gap is β by design, not a fee. The floor is protected — sells and buys revert rather than let it drop — but nothing protects the price you paid.`,
+        irreversible: `Worst case if you sell straight back: ${riskText(s)}. That gap is the distance from the price you pay down to the floor, not the fee. The floor is protected (sells and buys revert rather than let it drop), but nothing protects the price you paid.`,
         notes: [
           `Value carries a ${buffer_bps}bps buffer (${fmtXMoney(value - cost)} xMoney) because the price steps up if someone buys ahead of you. The contract refunds whatever it does not use.`,
           'Whole tokens only on the primary curve.',
@@ -241,6 +286,7 @@ export const tools = [
         fees: [
           { label: 'Burn', amount: '0.01% of the redemption basis' },
           { label: 'FanoutSink', amount: '0.01% of the redemption basis' },
+          ...(s.buyback_bps ? [{ label: 'XGAS.DEV buy & burn', amount: '0.02% of the redemption basis' }] : []),
         ],
         net: `${fmtXMoney(payout)} $xMoney at current state`,
         timeline: ['One transaction on xGas'],
@@ -320,7 +366,19 @@ export const tools = [
       if (errs.length) return reply(`The contract would revert with BadParams: ${errs.join('; ')}. Nothing prepared.`, { blocked: 'bad_params', errors: errs });
 
       const seedValue = a.seed_value ? parseXMoney(a.seed_value) : 0n;
-      const maxLoss = (10000 - Math.floor((a.beta_bps * 9998) / 10000)) / 100;
+      // A launcher with buybackSink() mints curves that pay the XGAS.DEV buyback; the first launcher has none.
+      const buybackBps = await xgas.readContract({ address: launcher, abi: NGU_LAUNCHER_ABI, functionName: 'buybackSink' }).then(() => Number(BUYBACK_BPS), zeroIfReverted);
+      // The first buyer's true worst case, from the state the launch leaves behind. Mirrors NguToken._next:
+      // with no seed the first price is basePrice; with a seed, max(step over basePrice, floor/β), in integer math.
+      const beta = BigInt(a.beta_bps);
+      const firstPrice = seedQty === 0n
+        ? basePrice
+        : (() => {
+          const p1 = (basePrice * (BPS + BigInt(a.step_bps))) / BPS;
+          const p2 = (seedValue * BPS) / (beta * seedQty);
+          return p1 > p2 ? p1 : p2;
+        })();
+      const firstRisk = trueMaxLoss({ nextPrice: firstPrice, reserve: seedValue, supply: seedQty, buybackBps });
       const p = prepared({
         action: `Launch ${a.name} (${a.symbol}) as a new NGU curve`,
         chainId: XGAS_CHAIN_ID,
@@ -333,10 +391,10 @@ export const tools = [
         asset: 'native $xMoney (the seed)',
         amount: `${fmtXMoney(seedValue)} $xMoney backing ${seedQty} genesis tokens`,
         counterparty: `NguLauncher ${launcher}`,
-        fees: [{ label: 'Launch fee', amount: 'none', note: 'the money is in the flow: 0.01% burn + 0.01% FanoutSink on every later buy and sell' }],
+        fees: [{ label: 'Launch fee', amount: 'none', note: `the money is in the flow: ${feeText(buybackBps)} on every later buy and sell` }],
         net: `A new ERC-20 you control ${seedQty} of at genesis, out of ${a.max_supply}`,
         timeline: ['One transaction on xGas; the token address comes back in the NguLaunched event'],
-        irreversible: `The economics are fixed forever at launch: max supply ${a.max_supply}, base price ${a.base_price}, step ${a.step_bps}bps, β ${a.beta_bps}bps. Nobody — including you — can change them afterwards. At β=${a.beta_bps} the worst case for a buyer who sells straight back is about ${maxLoss.toFixed(2)}%.`,
+        irreversible: `The economics are fixed forever at launch: max supply ${a.max_supply}, base price ${a.base_price}, step ${a.step_bps}bps, β ${a.beta_bps}bps. Nobody, including you, can change them afterwards. The first buyer pays ${fmtXMoney(firstPrice)} $xMoney and, selling straight back, gets ${firstRisk ? fmtXMoney(firstRisk.proceeds) : '0'}: a worst case of ${firstRisk ? pct(firstRisk.lossBps) : '100.00%'}, fees included. That figure moves as the curve trades, and grows once the step carries the price above floor/β (get_ngu_token reports the live figure).`,
         notes: ['Seed tokens pay no fee and take no curve step; your own $xMoney backs them at genesis.'],
       });
       return reply(renderApproval(p), p);

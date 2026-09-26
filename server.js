@@ -26,7 +26,9 @@ const L3_RPC = process.env.VITE_ROBINHOOD_RPC_URL || DEPLOY.parentRpcUrl;
 // Nitro sequencer: reach it over Fly's private network when we're on Fly, else the public URL.
 const L4_RPC_INTERNAL = process.env.L4_RPC_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l3.internal:8449' : DEPLOY.sequencerRpcUrl);
 const L4_RPC_PUBLIC = DEPLOY.publicRpcUrl; // https://xgas.dev/rpc — the only RPC URL users ever see
-// Key allowed to execute Outbox withdrawals on Robinhood on users' behalf (permissionless call; we just pay gas).
+// The host's one hot key. It executes Outbox withdrawals on Robinhood on users' behalf (a permissionless call; we
+// just pay gas) and runs the XGAS.DEV buyback keeper, but it is also the chain owner key, holding EXECUTOR_ROLE on
+// the UpgradeExecutor. Treat it as the chain's admin key, because it is.
 // The Fly secret is still named L2_EXECUTOR_KEY from before the L2->L3->L4 rename.
 // Accept either, so renaming the code does not silently switch the Outbox executor off.
 const L3_EXECUTOR_KEY = process.env.L3_EXECUTOR_KEY || process.env.L2_EXECUTOR_KEY || '';
@@ -67,15 +69,42 @@ app.post(['/rpc', '/api/rpc'], (req, res) => {
 });
 
 // /das/* -> the AnyTrust data availability server's REST interface (batch data by hash), for third-party nodes.
+const DAS_TARGET = new URL(process.env.DAS_REST_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l3.internal:9877' : DEPLOY.sequencerRpcUrl.replace(/:\d+$/, '') + ':9877'));
+// Said the same way every time it fails, because a node operator reading this needs the cause, not a 502.
+const DAS_DOWN = {
+  error: 'DAS unavailable',
+  detail: 'The AnyTrust data availability server\'s REST port is not reachable from this host right now (it is not exposed on the node host). '
+    + 'Batch data is temporarily unavailable to third-party nodes, so a node syncing from the parent chain cannot fetch batches through /das until it is back. '
+    + 'The chain itself, the RPC at /rpc and this site are unaffected.',
+};
 app.get('/das/*', (req, res) => {
-  const target = new URL(process.env.DAS_REST_INTERNAL || (process.env.FLY_APP_NAME ? 'http://xgas-l3.internal:9877' : DEPLOY.sequencerRpcUrl.replace(/:\d+$/, '') + ':9877'));
-  const proxyReq = http.request({ hostname: target.hostname, port: target.port || 80, path: req.originalUrl.replace(/^\/das/, '') || '/', method: 'GET', timeout: 20_000 }, (proxyRes) => {
+  const proxyReq = http.request({ hostname: DAS_TARGET.hostname, port: DAS_TARGET.port || 80, path: req.originalUrl.replace(/^\/das/, '') || '/', method: 'GET', timeout: 20_000 }, (proxyRes) => {
     res.writeHead(proxyRes.statusCode || 200, { 'content-type': proxyRes.headers['content-type'] || 'application/json' });
     proxyRes.pipe(res, { end: true });
   });
-  proxyReq.on('error', () => res.status(502).json({ error: 'DAS unreachable' }));
+  proxyReq.on('timeout', () => proxyReq.destroy(new Error('timeout')));
+  proxyReq.on('error', () => { if (!res.headersSent) res.status(503).set('Retry-After', '300').json(DAS_DOWN); else res.destroy(); });
   proxyReq.end();
 });
+
+// Whether the DAS answers at all, for /api/health. Probed on demand with a short timeout and cached for a
+// minute, so a health check never waits on it for long and never hammers it.
+let dasProbe = { ok: null, at: 0, pending: null };
+function probeDas() {
+  if (Date.now() - dasProbe.at < 60_000) return Promise.resolve(dasProbe.ok);
+  if (dasProbe.pending) return dasProbe.pending;
+  dasProbe.pending = new Promise((resolve) => {
+    const done = (ok) => { dasProbe = { ok, at: Date.now(), pending: null }; resolve(ok); };
+    const r = http.request({ hostname: DAS_TARGET.hostname, port: DAS_TARGET.port || 80, path: '/health', method: 'GET', timeout: 2_000 }, (pr) => {
+      pr.resume();
+      done((pr.statusCode || 500) < 500);
+    });
+    r.on('timeout', () => r.destroy(new Error('timeout')));
+    r.on('error', () => done(false));
+    r.end();
+  });
+  return dasProbe.pending;
+}
 
 // ---------------------------------------------------------------------------
 // Chain info
@@ -86,8 +115,20 @@ async function refreshHead() {
 }
 setInterval(refreshHead, 5000); refreshHead();
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, l4Ready: Date.now() - l4Head.at < 60_000, l4Head: l4Head.block, chainId: ORBIT_L4_CHAIN_ID, executor: !!L3_EXECUTOR_KEY });
+// ok is the web app itself. The DAS and the assertion age are reported beside it, not folded into it, so a
+// monitor watching ok does not restart a healthy app over a port on another machine.
+app.get('/api/health', async (_req, res) => {
+  const das = await probeDas();
+  const confirmedAt = confirmedSendCount.confirmedAt || null;
+  res.json({
+    ok: true, l4Ready: Date.now() - l4Head.at < 60_000, l4Head: l4Head.block, chainId: ORBIT_L4_CHAIN_ID, executor: !!L3_EXECUTOR_KEY,
+    das: !!das,
+    latestConfirmedAssertion: confirmedSendCount.hash ? {
+      l4Block: confirmedSendCount.l4Block ?? null,
+      confirmedAt: confirmedAt ? new Date(confirmedAt).toISOString() : null,
+      ageS: confirmedAt ? Math.round((Date.now() - confirmedAt) / 1000) : null,
+    } : null,
+  });
 });
 
 app.get('/api/l4-info', (_req, res) => {
@@ -164,7 +205,9 @@ async function refreshConfirmedSendCount() {
     if (logs.length === 0) { confirmedSendCount = { count: 0n, at: Date.now(), hash, l4Block: 0 }; return; } // still at genesis
     const blockHash = logs[logs.length - 1].args.blockHash;
     const block = await l4Client.request({ method: 'eth_getBlockByHash', params: [blockHash, false] });
-    confirmedSendCount = { count: BigInt(block?.sendCount ?? '0x0'), at: Date.now(), hash, blockHash, l4Block: block ? parseInt(block.number, 16) : null };
+    // When the parent chain confirmed it, for /api/health. One extra read, and only when the assertion changes.
+    const confirmedAt = await l3Client.getBlock({ blockNumber: logs[logs.length - 1].blockNumber }).then((b) => Number(b.timestamp) * 1000).catch(() => null);
+    confirmedSendCount = { count: BigInt(block?.sendCount ?? '0x0'), at: Date.now(), hash, blockHash, l4Block: block ? parseInt(block.number, 16) : null, confirmedAt };
     console.log(`[withdrawals] latest confirmed assertion ${hash.slice(0, 10)} -> L4 block ${confirmedSendCount.l4Block}, sendCount ${confirmedSendCount.count}`);
   } catch (e) { console.warn('[withdrawals] confirmed send count error:', e?.message || e); }
 }
@@ -204,24 +247,134 @@ app.post('/api/withdrawals/execute', async (req, res) => {
     if (w.status === 'executed') return res.json({ ok: true, alreadyExecuted: true });
     if (w.status !== 'claimable') return res.status(409).json({ error: 'Not yet confirmed on Robinhood Chain', status: w.status });
 
-    const size = confirmedSendCount.count;
-    const proofRes = await l4Client.readContract({ address: DEPLOY.l4.nodeInterface, abi: NODE_INTERFACE_ABI, functionName: 'constructOutboxProof', args: [size, BigInt(w.position)] });
-    const [, , proof] = proofRes;
-    const account = privateKeyToAccount(L3_EXECUTOR_KEY);
-    const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
-    const hash = await wallet.writeContract({
-      address: DEPLOY.l3.outbox, abi: OUTBOX_ABI, functionName: 'executeTransaction', chain: null,
-      args: [proof, BigInt(w.position), w.caller, w.destination, BigInt(w.arbBlockNum), BigInt(w.ethBlockNum), BigInt(w.timestamp), BigInt(w.callvalue), w.data],
-    });
-    const rc = await l3Client.waitForTransactionReceipt({ hash });
-    if (rc.status !== 'success') return res.status(500).json({ error: 'Outbox execution reverted', txHash: hash });
-    w.status = 'executed'; w.executedTx = hash; saveWithdrawals();
+    const { hash, ok } = await executeOutbox(w);
+    if (!ok) return res.status(500).json({ error: 'Outbox execution reverted', txHash: hash });
     res.json({ ok: true, txHash: hash });
   } catch (e) { console.error('[withdrawals/execute]', e); res.status(500).json({ error: e.shortMessage || e.message }); }
 });
 
+/** Execute a claimable L4 -> Robinhood send on the Outbox with the host's executor key. */
+async function executeOutbox(w) {
+  const size = confirmedSendCount.count;
+  const proofRes = await l4Client.readContract({ address: DEPLOY.l4.nodeInterface, abi: NODE_INTERFACE_ABI, functionName: 'constructOutboxProof', args: [size, BigInt(w.position)] });
+  const [, , proof] = proofRes;
+  const account = privateKeyToAccount(L3_EXECUTOR_KEY);
+  const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
+  const hash = await wallet.writeContract({
+    address: DEPLOY.l3.outbox, abi: OUTBOX_ABI, functionName: 'executeTransaction', chain: null,
+    args: [proof, BigInt(w.position), w.caller, w.destination, BigInt(w.arbBlockNum), BigInt(w.ethBlockNum), BigInt(w.timestamp), BigInt(w.callvalue), w.data],
+  });
+  const rc = await l3Client.waitForTransactionReceipt({ hash });
+  if (rc.status !== 'success') return { hash, ok: false };
+  w.status = 'executed'; w.executedTx = hash; saveWithdrawals();
+  return { hash, ok: true };
+}
+
 setInterval(refreshConfirmedSendCount, 15_000); refreshConfirmedSendCount();
 setInterval(scanWithdrawals, 10_000);
+
+// ---------------------------------------------------------------------------
+// XGAS.DEV flywheel. Every L4 fee path sends 0.02% to the buyback FanoutSink. The keeper flushes that sink to
+// Robinhood, executes the withdrawal on the Outbox (it lands on XgasDevBuyback as xMoney), then has XgasDevBuyback
+// redeem the xMoney for USDG and buy + burn XGAS.DEV. The contract only lets the keeper trigger the buy, with a
+// minimum out taken from a simulation a moment earlier, so nobody can pump the pool into our buy.
+// ---------------------------------------------------------------------------
+const BUYBACK_SINK = DEPLOY.l4.buybackSink || '';
+const XGAS_BUYBACK = DEPLOY.l3.xgasDevBuyback || '';
+const XGAS_DEV = '0x006D2D9e65f847e8B5f5053C9eb3a7824ec7dFa3';
+const BUYBACK_FLUSH_MIN = BigInt(process.env.BUYBACK_FLUSH_MIN_WEI || '10000000000000000'); // 0.01 xMoney = FanoutSink.MIN_FLUSH
+const BUYBACK_SLIPPAGE_BPS = BigInt(process.env.BUYBACK_SLIPPAGE_BPS || '300');
+const SINK_ABI = parseAbi(['function flush() returns (uint256 amount, uint256 withdrawalId)', 'function totalFlushed() view returns (uint256)']);
+const BUYBACK_ABI = parseAbi([
+  'function execute(uint256 minXgasOut) returns (uint256 burned)',
+  'function totalXgasBurned() view returns (uint256)',
+  'function totalUsdgSpent() view returns (uint256)',
+  'function totalEthSpent() view returns (uint256)',
+  'function totalXMoneyRedeemed() view returns (uint256)',
+]);
+const ERC20_BALANCE_ABI = parseAbi(['function balanceOf(address) view returns (uint256)', 'function totalSupply() view returns (uint256)']);
+let buybackKeeper = { running: false, lastRun: 0, lastFlushTx: null, lastBurnTx: null, lastError: null };
+
+async function buybackBalances() {
+  const [xMoney, usdg, eth] = await Promise.all([
+    l3Client.readContract({ address: DEPLOY.l3.xMoney, abi: ERC20_BALANCE_ABI, functionName: 'balanceOf', args: [XGAS_BUYBACK] }),
+    l3Client.readContract({ address: DEPLOY.l3.usdg, abi: ERC20_BALANCE_ABI, functionName: 'balanceOf', args: [XGAS_BUYBACK] }),
+    l3Client.getBalance({ address: XGAS_BUYBACK }),
+  ]);
+  return { xMoney, usdg, eth };
+}
+
+async function runBuybackKeeper() {
+  if (!L3_EXECUTOR_KEY || !BUYBACK_SINK || !XGAS_BUYBACK || buybackKeeper.running) return;
+  buybackKeeper.running = true;
+  try {
+    const account = privateKeyToAccount(L3_EXECUTOR_KEY);
+
+    // 1. L4: push the sink's xMoney toward Robinhood.
+    const pending = await l4Client.getBalance({ address: BUYBACK_SINK });
+    if (pending >= BUYBACK_FLUSH_MIN) {
+      const l4Wallet = createWalletClient({ account, transport: viemHttp(L4_RPC_INTERNAL) });
+      const hash = await l4Wallet.writeContract({ address: BUYBACK_SINK, abi: SINK_ABI, functionName: 'flush', chain: null });
+      await l4Client.waitForTransactionReceipt({ hash });
+      buybackKeeper.lastFlushTx = hash;
+      console.log(`[buyback] flushed ${formatEther(pending)} xMoney from the L4 sink: ${hash}`);
+    }
+
+    // 2. Robinhood: execute confirmed sink withdrawals so the xMoney lands on XgasDevBuyback.
+    await scanWithdrawals();
+    for (const w of Object.values(withdrawals)) {
+      if (w.destination.toLowerCase() !== XGAS_BUYBACK.toLowerCase() || w.status === 'executed') continue;
+      await withdrawalStatus(w);
+      if (w.status !== 'claimable') continue;
+      const { hash, ok } = await executeOutbox(w);
+      console.log(`[buyback] outbox ${ok ? 'executed' : 'REVERTED'} for ${formatEther(BigInt(w.callvalue))} xMoney: ${hash}`);
+    }
+
+    // 3. Robinhood: redeem, buy, burn.
+    const { xMoney, usdg, eth } = await buybackBalances();
+    if (xMoney >= 10n ** 16n || usdg >= 10_000n || eth >= 10n ** 13n) {
+      const { result } = await l3Client.simulateContract({ account, address: XGAS_BUYBACK, abi: BUYBACK_ABI, functionName: 'execute', args: [0n] });
+      const minOut = (result * (10_000n - BUYBACK_SLIPPAGE_BPS)) / 10_000n;
+      const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
+      const hash = await wallet.writeContract({ address: XGAS_BUYBACK, abi: BUYBACK_ABI, functionName: 'execute', args: [minOut], chain: null });
+      const rc = await l3Client.waitForTransactionReceipt({ hash });
+      buybackKeeper.lastBurnTx = hash;
+      console.log(`[buyback] ${rc.status === 'success' ? 'burned' : 'REVERTED, simulated'} ~${formatEther(result)} XGAS.DEV: ${hash}`);
+    }
+    buybackKeeper.lastError = null;
+  } catch (e) {
+    buybackKeeper.lastError = e.shortMessage || e.message;
+    console.warn('[buyback] keeper error:', buybackKeeper.lastError);
+  } finally {
+    buybackKeeper.running = false;
+    buybackKeeper.lastRun = Date.now();
+  }
+}
+setInterval(runBuybackKeeper, Number(process.env.BUYBACK_INTERVAL_MS || 5 * 60_000));
+setTimeout(runBuybackKeeper, 30_000);
+
+app.get('/api/buyback', async (_req, res) => {
+  if (!XGAS_BUYBACK) return res.json({ live: false });
+  try {
+    const read = (functionName) => l3Client.readContract({ address: XGAS_BUYBACK, abi: BUYBACK_ABI, functionName });
+    const [burned, usdgSpent, ethSpent, xMoneyRedeemed, xgasSupply, onL4, onRobinhood] = await Promise.all([
+      read('totalXgasBurned'), read('totalUsdgSpent'), read('totalEthSpent'), read('totalXMoneyRedeemed'),
+      l3Client.readContract({ address: XGAS_DEV, abi: ERC20_BALANCE_ABI, functionName: 'totalSupply' }),
+      BUYBACK_SINK ? l4Client.getBalance({ address: BUYBACK_SINK }) : 0n,
+      buybackBalances(),
+    ]);
+    const inFlight = Object.values(withdrawals)
+      .filter(w => w.destination.toLowerCase() === XGAS_BUYBACK.toLowerCase() && w.status !== 'executed')
+      .reduce((a, w) => a + BigInt(w.callvalue), 0n);
+    res.json({
+      live: true, token: XGAS_DEV, buyback: XGAS_BUYBACK, sink: BUYBACK_SINK, feeBps: 2,
+      xgasBurned: formatEther(burned), xgasSupply: formatEther(xgasSupply),
+      usdgSpent: (Number(usdgSpent) / 1e6).toString(), ethSpent: formatEther(ethSpent), xMoneyRedeemed: formatEther(xMoneyRedeemed),
+      pending: { l4Sink: formatEther(onL4), inOutbox: formatEther(inFlight), xMoney: formatEther(onRobinhood.xMoney), usdg: (Number(onRobinhood.usdg) / 1e6).toString(), eth: formatEther(onRobinhood.eth) },
+      keeper: { enabled: !!L3_EXECUTOR_KEY, address: L3_EXECUTOR_KEY ? privateKeyToAccount(L3_EXECUTOR_KEY).address : null, lastRun: buybackKeeper.lastRun, lastFlushTx: buybackKeeper.lastFlushTx, lastBurnTx: buybackKeeper.lastBurnTx, lastError: buybackKeeper.lastError },
+    });
+  } catch (e) { res.status(500).json({ error: e.shortMessage || e.message }); }
+});
 
 // ---------------------------------------------------------------------------
 // Sign in with X (OAuth 2.0 + PKCE). Configure with Fly secrets:
@@ -296,7 +449,10 @@ function safeReturnTo(v) {
 }
 function currentUser(req) {
   const sess = verify(parseCookies(req)[SESSION_COOKIE]);
-  return sess && sess.handle ? { id: sess.id, handle: sess.handle, name: sess.name, avatar: sess.avatar } : null;
+  // Only real sessions: a connector token is signed with the same secret, so without this check it would
+  // work as a cookie too and survive its own revocation. Sessions minted before `k` existed carry none.
+  if (!sess || !sess.handle || (sess.k !== undefined && sess.k !== 'session')) return null;
+  return { id: sess.id, handle: sess.handle, name: sess.name, avatar: sess.avatar };
 }
 
 app.get('/api/me', (req, res) => {
@@ -350,7 +506,7 @@ app.get('/auth/x/callback', async (req, res) => {
       console.error('[X AUTH] users/me failed:', me);
       return res.status(502).send('Could not read your X profile.');
     }
-    const sess = { id: me.data.id, handle: me.data.username, name: me.data.name, avatar: me.data.profile_image_url, exp: Date.now() + SESSION_TTL_S * 1000 };
+    const sess = { k: 'session', id: me.data.id, handle: me.data.username, name: me.data.name, avatar: me.data.profile_image_url, exp: Date.now() + SESSION_TTL_S * 1000 };
     setCookie(req, res, SESSION_COOKIE, sign(sess), SESSION_TTL_S);
     console.log(`[X AUTH] @${me.data.username} signed in`);
     // Land somewhere that says so. A redirect that looks identical to the page you left is how people
@@ -376,16 +532,53 @@ app.post('/auth/x/logout', (req, res) => {
 // The token a person hands their own model. Signed with the session secret, so it needs no storage;
 // tied to their X id, so it can only ever reach their wallet.
 const CONNECTOR_TTL_S = 180 * 24 * 3600;
+// Revocation without a token table: each X id has an epoch, every token carries the epoch it was minted at,
+// and revoking bumps the epoch, so every token minted before that stops verifying at once. Tokens from before
+// epochs existed carry none and count as epoch 0, so they keep working until their owner revokes.
+const CONNECTOR_EPOCHS_FILE = path.join(DATA_DIR, 'connector-epochs.json');
+let connectorEpochs = {};
+// A revocation list that silently resets would bring revoked tokens back, so a file that exists but won't
+// parse disables connector tokens entirely until someone fixes it.
+let connectorEpochsBroken = false;
+try { if (fs.existsSync(CONNECTOR_EPOCHS_FILE)) connectorEpochs = JSON.parse(fs.readFileSync(CONNECTOR_EPOCHS_FILE, 'utf8')); }
+catch (e) { connectorEpochsBroken = true; console.error(`[connector] ${CONNECTOR_EPOCHS_FILE} is unreadable; rejecting every connector token until it is fixed:`, e.message); }
+const connectorEpoch = (id) => Number(connectorEpochs[String(id)] || 0);
+function bumpConnectorEpoch(id) {
+  const next = { ...connectorEpochs, [String(id)]: connectorEpoch(id) + 1 };
+  const tmp = `${CONNECTOR_EPOCHS_FILE}.tmp`;
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try { fs.writeSync(fd, JSON.stringify(next)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, CONNECTOR_EPOCHS_FILE);
+  connectorEpochs = next;
+  return next[String(id)];
+}
+const connectorClaimLive = (claim) => !connectorEpochsBroken && Number(claim.e || 0) === connectorEpoch(claim.id);
+
 app.post('/api/connector/token', (req, res) => {
   const user = currentUser(req);
   if (!user) return res.status(401).json({ error: 'Sign in with X first: this mints a token for your own wallet.' });
-  const token = sign({ k: 'connector', id: String(user.id), handle: user.handle, exp: Date.now() + CONNECTOR_TTL_S * 1000 });
+  const token = sign({ k: 'connector', id: String(user.id), handle: user.handle, e: connectorEpoch(user.id), exp: Date.now() + CONNECTOR_TTL_S * 1000 });
   res.json({
     token,
     handle: user.handle,
     expires: new Date(Date.now() + CONNECTOR_TTL_S * 1000).toISOString(),
     usage: `Authorization: Bearer <token> against ${PUBLIC_ORIGIN}/mcp`,
+    revoke: `POST ${PUBLIC_ORIGIN}/api/connector/revoke while signed in with X kills every connector token you have minted`,
   });
+});
+
+// Same gate as minting: the X session cookie, never a connector token, so a leaked token cannot lock its owner out.
+app.post('/api/connector/revoke', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Sign in with X first: this revokes the connector tokens for your own wallet.' });
+  try {
+    bumpConnectorEpoch(user.id);
+  } catch (e) {
+    console.error('[connector/revoke]', e);
+    return res.status(500).json({ error: 'Could not save the revocation, so nothing was revoked. Try again.' });
+  }
+  console.log(`[connector] @${user.handle} revoked their connector tokens`);
+  res.json({ ok: true, handle: user.handle, revoked: 'every connector token minted before now' });
 });
 
 app.get('/api/connector', (req, res) => {
@@ -454,7 +647,7 @@ function actorFor(req) {
   const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (bearer) {
     const claim = verify(bearer);
-    if (claim && claim.k === 'connector' && claim.id) {
+    if (claim && claim.k === 'connector' && claim.id && connectorClaimLive(claim)) {
       return { kind: 'user', id: String(claim.id), handle: claim.handle, label: `@${claim.handle}` };
     }
   }
@@ -493,7 +686,20 @@ app.get('/api/mcp', (_req, res) => {
     transport: { http: `${PUBLIC_ORIGIN}/mcp`, stdio: 'npx -y xgas-mcp' },
     npm: 'https://www.npmjs.com/package/xgas-mcp',
     tool_count: MCP_TOOL_COUNT,
-    custodial: false,
+    // Counted from the registry at boot, so no page or README has to keep its own copy.
+    tool_counts: {
+      total: ALL_TOOLS.length,
+      hosted_anonymous: MCP_TOOL_COUNT,
+      hosted_signed_in: ALL_TOOLS.filter((t) => hostableFor(true)(t.name)).length,
+      browser_anonymous: ALL_TOOLS.filter((t) => isBrowserSafe(t.name)).length,
+    },
+    // Not a plain boolean, because the true answer is not one.
+    custodial: 'opt-in',
+    custody: 'Non-custodial by default: every write tool returns an unsigned transaction for your own wallet to sign, '
+      + 'and submit_* only relays what you already signed. The exception is opt-in: sign in with X and wallet_create makes '
+      + 'you a Privy wallet that this server signs for with its PRIVY_APP_SECRET. That wallet is custodial. Keep in it only '
+      + 'what you are willing to have an agent spend.',
+    connector_tokens: { ttl_days: CONNECTOR_TTL_S / 86400, revoke: `POST ${PUBLIC_ORIGIN}/api/connector/revoke, signed in with X` },
     // The wallet tools exist, and the hosted endpoint serves them only to a caller with the token.
     wallet_tools: ALL_TOOLS.filter((t) => t.name.startsWith('wallet_')).map((t) => t.name),
     wallet_tools_over_http: 'sign in with X at /auth/x/login; each signed-in person gets their own Privy wallet',
@@ -564,7 +770,7 @@ app.get(['/order/:id', '/offer/:id', '/bid/:id', '/ask/:id'], async (req, res) =
         const price = (Number(rateBps) / 10000).toFixed(3);
         const title = `${kind} #${id}: ${verb} ${fmtX(available)} $xMoney @ $${price} · @${handle} · xgas Orbit L4`;
         const description = active
-          ? `${verb} ${fmtX(minAmt)}–${fmtX(maxAmt)} $xMoney per trade at $${price} USD on X Money, escrowed on xgas Orbit L4 #466301. 0.01% burn · 0.01% Stacc Fanout.`
+          ? `${verb} ${fmtX(minAmt)} to ${fmtX(maxAmt)} $xMoney per trade at $${price} USD on X Money, escrowed on xgas Orbit L4 #466301. 0.01% burn · 0.01% Stacc Wizards Fee Fanout · 0.02% XGAS.DEV buy & burn.`
           : `This ${kind.toLowerCase()} by @${handle} is closed. Browse live offers and bids on the xgas Orbit L4 desk.`;
         html = withMeta(html, { title, description, url: `${PUBLIC_ORIGIN}/order/${id}` });
       }
@@ -595,6 +801,14 @@ app.get(['/trade/:id', '/settlement/:id'], async (req, res) => {
     console.warn('[OG] trade preview failed:', e?.message || e);
   }
   res.type('html').send(html);
+});
+
+// Legal pages (static HTML in dist from public/); clean URLs for app-store / Meta forms
+app.get(['/privacy', '/privacy.html'], (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'privacy.html'));
+});
+app.get(['/terms', '/terms.html', '/tos', '/tos.html'], (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'terms.html'));
 });
 
 // Serve frontend build

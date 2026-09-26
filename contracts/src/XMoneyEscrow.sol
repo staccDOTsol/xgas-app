@@ -12,19 +12,24 @@ pragma solidity ^0.8.26;
  *         On trade release:
  *         - 0.01% (1 bp) $xMoney burned permanently to 0x000...dEaD
  *         - 0.01% (1 bp) $xMoney sent to the FanoutSink, which bridges it to the Stacc Wizards Fee Fanout on Robinhood
- *         - 99.98% $xMoney delivered net to the buyer.
+ *         - 0.02% (2 bp) $xMoney sent to the buyback sink, which bridges it to XgasDevBuyback (buys + burns XGAS.DEV)
+ *         - 99.96% $xMoney delivered net to the buyer.
  */
 contract XMoneyEscrow {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
     address public immutable FANOUT;
+    address public immutable BUYBACK;
 
-    constructor(address fanout_) {
+    constructor(address fanout_, address buyback_) {
         require(fanout_ != address(0), "fanout");
+        require(buyback_ != address(0), "buyback");
         FANOUT = fanout_;
+        BUYBACK = buyback_;
     }
 
     uint256 public constant BURN_BPS = 1;        // 0.01%
     uint256 public constant FANOUT_RAKE_BPS = 1; // 0.01%
+    uint256 public constant BUYBACK_BPS = 2;     // 0.02%
     uint256 public constant TRADE_TIMEOUT = 15 minutes;
 
     enum OrderSide { ASK, BID } // ASK = Selling xMoney for fiat, BID = Buying xMoney with fiat
@@ -58,6 +63,7 @@ contract XMoneyEscrow {
     uint256 public nextTradeId;
     uint256 public totalXMoneyBurned;
     uint256 public totalXMoneyRakedToFanout;
+    uint256 public totalXMoneyToBuyback;
     uint256 public totalSettledVolumeXMoney;
 
     mapping(uint256 => Order) public orders;
@@ -262,16 +268,19 @@ contract XMoneyEscrow {
 
         uint256 burnSkim = (trade.xMoneyAmount * BURN_BPS) / 10000;
         uint256 rakeSkim = (trade.xMoneyAmount * FANOUT_RAKE_BPS) / 10000;
-        uint256 net = trade.xMoneyAmount - burnSkim - rakeSkim;
+        uint256 buybackSkim = (trade.xMoneyAmount * BUYBACK_BPS) / 10000;
+        uint256 net = trade.xMoneyAmount - burnSkim - rakeSkim - buybackSkim;
 
         totalXMoneyBurned += burnSkim;
         totalXMoneyRakedToFanout += rakeSkim;
+        totalXMoneyToBuyback += buybackSkim;
         totalSettledVolumeXMoney += trade.xMoneyAmount;
 
         emit TradeCompleted(tradeId, trade.orderId, trade.buyer, net, burnSkim, rakeSkim);
 
         if (burnSkim > 0) _send(DEAD, burnSkim);
         if (rakeSkim > 0) _send(FANOUT, rakeSkim);
+        if (buybackSkim > 0) _send(BUYBACK, buybackSkim);
         _send(trade.buyer, net);
     }
 

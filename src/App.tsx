@@ -35,7 +35,7 @@ export default function App() {
   const [rpcMismatch, setRpcMismatch] = useState<{ wallet: number; sequencer: number } | null>(null);
   const [xUser, setXUser] = useState<XUser | null>(null);
   const [xConfigured, setXConfigured] = useState<boolean>(false);
-  const [tab, setTab] = useState<'mcp' | 'otc' | 'ngu'>('mcp');
+  const [tab, setTab] = useState<'mcp' | 'otc' | 'ngu'>('otc');
 
   // Sign in with X session
   useEffect(() => {
@@ -150,7 +150,7 @@ export default function App() {
           setIsWrongNetwork(!KNOWN_CHAINS.has(res.chainId));
         }
         if (soundEnabled && sounds.enabled) {
-          sounds.playBuyApe();
+          sounds.playConnect();
         }
       }
     } catch (e) {
@@ -166,7 +166,7 @@ export default function App() {
       setIsWrongNetwork(false);
       setL4Added(true);
       if (soundEnabled && sounds.enabled) {
-        sounds.playBuyApe();
+        sounds.playConnect();
       }
     }
   };
@@ -175,7 +175,7 @@ export default function App() {
     const ok = await addOrbitL4ToWallet();
     if (ok) {
       setL4Added(true);
-      if (soundEnabled && sounds.enabled) sounds.playBuyApe();
+      if (soundEnabled && sounds.enabled) sounds.playConnect();
       setTimeout(() => setL4Added(false), 3000);
     }
   };
@@ -185,7 +185,7 @@ export default function App() {
     if (ok) {
       setTokenImported(true);
       if (soundEnabled && sounds.enabled) {
-        sounds.playBuyApe();
+        sounds.playConnect();
       }
       setTimeout(() => setTokenImported(false), 3000);
     }
@@ -195,7 +195,7 @@ export default function App() {
     const next = !soundEnabled;
     setSoundEnabled(next);
     sounds.enabled = next;
-    if (next) sounds.playBuyApe();
+    if (next) sounds.playConnect();
   };
 
   const onL4 = currentChainId === L4_CHAIN_ID;
@@ -354,13 +354,13 @@ export default function App() {
       <main className="flex-1 p-3 sm:p-5 max-w-[1780px] w-full mx-auto">
         <Hero />
         <div id="play" className="scroll-mt-28 flex gap-1.5 mb-4 overflow-x-auto no-scrollbar [&>*]:shrink-0">
-          <button onClick={() => setTab('mcp')}
-            className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'mcp' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
-            MCP connector
-          </button>
           <button onClick={() => setTab('otc')}
             className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'otc' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
             OTC desk
+          </button>
+          <button onClick={() => setTab('mcp')}
+            className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'mcp' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
+            MCP connector
           </button>
           <button onClick={() => setTab('ngu')}
             className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'ngu' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>

@@ -16,7 +16,7 @@ class SoundEngine {
     }
   }
 
-  playBuyApe() {
+  playConnect() {
     if (!this.enabled) return;
     try {
       this.initCtx();

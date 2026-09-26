@@ -14,10 +14,12 @@ contract FomoAttritionL4Test is Test {
     // The L4 rake lands in a FanoutSink that bridges to the Robinhood fanout; the sink IS the fanout here.
     address public constant PARENT_FANOUT = 0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8;
     address public FANOUT;
+    address public BUYBACK;
 
     function setUp() public {
         FANOUT = address(new FanoutSink(PARENT_FANOUT));
-        game = new FomoAttritionL4(FANOUT);
+        BUYBACK = address(new FanoutSink(makeAddr("xgasDevBuyback")));
+        game = new FomoAttritionL4(FANOUT, BUYBACK);
         // Native $xMoney on Orbit L4
         vm.deal(alice, 1000 ether);
         vm.deal(bob, 1000 ether);
@@ -33,6 +35,8 @@ contract FomoAttritionL4Test is Test {
         assertEq(game.currentLeaderXHandle(), "alice_x");
         assertEq(DEAD.balance, cost / 10000);
         assertEq(FANOUT.balance, cost / 10000);
+        assertEq(BUYBACK.balance, (cost * 2) / 10000);
+        assertEq(game.totalBuyback(), (cost * 2) / 10000);
 
         uint256 bobCost = game.getKeyPrice() * 10;
         vm.prank(bob);
@@ -76,7 +80,7 @@ contract FomoAttritionL4Test is Test {
         uint256 aliceBalBefore = alice.balance;
         game.claimJackpot();
 
-        uint256 expectedNet = pot - (pot / 10000) * 2;
+        uint256 expectedNet = pot - (pot / 10000) * 2 - (pot * 2) / 10000;
         assertEq(alice.balance - aliceBalBefore, expectedNet);
         assertEq(game.roundId(), 2);
         assertEq(game.jackpotPot(), 0);
@@ -115,7 +119,7 @@ contract FomoAttritionL4Test is Test {
         uint256 before = alice.balance;
         vm.prank(alice);
         game.claimDividendsForRound(1);
-        assertEq(alice.balance - before, owedR1 - (owedR1 / 10000) * 2);
+        assertEq(alice.balance - before, owedR1 - (owedR1 / 10000) * 2 - (owedR1 * 2) / 10000);
 
         vm.prank(alice);
         vm.expectRevert(FomoAttritionL4.NoDividendsToClaim.selector);

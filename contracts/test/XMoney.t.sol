@@ -53,11 +53,12 @@ contract XMoneyTest is Test {
         // net = 999.9 USDG worth -> 999.9e18 gross -> minus 0.01% entry burn
         uint256 gross = 999_900_000e12;
         uint256 entryBurn = gross / 10000;
-        assertEq(bridged, gross - entryBurn);
+        // the L4 gas prepay is paid out of the depositor's own net, not minted on top
+        uint256 fee = token.l4GasLimit() * token.l4MaxFeePerGas();
+        assertEq(bridged, gross - entryBurn - fee);
         assertEq(inbox.lastTo(), alice);
         assertEq(inbox.lastL3CallValue(), bridged);
         // bridge holds l3CallValue + L4 fee prefund + half the entry burn buffer: NOT taxed on the way in
-        uint256 fee = token.l4GasLimit() * token.l4MaxFeePerGas();
         assertEq(token.balanceOf(address(bridge)), bridged + fee + entryBurn / 2);
         assertEq(token.balanceOf(DEAD), entryBurn - entryBurn / 2);
         assertEq(token.balanceOf(address(inbox)), 0);

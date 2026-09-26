@@ -11,9 +11,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///         price(next) = max(lastPrice * (1 + step), floor / beta)
 ///         floor       = reserve / supply
 ///         buy         mints `qty` whole tokens; 0.01% of each unit price is burned,
-///                     0.01% goes to the FanoutSink, the rest backs the floor.
-///         sell        burns `qty` whole tokens; redeems 99.98% of min(floor, lastPrice)
-///                     per token. 0.01% burned, 0.01% to the FanoutSink.
+///                     0.01% goes to the FanoutSink, 0.02% to the XGAS.DEV buyback sink,
+///                     the rest backs the floor.
+///         sell        burns `qty` whole tokens; redeems 99.96% of min(floor, lastPrice)
+///                     per token. 0.01% burned, 0.01% FanoutSink, 0.02% buyback sink.
 ///
 ///         Both the mint price and the floor are monotone: the contract reverts rather
 ///         than let either drop (FloorWouldDrop). 1 token = 1e18 base units = 1 curve step.
@@ -22,11 +23,20 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///         Warp note: bridging locks tokens in a Hyperlane collateral escrow. Locked
 ///         tokens remain in totalSupply, the reserve doesn't move, so the floor doesn't
 ///         move. A bridge is a transfer into escrow, not an economic event.
+/// @dev The launcher that deploys every NguToken; each token reads its fee sinks from it once, at construction.
+interface INguSinks {
+    function fanoutSink() external view returns (address);
+    function buybackSink() external view returns (address);
+}
+
 contract NguToken is ERC20, ReentrancyGuard {
     /// @notice 0.01% of every mint/burn payment sent to 0xdead (1 bp).
     uint16 public constant BURN_BPS = 1;
     /// @notice 0.01% of every mint/burn payment sent to the FanoutSink (1 bp).
     uint16 public constant FANOUT_BPS = 1;
+    /// @notice 0.02% of every mint/burn payment sent to the buyback sink, which bridges it to
+    ///         XgasDevBuyback on Robinhood to buy and burn XGAS.DEV (2 bp).
+    uint16 public constant BUYBACK_BPS = 2;
     uint16 public constant MAX_STEP_BPS = 5000;
     uint16 public constant MIN_BETA_BPS = 5000;
     uint16 public constant MAX_BETA_BPS = 9500;
@@ -40,12 +50,15 @@ contract NguToken is ERC20, ReentrancyGuard {
 
     address public immutable launcher;
     address public immutable fanoutSink;
+    address public immutable buybackSink;
     /// @notice Max whole tokens ever mintable.
     uint256 public immutable maxSupply;
     uint256 public immutable basePrice;
     uint16 public immutable stepBps;
-    /// @notice Floor protection in bps: buy price >= floor / (betaBps/10000).
-    ///         9000 = the redemption floor never sits below 90% of the buy price.
+    /// @notice Price support in bps: next buy price >= floor / (betaBps/10000).
+    ///         9000 = the floor is AT MOST 90% of the next price. It is a ceiling on the
+    ///         floor, not a promise: once the step term sets the price, price runs ahead
+    ///         and the floor can sit far below it. maxLossBps() reports the live gap.
     uint16 public immutable betaBps;
     /// @notice Genesis tokens minted to the creator, backed by the launch payment.
     uint256 public immutable seedQty;
@@ -79,7 +92,6 @@ contract NguToken is ERC20, ReentrancyGuard {
     constructor(
         string memory name_,
         string memory symbol_,
-        address fanoutSink_,
         uint256 maxSupply_,
         uint256 basePrice_,
         uint16 stepBps_,
@@ -89,11 +101,14 @@ contract NguToken is ERC20, ReentrancyGuard {
     ) payable ERC20(name_, symbol_) {
         if (
             maxSupply_ == 0 || basePrice_ == 0 || stepBps_ > MAX_STEP_BPS || betaBps_ < MIN_BETA_BPS
-                || betaBps_ > MAX_BETA_BPS || seedQty_ > maxSupply_ || fanoutSink_ == address(0)
-                || creator_ == address(0)
+                || betaBps_ > MAX_BETA_BPS || seedQty_ > maxSupply_ || creator_ == address(0)
         ) revert BadParams();
         launcher = msg.sender;
+        address fanoutSink_ = INguSinks(msg.sender).fanoutSink();
+        address buybackSink_ = INguSinks(msg.sender).buybackSink();
+        if (fanoutSink_ == address(0) || buybackSink_ == address(0)) revert BadParams();
         fanoutSink = fanoutSink_;
+        buybackSink = buybackSink_;
         maxSupply = maxSupply_;
         basePrice = basePrice_;
         stepBps = stepBps_;
@@ -141,7 +156,7 @@ contract NguToken is ERC20, ReentrancyGuard {
         for (uint256 q; q < qty; q++) {
             uint256 p = _next(r, s, last, n);
             cost += p;
-            r += p - (p * (BURN_BPS + FANOUT_BPS)) / 10_000;
+            r += p - _fees(p);
             s++;
             n++;
             last = p;
@@ -149,13 +164,13 @@ contract NguToken is ERC20, ReentrancyGuard {
     }
 
     /// @notice $xMoney a holder receives for burning `qty` whole tokens now.
-    /// @dev Matches `sell` exactly: per-unit `(b * BURN_BPS) / 10_000` rounding, not combined.
+    /// @dev Matches `sell` exactly: per-unit, per-leg rounding (see `_fees`).
     function quoteSell(uint256 qty) external view returns (uint256 payout) {
         uint256 r = reserve;
         uint256 s = supply;
         for (uint256 q; q < qty && s > 0; q++) {
             uint256 b = _sellBase(r, s);
-            payout += b - (b * BURN_BPS) / 10_000 - (b * FANOUT_BPS) / 10_000;
+            payout += b - _fees(b);
             r -= b;
             s--;
         }
@@ -169,11 +184,17 @@ contract NguToken is ERC20, ReentrancyGuard {
         return f > lastPrice ? lastPrice : f;
     }
 
-    /// @notice Worst case for a buyer who sells straight back, in bps of what they paid.
+    /// @notice Loss, in bps of what they paid (rounded up), for a buyer who mints one whole
+    ///         token at nextPrice() and sells it straight back. Read from live state: it is
+    ///         near 1 - beta only while floor / beta sets the price, and approaches 100% as
+    ///         the step term runs the price ahead of the floor.
     function maxLossBps() external view returns (uint256) {
-        // sell returns (1 - 0.02%) of min(floor, price); floor >= beta * price once beta binds.
-        uint256 recover = (uint256(betaBps) * (10_000 - BURN_BPS - FANOUT_BPS)) / 10_000;
-        return 10_000 - recover;
+        // Replays buy(1) then sell(1) with their exact per-leg rounding.
+        uint256 p = nextPrice();
+        uint256 f = (reserve + p - _fees(p)) / (supply + 1);
+        uint256 b = f > p ? p : f; // _sellBase, with lastPrice = p after the buy
+        uint256 out = b - _fees(b);
+        return ((p - out) * 10_000 + p - 1) / p;
     }
 
     // buy / sell
@@ -186,14 +207,17 @@ contract NguToken is ERC20, ReentrancyGuard {
         uint256 floorBefore = floor();
         uint256 burn;
         uint256 rake;
+        uint256 buyback;
         for (uint256 q; q < qty; q++) {
             uint256 p = _next(reserve, supply, lastPrice, minted);
             cost += p;
             uint256 b = (p * BURN_BPS) / 10_000;
             uint256 r = (p * FANOUT_BPS) / 10_000;
+            uint256 bb = (p * BUYBACK_BPS) / 10_000;
             burn += b;
             rake += r;
-            reserve += p - b - r;
+            buyback += bb;
+            reserve += p - b - r - bb;
             supply++;
             lastPrice = p;
             _mint(to, UNIT);
@@ -204,11 +228,12 @@ contract NguToken is ERC20, ReentrancyGuard {
         emit Tick(TICK_BUY, to, qty, lastPrice, floor(), supply, reserve, minted);
         _toDead(burn);
         _fanout(rake);
+        _send(buybackSink, buyback);
         if (msg.value > cost) _send(msg.sender, msg.value - cost);
     }
 
     /// @notice Burn `qty` whole tokens and redeem $xMoney from the reserve at
-    ///         99.98% of min(floor, lastPrice) per token. Never touches the curve.
+    ///         99.96% of min(floor, lastPrice) per token. Never touches the curve.
     function sell(uint256 qty, address payable to, uint256 minOut)
         external
         nonReentrant
@@ -219,13 +244,16 @@ contract NguToken is ERC20, ReentrancyGuard {
         uint256 floorBefore = floor();
         uint256 burn;
         uint256 rake;
+        uint256 buyback;
         for (uint256 q; q < qty && supply > 0; q++) {
             uint256 b = _sellBase(reserve, supply);
             uint256 bd = (b * BURN_BPS) / 10_000;
             uint256 r = (b * FANOUT_BPS) / 10_000;
-            payout += b - bd - r;
+            uint256 bb = (b * BUYBACK_BPS) / 10_000;
+            payout += b - bd - r - bb;
             burn += bd;
             rake += r;
+            buyback += bb;
             reserve -= b;
             supply--;
             _burn(msg.sender, UNIT);
@@ -236,6 +264,7 @@ contract NguToken is ERC20, ReentrancyGuard {
         emit Tick(TICK_SELL, msg.sender, qty, nextPrice(), floor(), supply, reserve, minted);
         _toDead(burn);
         _fanout(rake);
+        _send(buybackSink, buyback);
         _send(to, payout);
     }
 
@@ -248,6 +277,11 @@ contract NguToken is ERC20, ReentrancyGuard {
     receive() external payable {
         reserve += msg.value;
         emit Tick(TICK_DONATE, msg.sender, 0, lastPrice, floor(), supply, reserve, minted);
+    }
+
+    /// @dev Burn + Fanout + buyback on a payment, rounded per leg exactly as buy/sell do.
+    function _fees(uint256 amount) internal pure returns (uint256) {
+        return (amount * BURN_BPS) / 10_000 + (amount * FANOUT_BPS) / 10_000 + (amount * BUYBACK_BPS) / 10_000;
     }
 
     function _toDead(uint256 amount) internal {

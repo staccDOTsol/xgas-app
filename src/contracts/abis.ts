@@ -37,11 +37,13 @@ export const CONTRACT_ADDRESSES = {
   ORBIT_SEQUENCER_INBOX: '0x16Daa2551d41243C82366c8b94Dc11418Ac0AeD7',
   XMONEY_TIMELOCK: '0x70A0fBE369e7C390BddA7c55dFD8590F6C13B47B',
   ORBIT_DEPLOY_TX: '0xa49321744d16391e315e4202f576768247c3f60bd79b64dc837ef61fb2f0afc5',
-  XMONEY_ESCROW_L4: '0x1877f55E01670539b3a93aD7004a45C25Aed19d5', // v3 (2026-09-21): rakes → FanoutSink 0x6521…9b4B → ArbSys → Wizards fanout on Robinhood
-  FOMO_ATTRITION_L4: '0x556b8c1943905D6e8354E4Df853b9053a62a40d8',
-  XGAS_ROUTER: '0x98b52B1a50FE263aBE0F6CE19d47C6F65C42c23A',
+  XMONEY_ESCROW_L4: '0xBCa24A0f7E43bCFa944c490D66470f3A03bbEcC8', // v4 (2026-09-26): 0.01% → FanoutSink 0x6521…9b4B, 0.02% → buyback sink 0xa924…a97E → XgasDevBuyback on Robinhood
+  FOMO_ATTRITION_L4: '0xec342a426c6CB512c75Fe34DaCE455e9cFeC6582',
+  XGAS_ROUTER: '0xfeb38ce50e1F49438acAa39b2Da513d2F1DE548f',
   ARB_SYS: '0x0000000000000000000000000000000000000064',
   FEE_FANOUT: '0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e',
+  /** XGAS.DEV on Robinhood: the 0.02% leg of every L4 fee path buys it and burns it (XgasDevBuyback). */
+  XGAS_DEV: '0x006D2D9e65f847e8B5f5053C9eb3a7824ec7dFa3',
 } as const;
 
 /** Live xgas Orbit L4 contract addresses (mutable; refreshed from /api/l4-info at boot). */
@@ -51,6 +53,8 @@ export const l4Addresses = {
   router: CONTRACT_ADDRESSES.XGAS_ROUTER as string,
   /** NGU launcher on xGas L4. Empty until deployed; refreshed from /api/l4-info at boot. */
   nguLauncher: '' as string,
+  /** The first NGU launcher (0.01% + 0.01%, no XGAS.DEV buyback). Listed, never launched on. Empty if absent. */
+  legacyNguLauncher: '' as string,
   ready: false,
 };
 

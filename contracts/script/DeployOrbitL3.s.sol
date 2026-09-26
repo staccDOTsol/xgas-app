@@ -24,11 +24,12 @@ contract DeployOrbitL3 is Script {
         } else {
             console.log("0. FanoutSink (L3) reused at:", sink);
         }
-        XMoneyEscrow escrow = new XMoneyEscrow(sink);
+        address buyback = vm.envAddress("BUYBACK_SINK");
+        XMoneyEscrow escrow = new XMoneyEscrow(sink, buyback);
         console.log("1. XMoneyEscrow (L3) deployed at:", address(escrow));
         FomoAttritionL3 fomo = new FomoAttritionL3(sink);
         console.log("2. FomoAttritionL3 (L3) deployed at:", address(fomo));
-        XGasRouter router = new XGasRouter(payable(sink));
+        XGasRouter router = new XGasRouter(payable(sink), payable(buyback));
         console.log("3. XGasRouter (L3) deployed at:", address(router));
         vm.stopBroadcast();
     }

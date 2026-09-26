@@ -1,5 +1,5 @@
 import { encodeFunctionData, isAddress } from 'viem';
-import { L4, XGAS_CHAIN_ID, xgas, ZERO, BURN_BPS, FANOUT_RAKE_BPS, TRADE_TIMEOUT_S } from '../config.mjs';
+import { L4, XGAS_CHAIN_ID, xgas, ZERO, BURN_BPS, FANOUT_RAKE_BPS, BUYBACK_BPS, TRADE_TIMEOUT_S } from '../config.mjs';
 import { ESCROW_ABI } from '../abis.mjs';
 import { expectedCents, fmtXMoney, parseXMoney, rateToUsd, usd } from '../money.mjs';
 import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
@@ -65,7 +65,8 @@ async function trade(id) {
 function tradeSplit(xWei) {
   const burn = (xWei * BURN_BPS) / BPS;
   const rake = (xWei * FANOUT_RAKE_BPS) / BPS;
-  return { burn, rake, net: xWei - burn - rake };
+  const buyback = (xWei * BUYBACK_BPS) / BPS;
+  return { burn, rake, buyback, net: xWei - burn - rake - buyback };
 }
 
 const FIAT_NOTE = 'The fiat leg is not on chain. It happens between two X handles on X Money; this connector watches the escrow, never the payment.';
@@ -121,14 +122,14 @@ export const tools = [
       return reply(
         `Trade #${t.trade_id} (${t.state}) from order #${t.order_id}: @${t.buyer_x_handle} owes ${t.fiat_due} on X Money to @${t.seller_x_handle} for ${t.xmoney} $xMoney.\n` +
         `On release the buyer nets ${fmtXMoney(split.net)} $xMoney. ${t.seconds_left > 0 ? `${t.seconds_left}s left before the seller can reclaim.` : 'The timeout has passed; the seller may reclaim.'}\n${FIAT_NOTE}`,
-        { ...t, on_release: { burn: fmtXMoney(split.burn), fanout_rake: fmtXMoney(split.rake), net_to_buyer: fmtXMoney(split.net) } },
+        { ...t, on_release: { burn: fmtXMoney(split.burn), fanout_rake: fmtXMoney(split.rake), xgas_dev_buyback: fmtXMoney(split.buyback), net_to_buyer: fmtXMoney(split.net) } },
       );
     },
   },
 
   {
     name: 'quote_trade',
-    description: 'What a given size against a given order costs and delivers: fiat due in USD, the burn and rake, and the net $xMoney the buyer receives. Read-only.',
+    description: 'What a given size against a given order costs and delivers: fiat due in USD, the burn, rake and XGAS.DEV buyback, and the net $xMoney the buyer receives. Read-only.',
     inputSchema: {
       type: 'object',
       properties: { order_id: { type: 'integer', minimum: 0 }, xmoney_amount: { type: 'string', description: 'Size in $xMoney.' } },
@@ -149,14 +150,14 @@ export const tools = [
       const data = {
         order_id, side: o.side, maker_x_handle: o.maker_x_handle, price_usd: o.price_usd,
         size: fmtXMoney(xWei), fiat_due: usd(cents), expected_cents: cents,
-        burn: fmtXMoney(split.burn), fanout_rake: fmtXMoney(split.rake), net_xmoney_to_buyer: fmtXMoney(split.net),
+        burn: fmtXMoney(split.burn), fanout_rake: fmtXMoney(split.rake), xgas_dev_buyback: fmtXMoney(split.buyback), net_xmoney_to_buyer: fmtXMoney(split.net),
         fillable: blocked.length === 0, blocked_because: blocked,
         trust: 'The $xMoney leg is escrowed on chain. The fiat leg is an X Money payment between two X handles, released by the seller. A seller who never releases is bounded only by the 15-minute reclaim on their own side, not yours.',
       };
       if (blocked.length) return reply(`Not fillable as asked: ${blocked.join('; ')}.`, data);
       return reply(
         `${fmtXMoney(xWei)} $xMoney against order #${order_id} at $${o.price_usd}: ${usd(cents)} due on X Money to @${o.maker_x_handle}.\n` +
-        `Buyer nets ${fmtXMoney(split.net)} $xMoney after ${fmtXMoney(split.burn)} burned and ${fmtXMoney(split.rake)} to the FanoutSink.\n${FIAT_NOTE}`,
+        `Buyer nets ${fmtXMoney(split.net)} $xMoney after ${fmtXMoney(split.burn)} burned, ${fmtXMoney(split.rake)} to the FanoutSink and ${fmtXMoney(split.buyback)} to buy and burn XGAS.DEV.\n${FIAT_NOTE}`,
         data,
       );
     },
@@ -197,7 +198,7 @@ export const tools = [
         asset: 'native $xMoney on xGas L4',
         amount: `${fmtXMoney(total)} $xMoney escrowed at $${rateToUsd(bps)} each (${fmtXMoney(min)}–${fmtXMoney(max)} per trade)`,
         counterparty: `Escrow ${L4.escrow}; buyers pay @${handle} on X Money`,
-        fees: [{ label: 'On each release', amount: '0.02% of that trade', note: '0.01% burned, 0.01% to the FanoutSink; the buyer receives 99.98%' }],
+        fees: [{ label: 'On each release', amount: '0.04% of that trade', note: '0.01% burned, 0.01% to the FanoutSink, 0.02% buys and burns XGAS.DEV; the buyer receives 99.96%' }],
         net: `Up to ${usd(expectedCents(total, bps))} in USD if the whole ask fills`,
         timeline: [
           'Your $xMoney is escrowed the moment this confirms',
@@ -241,8 +242,8 @@ export const tools = [
         asset: 'USD on X Money → native $xMoney',
         amount: `up to ${fmtXMoney(want)} $xMoney at $${rateToUsd(bps)} each (${fmtXMoney(min)}–${fmtXMoney(max)} per trade)`,
         counterparty: `Escrow ${L4.escrow}; sellers will expect USD from @${handle}`,
-        fees: [{ label: 'On each release', amount: '0.02% of that trade', note: 'you receive 99.98% of the size' }],
-        net: `Up to ${fmtXMoney((want * (BPS - BURN_BPS - FANOUT_RAKE_BPS)) / BPS)} $xMoney for up to ${usd(expectedCents(want, bps))}`,
+        fees: [{ label: 'On each release', amount: '0.04% of that trade', note: 'you receive 99.96% of the size' }],
+        net: `Up to ${fmtXMoney((want * (BPS - BURN_BPS - FANOUT_RAKE_BPS - BUYBACK_BPS)) / BPS)} $xMoney for up to ${usd(expectedCents(want, bps))}`,
         timeline: [
           'The bid posts with no escrow from you',
           'A seller fills it, escrowing their $xMoney and starting a 15-minute clock',
@@ -291,6 +292,7 @@ export const tools = [
         fees: [
           { label: 'Burn', amount: `${fmtXMoney(split.burn)} xMoney`, note: '0.01%' },
           { label: 'FanoutSink rake', amount: `${fmtXMoney(split.rake)} xMoney`, note: '0.01%' },
+          { label: 'XGAS.DEV buy & burn', amount: `${fmtXMoney(split.buyback)} xMoney`, note: '0.02%' },
         ],
         net: `${fmtXMoney(split.net)} $xMoney, once the seller releases`,
         timeline: [
@@ -344,7 +346,7 @@ export const tools = [
         asset: 'native $xMoney → USD on X Money',
         amount: `${fmtXMoney(xWei)} $xMoney escrowed at $${o.price_usd}`,
         counterparty: `@${o.maker_x_handle} (${o.maker})`,
-        fees: [{ label: 'On release', amount: '0.02% of the size', note: 'taken from what the buyer receives, not from your fiat' }],
+        fees: [{ label: 'On release', amount: '0.04% of the size', note: 'taken from what the buyer receives, not from your fiat' }],
         net: `${usd(cents)} in USD from @${o.maker_x_handle}`,
         timeline: [
           `Your $xMoney escrows now and a ${TRADE_TIMEOUT_S / 60}-minute clock starts`,
@@ -381,6 +383,7 @@ export const tools = [
         fees: [
           { label: 'Burn', amount: `${fmtXMoney(split.burn)} xMoney`, note: '0.01% to 0x…dEaD' },
           { label: 'FanoutSink rake', amount: `${fmtXMoney(split.rake)} xMoney`, note: '0.01%' },
+          { label: 'XGAS.DEV buy & burn', amount: `${fmtXMoney(split.buyback)} xMoney`, note: '0.02%, bridged to Robinhood to buy and burn XGAS.DEV' },
         ],
         net: `${fmtXMoney(split.net)} $xMoney to @${t.buyer_x_handle}`,
         timeline: ['Immediate and final, in one transaction on xGas'],

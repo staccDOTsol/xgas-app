@@ -87,7 +87,7 @@ export interface L4Info {
   l3ChainId: number;
   vault: string;
   ready: boolean;
-  contracts: { escrow: string; fomo: string; router: string; nguLauncher?: string | null } | null;
+  contracts: { escrow: string; fomo: string; router: string; nguLauncher?: string | null; legacy2bp?: { nguLauncher?: string | null } | null } | null;
   bridge?: { lastScannedBlock: string | null; processedCount: number; pendingExits: number };
 }
 
@@ -121,6 +121,7 @@ export async function loadL4Info(force = false): Promise<L4Info | null> {
         l4Addresses.fomo = info.contracts.fomo;
         l4Addresses.router = info.contracts.router;
         l4Addresses.nguLauncher = info.contracts.nguLauncher || '';
+        l4Addresses.legacyNguLauncher = info.contracts.legacy2bp?.nguLauncher || '';
         l4Addresses.ready = !!info.ready;
       }
       return info;

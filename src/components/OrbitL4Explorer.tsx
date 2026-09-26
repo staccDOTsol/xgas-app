@@ -36,7 +36,7 @@ export type OrbitTxType =
   | 'MINT_XMONEY' | 'BURN_XMONEY'
   | 'P2P_ORDER' | 'P2P_TRADE' | 'P2P_ESCROW_SETTLE' | 'P2P_CANCEL'
   | 'FOMO_BUY' | 'FOMO_CLAIM' | 'FOMO_JACKPOT'
-  | 'ROUTER_SEND' | 'GENESIS_INIT';
+  | 'ROUTER_SEND';
 
 export interface OrbitTx {
   hash: string;
@@ -48,7 +48,10 @@ export interface OrbitTx {
   toHandle?: string;
   valueXMoney: number;
   burnedAmount: number; // 0.01% burned to 0xdead
-  fanoutRakeAmount: number; // 0.01% to Stacc Fanout
+  fanoutRakeAmount: number; // 0.01% to the Stacc Wizards Fee Fanout
+  buybackAmount?: number; // 0.02% to the XGAS.DEV buyback sink (L4 fee paths only)
+  /** The event does not carry the buyback leg; buybackAmount is derived from the burn or the gross and is shown as est. */
+  buybackEstimated?: boolean;
   type: OrbitTxType;
   status: 'CONFIRMED';
   calldata: string;
@@ -240,37 +243,32 @@ export const OrbitL4Explorer: React.FC = () => {
               ourTxs.push({ ...base, from: a.buyer, fromHandle: a.buyerXHandle, valueXMoney: Number(formatEther(a.xMoneyAmount)), burnedAmount: 0, fanoutRakeAmount: 0, type: 'P2P_TRADE',
                 calldata: `${a.side === 0 ? 'fillSellAsk' : 'fillBuyBid'}(#${a.tradeId}, ${Number(formatEther(a.xMoneyAmount))} $xMoney, expects $${(Number(a.expectedCents) / 100).toFixed(2)} on X Money)` });
               break;
+            // TradeCompleted and ValueTransferred carry burn + rake only; the 2 bp buyback is twice the 1 bp burn.
             case 'TradeCompleted':
-              ourTxs.push({ ...base, from: log.address, fromHandle: 'xgas_escrow', to: a.buyer, toHandle: a.buyer.slice(0, 6), valueXMoney: Number(formatEther(a.netXMoneyDelivered)), burnedAmount: Number(formatEther(a.xMoneyBurned)), fanoutRakeAmount: Number(formatEther(a.xMoneyRake)), type: 'P2P_ESCROW_SETTLE', calldata: `releaseTrade(#${a.tradeId})` });
+              ourTxs.push({ ...base, from: log.address, fromHandle: 'xgas_escrow', to: a.buyer, toHandle: a.buyer.slice(0, 6), valueXMoney: Number(formatEther(a.netXMoneyDelivered)), burnedAmount: Number(formatEther(a.xMoneyBurned)), fanoutRakeAmount: Number(formatEther(a.xMoneyRake)), buybackAmount: Number(formatEther(a.xMoneyBurned)) * 2, buybackEstimated: true, type: 'P2P_ESCROW_SETTLE', calldata: `releaseTrade(#${a.tradeId})` });
               break;
             case 'TradeCancelled':
               ourTxs.push({ ...base, from: log.address, fromHandle: 'xgas_escrow', valueXMoney: 0, burnedAmount: 0, fanoutRakeAmount: 0, type: 'P2P_CANCEL', calldata: `cancelTradeTimeout(#${a.tradeId}) ${a.reason}` });
               break;
             case 'KeysPurchased': {
               const cost = Number(formatEther(a.costXMoney));
-              ourTxs.push({ ...base, from: a.buyer, fromHandle: a.xHandle, valueXMoney: cost, burnedAmount: cost * BP, fanoutRakeAmount: cost * BP, type: 'FOMO_BUY', calldata: `buyKeys("${a.xHandle}", ${a.keysBought})` });
+              ourTxs.push({ ...base, from: a.buyer, fromHandle: a.xHandle, valueXMoney: cost, burnedAmount: cost * BP, fanoutRakeAmount: cost * BP, buybackAmount: cost * 2 * BP, buybackEstimated: true, type: 'FOMO_BUY', calldata: `buyKeys("${a.xHandle}", ${a.keysBought})` });
               break;
             }
             case 'DividendsClaimed': {
               const v = Number(formatEther(a.amountXMoney));
-              ourTxs.push({ ...base, from: log.address, fromHandle: 'war_of_attrition', to: a.player, toHandle: a.player.slice(0, 6), valueXMoney: v, burnedAmount: v * BP, fanoutRakeAmount: v * BP, type: 'FOMO_CLAIM', calldata: 'claimDividends()' });
+              ourTxs.push({ ...base, from: log.address, fromHandle: 'war_of_attrition', to: a.player, toHandle: a.player.slice(0, 6), valueXMoney: v, burnedAmount: v * BP, fanoutRakeAmount: v * BP, buybackAmount: v * 2 * BP, buybackEstimated: true, type: 'FOMO_CLAIM', calldata: 'claimDividends()' });
               break;
             }
             case 'JackpotAwarded': {
               const v = Number(formatEther(a.jackpotAmountXMoney));
-              ourTxs.push({ ...base, from: log.address, fromHandle: 'war_of_attrition', to: a.winner, toHandle: a.xHandle, valueXMoney: v, burnedAmount: v * BP, fanoutRakeAmount: v * BP, type: 'FOMO_JACKPOT', calldata: `claimJackpot() → round #${a.newRoundId}` });
+              ourTxs.push({ ...base, from: log.address, fromHandle: 'war_of_attrition', to: a.winner, toHandle: a.xHandle, valueXMoney: v, burnedAmount: v * BP, fanoutRakeAmount: v * BP, buybackAmount: v * 2 * BP, buybackEstimated: true, type: 'FOMO_JACKPOT', calldata: `claimJackpot() → round #${a.newRoundId}` });
               break;
             }
             case 'ValueTransferred':
-              ourTxs.push({ ...base, from: a.from, to: a.to, toHandle: labelFor(a.to), valueXMoney: Number(formatEther(a.netAmount)), burnedAmount: Number(formatEther(a.burnAmount)), fanoutRakeAmount: Number(formatEther(a.rakeAmount)), type: 'ROUTER_SEND', calldata: `sendValue("${a.memo}")` });
+              ourTxs.push({ ...base, from: a.from, to: a.to, toHandle: labelFor(a.to), valueXMoney: Number(formatEther(a.netAmount)), burnedAmount: Number(formatEther(a.burnAmount)), fanoutRakeAmount: Number(formatEther(a.rakeAmount)), buybackAmount: Number(formatEther(a.burnAmount)) * 2, buybackEstimated: true, type: 'ROUTER_SEND', calldata: `sendValue("${a.memo}")` });
               break;
           }
-        }
-
-        // Genesis: the three contract deployments
-        if (l4Addresses.ready || l4Addresses.escrow) {
-          ourTxs.push({ hash: l4Addresses.escrow, blockNumber: 2, timestamp: ourBlocks.length ? ourBlocks[ourBlocks.length - 1].timestamp : Date.now(), from: '0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158', fromHandle: 'staccoverflow', to: l4Addresses.escrow, toHandle: 'xgas_escrow', valueXMoney: 0, burnedAmount: 0, fanoutRakeAmount: 0, type: 'GENESIS_INIT', status: 'CONFIRMED', layer: 'L4', calldata: 'XMoneyEscrow.constructor()' });
-          ourTxs.push({ hash: l4Addresses.fomo, blockNumber: 3, timestamp: ourBlocks.length ? ourBlocks[ourBlocks.length - 1].timestamp : Date.now(), from: '0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158', fromHandle: 'staccoverflow', to: l4Addresses.fomo, toHandle: 'war_of_attrition', valueXMoney: 0, burnedAmount: 0, fanoutRakeAmount: 0, type: 'GENESIS_INIT', status: 'CONFIRMED', layer: 'L4', calldata: 'FomoAttritionL4.constructor()' });
         }
 
         ourTxs.sort((x, y) => y.timestamp - x.timestamp || y.blockNumber - x.blockNumber);
@@ -368,7 +366,7 @@ export const OrbitL4Explorer: React.FC = () => {
           <div className="p-3 rounded-xl bg-[#111728] border border-cyan-500/30">
             <div className="text-[10px] text-cyan-400 uppercase flex items-center gap-1 font-bold">
               <Award className="w-3 h-3" />
-              <span>Stacc Fanout Rake</span>
+              <span>Stacc Wizards Fee Fanout Rake</span>
             </div>
             <div className="text-lg font-black text-cyan-300 mt-0.5">${realTotalRaked.toFixed(4)}</div>
             <div className="text-[10px] text-cyan-500">0.01% USDG to Fanout</div>
@@ -541,7 +539,7 @@ export const OrbitL4Explorer: React.FC = () => {
                 <span className="text-emerald-400 font-bold text-sm">${selectedTx.valueXMoney.toFixed(2)} $xMoney</span>
               </div>
 
-              {/* Dual Fee Highlight */}
+              {/* Fee Highlight (L4 txs add the XGAS.DEV buyback) */}
               <div className="grid grid-cols-2 gap-2">
                 <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1">
                   <div className="flex items-center gap-1.5 text-amber-400 font-bold text-[11px]">
@@ -554,10 +552,20 @@ export const OrbitL4Explorer: React.FC = () => {
                 <div className="p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/40 space-y-1">
                   <div className="flex items-center gap-1.5 text-cyan-400 font-bold text-[11px]">
                     <Award className="w-3.5 h-3.5" />
-                    <span>0.01% Stacc Fanout Rake</span>
+                    <span>0.01% Stacc Wizards Fee Fanout Rake</span>
                   </div>
                   <div className="text-sm font-black text-cyan-300">+${selectedTx.fanoutRakeAmount.toFixed(4)} {selectedTx.layer === 'L3' ? 'USDG' : '$xMoney'}</div>
                 </div>
+
+                {selectedTx.layer === 'L4' && (
+                  <div className="col-span-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/40 space-y-1">
+                    <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[11px]">
+                      <Flame className="w-3.5 h-3.5" />
+                      <span>0.02% XGAS.DEV Buy & Burn</span>
+                    </div>
+                    <div className="text-sm font-black text-emerald-300">{selectedTx.buybackEstimated && <span className="text-[10px] font-mono font-normal text-emerald-400/70 mr-1" title="Derived from the event's burn or gross amount; the event does not carry the buyback leg">est.</span>}+${(selectedTx.buybackAmount ?? 0).toFixed(4)} $xMoney</div>
+                  </div>
+                )}
               </div>
 
               <div className="p-2.5 rounded-lg bg-[#111728] border border-[#1a233a] space-y-1">

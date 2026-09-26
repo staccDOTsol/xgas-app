@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { formatEther, parseEther } from 'viem';
+import { BaseError, formatEther, parseEther } from 'viem';
 import { NGU_TOKEN_ABI, NGU_LAUNCHER_ABI } from '../contracts/nguAbis';
 import { l4Addresses } from '../contracts/abis';
 import { l4PublicClient, sendOnChainTx, encodeAbiCall, loadL4Info, L4_CHAIN_ID } from '../contracts/web3Client';
 import { UserWallet } from '../types';
+import { trueMaxLoss, contractSkew } from '../utils/nguRisk';
 import { Rocket, TrendingUp, TrendingDown, Plus, RefreshCw, AlertTriangle, Wallet, Info } from 'lucide-react';
 
 interface NguTokenState {
@@ -20,6 +21,8 @@ interface NguTokenState {
   maxLossBps: bigint;
   betaBps: number;
   stepBps: number;
+  /** 2 on curves from the current launcher; 0 on curves launched before the XGAS.DEV buyback. */
+  buybackBps: number;
   balance: bigint;
 }
 
@@ -31,11 +34,21 @@ function fmtX(wei: bigint, digits = 4): string {
   return n.toLocaleString('en-US', { maximumFractionDigits: digits, minimumFractionDigits: Math.min(digits, 2) });
 }
 
+// Curves launched before the XGAS.DEV buyback have no BUYBACK_BPS(): the call reverts, and the buyback is 0.
+// Any other failure (RPC down) is a real error and propagates, so the card fails instead of showing legacy fees.
+const zeroIfReverted = (e: unknown): number => {
+  if (e instanceof BaseError && e.walk((x) => {
+    const n = (x as { name?: string })?.name;
+    return n === 'ContractFunctionRevertedError' || n === 'ContractFunctionZeroDataError';
+  })) return 0;
+  throw e;
+};
+
 async function readToken(tokenAddr: string, walletAddr: string): Promise<NguTokenState> {
   const a = addr(tokenAddr);
   const [
     name, symbol, floor, nextPrice, lastPrice, supply, minted, maxSupply,
-    reserve, maxLossBps, betaBps, stepBps, balance,
+    reserve, maxLossBps, betaBps, stepBps, balance, buybackBps,
   ] = await Promise.all([
     l4PublicClient.readContract({ address: a, abi: NGU_TOKEN_ABI, functionName: 'name' }),
     l4PublicClient.readContract({ address: a, abi: NGU_TOKEN_ABI, functionName: 'symbol' }),
@@ -52,10 +65,13 @@ async function readToken(tokenAddr: string, walletAddr: string): Promise<NguToke
     walletAddr
       ? l4PublicClient.readContract({ address: a, abi: NGU_TOKEN_ABI, functionName: 'balanceOf', args: [addr(walletAddr)] })
       : Promise.resolve(0n),
+    // Older curves have no BUYBACK_BPS(); the call reverts, and they pay no buyback.
+    l4PublicClient.readContract({ address: a, abi: NGU_TOKEN_ABI, functionName: 'BUYBACK_BPS' }).catch(zeroIfReverted),
   ]);
   return {
     address: tokenAddr, name, symbol, floor, nextPrice, lastPrice, supply, minted,
     maxSupply, reserve, maxLossBps, betaBps: Number(betaBps), stepBps: Number(stepBps), balance,
+    buybackBps: Number(buybackBps),
   };
 }
 
@@ -119,7 +135,12 @@ function TokenCard({ token, wallet, onTrade }: { token: NguTokenState; wallet: U
     } finally { setBusy(false); }
   };
 
-  const maxLossPct = (Number(token.maxLossBps) / 100).toFixed(2);
+  // Headline risk from live state: the contract's maxLossBps() understates it once the step outruns floor/β.
+  const risk = trueMaxLoss(token);
+  const lossBps = risk ? risk.lossBps : Number(token.maxLossBps);
+  const maxLossPct = (lossBps / 100).toFixed(2);
+  const skew = contractSkew(lossBps, token.maxLossBps);
+  const contractPct = skew ? (Number(token.maxLossBps) / 100).toFixed(2) : null;
   const soldOut = token.minted >= token.maxSupply;
   const progress = token.maxSupply > 0n ? Number((token.minted * 10000n) / token.maxSupply) / 100 : 0;
 
@@ -132,7 +153,9 @@ function TokenCard({ token, wallet, onTrade }: { token: NguTokenState; wallet: U
         </div>
         <div className="text-right">
           <div className="text-[10px] font-mono text-slate-500 uppercase">max instant loss</div>
-          <div className="text-sm font-black font-mono text-amber-400">{maxLossPct}%</div>
+          <div className="text-sm font-black font-mono text-amber-400"
+            title={risk ? `Buy 1 at ${fmtX(token.nextPrice)} and sell it straight back for ${fmtX(risk.proceeds)} $xMoney, fees included` : undefined}>{maxLossPct}%</div>
+          {contractPct && <div className="text-[10px] font-mono text-slate-500">contract reports {contractPct}% ({skew})</div>}
         </div>
       </div>
 
@@ -192,7 +215,7 @@ function TokenCard({ token, wallet, onTrade }: { token: NguTokenState; wallet: U
         </div>
       </div>
       {err && <div className="text-[11px] font-mono text-rose-400 break-words">{err}</div>}
-      <div className="text-[10px] font-mono text-slate-600">β {(token.betaBps / 100).toFixed(0)}% · step {(token.stepBps / 100).toFixed(2)}% · 0.01% burn + 0.01% fanout per trade</div>
+      <div className="text-[10px] font-mono text-slate-600">β {(token.betaBps / 100).toFixed(0)}% · step {(token.stepBps / 100).toFixed(2)}% · 0.01% burn + 0.01% fanout{token.buybackBps > 0 && ` + ${(token.buybackBps / 100).toFixed(2)}% XGAS.DEV buy & burn`} per trade</div>
     </div>
   );
 }
@@ -274,7 +297,7 @@ function LaunchForm({ launcher, wallet, onConnectWallet, onLaunched }: { launche
 
 export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; onConnectWallet: () => void }) {
   const [launcher, setLauncher] = useState<string>(l4Addresses.nguLauncher);
-  const [tokens, setTokens] = useState<NguTokenState[]>([]);
+  const [tokens, setTokens] = useState<(NguTokenState | { address: string; unread: true })[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -284,13 +307,20 @@ export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; 
     setLauncher(la);
     if (!la || la === ZERO) { setTokens([]); setLoading(false); return; }
     try {
-      const n: bigint = await l4PublicClient.readContract({ address: addr(la), abi: NGU_LAUNCHER_ABI, functionName: 'allTokensLength' });
+      // Tokens from the current launcher first, then the legacy one (0.02% curves); each newest first.
+      // Launching only ever goes through the current launcher.
       const addrs: string[] = [];
-      for (let i = 0n; i < n; i++) {
-        addrs.push(await l4PublicClient.readContract({ address: addr(la), abi: NGU_LAUNCHER_ABI, functionName: 'allTokens', args: [i] }) as string);
+      for (const l of [la, l4Addresses.legacyNguLauncher]) {
+        if (!l || l === ZERO) continue;
+        const n: bigint = await l4PublicClient.readContract({ address: addr(l), abi: NGU_LAUNCHER_ABI, functionName: 'allTokensLength' });
+        for (let i = n - 1n; i >= 0n; i--) {
+          const t = await l4PublicClient.readContract({ address: addr(l), abi: NGU_LAUNCHER_ABI, functionName: 'allTokens', args: [i] }) as string;
+          if (!addrs.some(x => x.toLowerCase() === t.toLowerCase())) addrs.push(t);
+        }
       }
-      const states = await Promise.all(addrs.map(a => readToken(a, wallet.connected ? wallet.address : '')));
-      setTokens(states.reverse());
+      // One curve failing to read (an RPC hiccup) fails only its own card, not the whole list.
+      const results = await Promise.allSettled(addrs.map(a => readToken(a, wallet.connected ? wallet.address : '')));
+      setTokens(results.map((r, i) => (r.status === 'fulfilled' ? r.value : { address: addrs[i], unread: true as const })));
     } catch {
       setTokens([]);
     } finally {
@@ -318,7 +348,7 @@ export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; 
         </div>
         <div className="mt-3 flex items-start gap-2 text-[11px] font-mono text-slate-500">
           <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-slate-600" />
-          <span>The contract guarantees the mint price and the redemption floor never decrease — the primary curve only. If a token also trades on a DEX, that price can deviate. Each card shows the worst case for buying then selling straight back.</span>
+          <span>The contract guarantees the mint price and the redemption floor never decrease, on the primary curve only. If a token also trades on a DEX, that price can deviate. Each card shows the worst case for buying then selling straight back, worked out from the curve's live reserve and supply.</span>
         </div>
       </div>
 
@@ -344,7 +374,13 @@ export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; 
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {tokens.map(t => <TokenCard key={t.address} token={t} wallet={wallet} onTrade={load} />)}
+            {tokens.map(t => ('unread' in t
+              ? (
+                <div key={t.address} className="rounded-2xl bg-[#0b0e17] border border-[#1e2538] p-4 text-xs font-mono text-slate-500">
+                  Could not read curve {t.address.slice(0, 6)}…{t.address.slice(-4)} just now. Retrying on the next refresh.
+                </div>
+              )
+              : <TokenCard key={t.address} token={t} wallet={wallet} onTrade={load} />))}
           </div>
         )}
       </>)}
