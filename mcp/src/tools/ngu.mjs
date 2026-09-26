@@ -10,8 +10,8 @@ const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const BPS = 10000n;
 
 const NO_LAUNCHER = [
-  'NguLauncher is not deployed on xGas 466301 yet, and `l4.nguLauncher` in src/contracts/l4-deployment.json is null.',
-  'Nothing here is broken — there is simply no factory to read. Deploy it and set the address (the host serves it at /api/l4-info) and this tool lights up on its own.',
+  `NguLauncher is not deployed on xGas ${XGAS_CHAIN_ID} yet, and \`l4.nguLauncher\` in src/contracts/l4-deployment.json is null.`,
+  'Nothing here is broken; there is simply no factory to read. Deploy it and set the address (the host serves it at /api/l4-info) and this tool lights up on its own.',
 ].join(' ');
 
 const read = (token, fn, args = []) => xgas.readContract({ address: token, abi: NGU_TOKEN_ABI, functionName: fn, args });
@@ -115,7 +115,7 @@ export const tools = [
     async handler({ token_address, holder }) {
       if (!isAddress(token_address)) throw new Error(`Not an address: ${token_address}`);
       const code = await xgas.getCode({ address: token_address });
-      if (!code || code === '0x') return reply(`Nothing is deployed at ${token_address} on xGas 466301.`, { token: token_address, exists: false });
+      if (!code || code === '0x') return reply(`Nothing is deployed at ${token_address} on xGas ${XGAS_CHAIN_ID}.`, { token: token_address, exists: false });
       const s = await tokenState(token_address, holder);
       return reply(
         `${s.name} (${s.symbol}). Worst case if you buy then sell straight back: ${riskText(s)}.\n` +
@@ -139,7 +139,7 @@ export const tools = [
       if (!isAddress(token_address)) throw new Error(`Not an address: ${token_address}`);
       const q = wholeTokens(qty);
       const s = await tokenState(token_address);
-      if (s.sold_out) return reply(`${s.symbol} is sold out — ${s.minted}/${s.max_supply} minted. There is no primary left to buy. Watching for sells on the curve is the only way in.`, { ...s, quote: null });
+      if (s.sold_out) return reply(`${s.symbol} is sold out: ${s.minted}/${s.max_supply} minted. There is no primary left to buy. Watching for sells on the curve is the only way in.`, { ...s, quote: null });
       if (BigInt(s.remaining) < q) return reply(`Only ${s.remaining} ${s.symbol} remain on the curve; ${qty} would revert with SoldOut.`, { ...s, quote: null });
       const cost = await read(token_address, 'quoteBuy', [q]);
       const burn = (cost * 1n) / BPS;
@@ -204,7 +204,7 @@ export const tools = [
         value,
         asset: `native $xMoney → ${s.symbol} (${token_address})`,
         amount: `${qty} whole ${s.symbol} for ${fmtXMoney(cost)} $xMoney`,
-        counterparty: `the curve itself — ${s.name} at ${token_address}`,
+        counterparty: `the curve itself: ${s.name} at ${token_address}`,
         fees: [
           { label: 'Burn', amount: `${fmtXMoney((cost * 1n) / BPS)} xMoney`, note: '0.01% to 0x…dEaD' },
           { label: 'FanoutSink', amount: `${fmtXMoney((cost * 1n) / BPS)} xMoney`, note: '0.01%' },
@@ -224,7 +224,7 @@ export const tools = [
 
   {
     name: 'quote_ngu_sell',
-    description: 'Payout for burning whole tokens back to an NGU curve, with the sell basis shown — floor, or lastPrice when the cap binds. Read-only.',
+    description: 'Payout for burning whole tokens back to an NGU curve, with the sell basis shown: floor, or lastPrice when the cap binds. Read-only.',
     inputSchema: {
       type: 'object',
       properties: { token_address: addr, qty: { type: 'integer', minimum: 1, maximum: 50 } },
@@ -237,7 +237,7 @@ export const tools = [
       const s = await tokenState(token_address);
       const payout = await read(token_address, 'quoteSell', [q]);
       const lastPrice = await read(token_address, 'lastPrice');
-      const basis = BigInt(s.raw.floor) > lastPrice ? 'lastPrice (the cap binds — donations have lifted the floor above the last paid price)' : 'floor';
+      const basis = BigInt(s.raw.floor) > lastPrice ? 'lastPrice (the cap binds: donations have lifted the floor above the last paid price)' : 'floor';
       const minOut = (payout * 9950n) / BPS;
       return reply(
         `${qty} ${s.symbol} burns back for ${fmtXMoney(payout)} $xMoney (${fmtXMoney(payout / q)} each), priced off ${basis}.\n` +
@@ -282,7 +282,7 @@ export const tools = [
         value: 0n,
         asset: `${s.symbol} → native $xMoney`,
         amount: `${qty} ${s.symbol}`,
-        counterparty: `the curve itself — ${token_address}`,
+        counterparty: `the curve itself: ${token_address}`,
         fees: [
           { label: 'Burn', amount: '0.01% of the redemption basis' },
           { label: 'FanoutSink', amount: '0.01% of the redemption basis' },
@@ -291,7 +291,7 @@ export const tools = [
         net: `${fmtXMoney(payout)} $xMoney at current state`,
         timeline: ['One transaction on xGas'],
         irreversible: 'Your tokens are burned. If the reserve has moved by the time this lands, the transaction reverts with Slippage rather than paying you less than minOut.',
-        notes: [`minOut is ${fmtXMoney(minOut)} $xMoney — a ${tolerance} tolerance.`, 'Whole tokens only.'],
+        notes: [`minOut is ${fmtXMoney(minOut)} $xMoney, a ${tolerance} tolerance.`, 'Whole tokens only.'],
       });
       return reply(renderApproval(p), p);
     },
@@ -321,7 +321,7 @@ export const tools = [
         amount: `${fmtXMoney(value)} $xMoney`,
         counterparty: `${s.name} reserve at ${token_address}`,
         fees: [],
-        net: 'nothing — you receive no tokens',
+        net: 'nothing; you receive no tokens',
         timeline: ['One transaction on xGas'],
         irreversible: 'This is a gift, not a trade. You get no tokens and no claim. The $xMoney joins the reserve and raises the floor for everyone who already holds.',
         notes: [
@@ -358,7 +358,7 @@ export const tools = [
 
       const errs = [];
       if (a.step_bps > NGU_LIMITS.MAX_STEP_BPS) errs.push(`step_bps ${a.step_bps} exceeds MAX_STEP_BPS ${NGU_LIMITS.MAX_STEP_BPS}`);
-      if (a.beta_bps < NGU_LIMITS.MIN_BETA_BPS || a.beta_bps > NGU_LIMITS.MAX_BETA_BPS) errs.push(`beta_bps ${a.beta_bps} is outside ${NGU_LIMITS.MIN_BETA_BPS}–${NGU_LIMITS.MAX_BETA_BPS}`);
+      if (a.beta_bps < NGU_LIMITS.MIN_BETA_BPS || a.beta_bps > NGU_LIMITS.MAX_BETA_BPS) errs.push(`beta_bps ${a.beta_bps} is outside ${NGU_LIMITS.MIN_BETA_BPS} to ${NGU_LIMITS.MAX_BETA_BPS}`);
       const seedQty = BigInt(a.seed_qty ?? 0);
       if (seedQty > BigInt(a.max_supply)) errs.push(`seed_qty ${a.seed_qty} exceeds max_supply ${a.max_supply}`);
       const basePrice = parseXMoney(a.base_price);

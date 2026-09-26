@@ -1,7 +1,7 @@
 import { encodeFunctionData, decodeEventLog, isAddress, parseAbi } from 'viem';
 import {
   L3, L4, PARENT_CHAIN_ID, XGAS_CHAIN_ID, XGAS_API, parent, xgas, ZERO,
-  BURN_BPS, FANOUT_RAKE_BPS, SCALE_FACTOR,
+  BURN_BPS, FANOUT_RAKE_BPS, SCALE_FACTOR, DEPLOY, FAST_CONFIRM_SAFE, VALIDATORS, LEGACY,
 } from '../config.mjs';
 import { ERC20_ABI, VAULT_ABI, ARBSYS_ABI } from '../abis.mjs';
 import { fmtUsdg, fmtXMoney, parseUsdg, parseXMoney } from '../money.mjs';
@@ -11,10 +11,47 @@ import { submitBatch, submitRaw } from '../idempotency.mjs';
 const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const amount = (d) => ({ type: 'string', description: d });
 const BPS = 10000n;
-// Deposits are paused while xgas moves to a new chain (exits here wait on a stalled validator). Set
-// XGAS_DEPOSITS_PAUSED=0 to re-enable once the vault points at the new chain.
-const DEPOSITS_PAUSED = process.env.XGAS_DEPOSITS_PAUSED !== '0';
-const DEPOSITS_PAUSED_MSG = 'Deposits are paused while xgas moves to a new chain. Exits on this chain are waiting on a stalled validator, so no new money should go in. Existing holders are being refunded in USDG by the founder.';
+// Deposits are open on 466302. Set XGAS_DEPOSITS_PAUSED=1 to close them from the connector side.
+// Independently of this switch, prepare_enter refuses while the vault's inbox is not this chain's inbox.
+const DEPOSITS_PAUSED = ['1', 'true', 'yes'].includes(String(process.env.XGAS_DEPOSITS_PAUSED || '').toLowerCase());
+const DEPOSITS_PAUSED_MSG = 'Deposits are paused on this connector by its operator (XGAS_DEPOSITS_PAUSED). Nothing was prepared or sent.';
+
+/**
+ * Where the vault sends deposits right now. enterRollup creates its ticket on vault.inbox(), so if that is
+ * not this chain's inbox (for example before the timelocked setBridgeSystem executes), an enter lands on a
+ * different chain than the one this connector reads.
+ */
+async function vaultRoute() {
+  const expected = L3.inbox || null;
+  try {
+    const inbox = await parent.readContract({ address: L3.xMoney, abi: VAULT_ABI, functionName: 'inbox' });
+    const ok = !!expected && inbox.toLowerCase() === expected.toLowerCase();
+    return {
+      vault_inbox: inbox,
+      this_chain_inbox: expected,
+      routes_to_this_chain: ok,
+      note: ok
+        ? `The vault sends deposits to inbox ${inbox}, which is xGas ${XGAS_CHAIN_ID}.`
+        : `The vault sends deposits to inbox ${inbox}, but xGas ${XGAS_CHAIN_ID} uses inbox ${expected}. An enter right now would not arrive on this chain, so prepare_enter will not build one until the vault is switched.`,
+    };
+  } catch (e) {
+    return { vault_inbox: null, this_chain_inbox: expected, routes_to_this_chain: null, note: `Could not read the vault's inbox (${e.shortMessage || e.message}).` };
+  }
+}
+
+// EIP-7702: an EOA that has delegated to code carries 0xef0100 || delegate as its code.
+const DELEGATION_PREFIX = '0xef0100';
+/** The EIP-7702 aliasing landmine, stated once so every deposit path says the same thing. */
+const ALIAS_WARNING = 'Do not bridge by calling inbox.depositERC20 directly from a smart account, including an EIP-7702 '
+  + 'delegated EOA, or through a relayer or bundler: when the caller has code or is not tx.origin, the Inbox credits the '
+  + 'ALIASED address (yours plus 0x1111000000000000000000000000000000001111) on xGas, not yours. This tool uses '
+  + 'vault.enterRollup, which names the recipient as the ticket destination, so the $xMoney lands at the recipient shown here.';
+async function accountKind(address) {
+  const code = await parent.getCode({ address }).catch(() => null);
+  if (code == null) return 'unknown';
+  if (code === '0x') return 'eoa';
+  return code.toLowerCase().startsWith(DELEGATION_PREFIX) ? 'eip7702' : 'contract';
+}
 
 /** Mirrors XMoney._deposit + _grossXMoneyFor exactly, against live reserve and supply. */
 async function enterMath(usdgWei) {
@@ -55,6 +92,11 @@ async function exitMath(xWei) {
 const L1_SECONDS_PER_BLOCK = 12;
 // Past this, a quiet validator is not "between assertions", it is idle, and exits are stuck behind it.
 const IDLE_AFTER_SECONDS = 6 * 3600;
+
+const SAFE_ABI = parseAbi([
+  'function getOwners() view returns (address[])',
+  'function getThreshold() view returns (uint256)',
+]);
 
 const BOLD_ABI = parseAbi([
   'function confirmPeriodBlocks() view returns (uint64)',
@@ -111,14 +153,41 @@ async function assertionWindow() {
     const ageSeconds = ageBlocks != null ? ageBlocks * L1_SECONDS_PER_BLOCK : null;
     const hasFast = fastConfirmer && !/^0x0+$/.test(fastConfirmer);
     const soleValidatorIsFast = hasFast && validators.length === 1 && validators[0].toLowerCase() === fastConfirmer.toLowerCase();
+    // 466302 uses a Safe as the fast confirmer: each validator approves the confirmation and the
+    // threshold-th one executes it. Read the Safe's owners and threshold instead of assuming.
+    let safe = null;
+    if (hasFast) {
+      try {
+        const [owners, threshold] = await Promise.all([
+          parent.readContract({ address: fastConfirmer, abi: SAFE_ABI, functionName: 'getOwners' }),
+          parent.readContract({ address: fastConfirmer, abi: SAFE_ABI, functionName: 'getThreshold' }),
+        ]);
+        const listed = new Set([...validators, ...VALIDATORS].map((a) => a.toLowerCase()));
+        safe = {
+          threshold: Number(threshold),
+          owners,
+          owners_are_validators: owners.length > 0 && owners.every((o) => listed.has(o.toLowerCase())),
+        };
+      } catch { /* not a Safe: a plain key or some other contract */ }
+    }
+    const fastKind = !hasFast ? null : safe ? 'safe' : soleValidatorIsFast ? 'sole_validator' : 'single_address';
+    const fastOnline = safe
+      ? `while ${safe.threshold} of the fast-confirm Safe's ${safe.owners.length} owners are online`
+      : 'while the fast confirmer is online';
     const idle = ageSeconds != null && ageSeconds > IDLE_AFTER_SECONDS;
     const afkSeconds = Number(afkBlocks) * L1_SECONDS_PER_BLOCK;
     const confirmedAge = l1Now != null && confirmedNode ? Number(l1Now - confirmedNode.createdAtBlock) : null;
 
     Object.assign(value, {
       fast_confirmer: hasFast ? fastConfirmer : null,
+      fast_confirmer_kind: fastKind,
+      fast_confirmer_safe: safe,
+      fast_confirmer_matches_deployment: hasFast && FAST_CONFIRM_SAFE ? fastConfirmer.toLowerCase() === FAST_CONFIRM_SAFE.toLowerCase() : null,
+      fast_online: fastOnline,
       validators,
       fast_confirmer_is_the_only_validator: soleValidatorIsFast,
+      validator_whitelist_disabled: whitelistOff,
+      chain_owner: DEPLOY.owner || null,
       last_assertion: {
         hash: newest.hash,
         status: ASSERTION_STATUS[newest.status] || String(newest.status),
@@ -139,21 +208,28 @@ async function assertionWindow() {
         : null,
     });
 
-    const fastLine = hasFast
-      ? `A fast confirmer (${fastConfirmer}) can confirm an assertion immediately, so while it is online a withdrawal is usually claimable minutes after the next assertion that covers it.`
-      : 'No fast confirmer is set, so every assertion waits the full window.';
-    const downLine = soleValidatorIsFast
-      ? `That fast confirmer is also the only validator, and the whitelist is on, so nobody else can post assertions. If it is down, exits wait on it: nothing is asserted, nothing is confirmed. If the last confirmed assertion ever goes ${humanDuration(afkSeconds)} old (${Number(afkBlocks)} Ethereum blocks), the rollup lets anyone lift the whitelist and assert, and then the full window of ${humanDuration(contractualSeconds)} applies.`
-      : 'If the fast confirmer is down, assertions still confirm, but only after the full window.';
+    const owner = DEPLOY.owner ? ` The chain owner key (${DEPLOY.owner}) can also upgrade the rollup contracts and force-confirm an assertion.` : '';
+    const fastLine = !hasFast
+      ? 'No fast confirmer is set, so every assertion waits the full window.'
+      : safe
+        ? `The fast confirmer is a ${safe.threshold}-of-${safe.owners.length} Safe (${fastConfirmer}) whose owners are ${safe.owners_are_validators ? 'the xGas validator keys' : `these keys: ${safe.owners.join(', ')}`}. ${fastOnline[0].toUpperCase()}${fastOnline.slice(1)}, an assertion is confirmed right after it is posted, so a withdrawal is usually claimable minutes after the next assertion that covers it. `
+          + `That speed is a trust assumption, not a proof: any ${safe.threshold} of those ${safe.owners.length} keys can fast-confirm any assertion, including a wrong one, and a confirmed assertion is final, so nobody can challenge it afterwards.${owner}`
+        : `A fast confirmer (${fastConfirmer}) can confirm an assertion immediately, so while it is online a withdrawal is usually claimable minutes after the next assertion that covers it. That one address can confirm any assertion, including a wrong one.${owner}`;
+    const downLine = whitelistOff
+      ? `Validation is permissionless: the validator whitelist is disabled, so anyone who runs a node and posts the stake can assert and can challenge an assertion that is not yet confirmed. If the xGas validators stop, exits do not depend on them coming back, but someone still has to post an assertion that covers them, and without the fast confirmer it confirms only after the full window of ${humanDuration(contractualSeconds)}.`
+      : soleValidatorIsFast
+        ? `That fast confirmer is also the only validator, and the whitelist is on, so nobody else can post assertions. If it is down, exits wait on it: nothing is asserted, nothing is confirmed. If the last confirmed assertion ever goes ${humanDuration(afkSeconds)} old (${Number(afkBlocks)} Ethereum blocks), the rollup lets anyone lift the whitelist and assert, and then the full window of ${humanDuration(contractualSeconds)} applies.`
+        : `Only the listed validators can assert while the whitelist is on. If the fast confirmer is down, assertions still confirm, but only after the full window of ${humanDuration(contractualSeconds)}.`;
     const idleLine = idle
-      ? `Right now the validator appears idle: its last assertion was at least ${humanDuration(ageSeconds)} ago (Ethereum block ${newest.createdAtBlock}). Exits are waiting on it, and no quote here can say when it will resume.`
+      ? `Right now the validators appear idle: the newest assertion this connector can see was at least ${humanDuration(ageSeconds)} ago (Ethereum block ${newest.createdAtBlock}). Exits are waiting on an assertion, and no quote here can say when one will be posted.`
       : ageSeconds != null
-        ? `The last assertion was about ${humanDuration(ageSeconds)} ago, so the validator looks active.`
+        ? `The last assertion was about ${humanDuration(ageSeconds)} ago, so the validators look active.`
         : 'Could not tell how long ago the last assertion was.';
     value.summary = `The contractual challenge window is ${humanDuration(contractualSeconds)}: ${Number(confirmBlocks)} Ethereum blocks at about ${L1_SECONDS_PER_BLOCK} s each, counted from the assertion that covers your withdrawal, not from the withdrawal. ${fastLine} ${downLine} ${idleLine}`;
   } catch (e) {
     value.liveness_error = `Could not read the validator and last assertion (${e.shortMessage || e.message}).`;
-    value.summary = `The contractual challenge window is ${humanDuration(contractualSeconds)} (${Number(confirmBlocks)} Ethereum blocks at about ${L1_SECONDS_PER_BLOCK} s each), counted from the assertion that covers your withdrawal. It can be faster if the fast confirmer is online. This connector could not check whether the validator is currently asserting.`;
+    value.fast_online = 'while the fast confirmer is online';
+    value.summary = `The contractual challenge window is ${humanDuration(contractualSeconds)} (${Number(confirmBlocks)} Ethereum blocks at about ${L1_SECONDS_PER_BLOCK} s each), counted from the assertion that covers your withdrawal. It can be faster if the fast confirmer${FAST_CONFIRM_SAFE ? ` (a Safe of validator keys, ${FAST_CONFIRM_SAFE})` : ''} is online, and that speed rests on trusting its signers. This connector could not check whether the validators are currently asserting.`;
   }
   windowCache = { at: Date.now(), value };
   return value;
@@ -179,10 +255,10 @@ const ENTER_TIMELINE = [
 const exitTimeline = (w) => [
   'burned_on_xgas: ArbSys.withdrawEth burns your native $xMoney and emits L2ToL1Tx (minutes)',
   w?.contractual
-    ? `asserted: the validator posts an assertion on the parent that covers your withdrawal. This is the slow leg and it has no fixed ETA: it happens only when the validator is running${w.validator_idle ? `, and right now it appears idle (last assertion at least ${w.last_assertion.age_estimated} ago)` : ''}`
-    : 'asserted: the validator posts an assertion on the parent that covers your withdrawal; this connector could not read the rollup, so it will not estimate when',
+    ? `asserted: a validator posts an assertion on the parent that covers your withdrawal. This is the slow leg and it has no fixed ETA: it happens only when a validator is running${w.validator_idle ? `, and right now they appear idle (last assertion at least ${w.last_assertion.age_estimated} ago)` : ''}`
+    : 'asserted: a validator posts an assertion on the parent that covers your withdrawal; this connector could not read the rollup, so it will not estimate when',
   w?.contractual
-    ? `claimable_on_parent: about ${w.contractual} after that assertion (${w.confirm_period_blocks} Ethereum blocks at about ${w.l1_seconds_per_block} s), or usually minutes after it while the fast confirmer is online`
+    ? `claimable_on_parent: about ${w.contractual} after that assertion (${w.confirm_period_blocks} Ethereum blocks at about ${w.l1_seconds_per_block} s), or usually minutes after it ${w.fast_online || 'while the fast confirmer is online'}`
     : 'claimable_on_parent: after the rollup\'s challenge window, which this connector could not read',
   'outbox_executed: anyone can call Outbox.executeTransaction. You can do it from your own wallet (needs parent gas), or ask the xGas host to do it with claim_exit, which POSTs /api/withdrawals/execute. The host only acts when that request is made; nothing executes it automatically',
   'usdg_redeemed: exitRollup burns the parent xMoney and pays USDG',
@@ -194,7 +270,7 @@ export const tools = [
     description: 'Quote USDG → $xMoney on xGas: the USDG rake, the entry burn and its split, and the net $xMoney that lands as native gas. Read-only, nothing is signed.',
     inputSchema: { type: 'object', properties: { usdg_amount: amount('USDG to bridge in, e.g. "250" or "250.50".') }, required: ['usdg_amount'], additionalProperties: false },
     async handler({ usdg_amount }) {
-      const m = await enterMath(parseUsdg(usdg_amount));
+      const [m, route] = await Promise.all([enterMath(parseUsdg(usdg_amount)), vaultRoute()]);
       const data = {
         you_pay: `${fmtUsdg(m.usdgWei)} USDG`,
         you_receive: `${fmtXMoney(m.net)} $xMoney on xGas L4 (native gas)`,
@@ -206,10 +282,16 @@ export const tools = [
         },
         vault_state: { usdg_reserve: fmtUsdg(m.usdgReserve), circulating_xmoney: fmtXMoney(m.circulating) },
         eta: '~1 minute to land on xGas',
+        vault_route: route,
+        deposits_paused: DEPOSITS_PAUSED,
+        smart_account_warning: ALIAS_WARNING,
         raw: { net_wei: m.net, gross_wei: m.gross, usdg_rake_raw: m.usdgRake },
       };
       return reply(
-        `Pay ${fmtUsdg(m.usdgWei)} USDG → receive ${fmtXMoney(m.net)} $xMoney as native gas on xGas L4, ~1 minute.\nFees: ${fmtUsdg(m.usdgRake)} USDG to the Fanout, ${fmtXMoney(m.entryBurn)} xMoney entry burn (${fmtXMoney(m.burnToDead)} dead, ${fmtXMoney(m.bufferToBridge)} to the bridge buffer).\nYou arrive holding gas; there is no faucet step.`,
+        `Pay ${fmtUsdg(m.usdgWei)} USDG → receive ${fmtXMoney(m.net)} $xMoney as native gas on xGas L4, ~1 minute.\nFees: ${fmtUsdg(m.usdgRake)} USDG to the Fanout, ${fmtXMoney(m.entryBurn)} xMoney entry burn (${fmtXMoney(m.burnToDead)} dead, ${fmtXMoney(m.bufferToBridge)} to the bridge buffer).\nYou arrive holding gas; there is no faucet step.`
+          + (route.routes_to_this_chain === false ? `\nNot open yet: ${route.note}` : '')
+          + (DEPOSITS_PAUSED ? `\n${DEPOSITS_PAUSED_MSG}` : '')
+          + '\nBridge through prepare_enter (vault.enterRollup with an explicit recipient), not a direct inbox deposit: from a smart account or EIP-7702 wallet a direct deposit lands at an aliased address.',
         data,
       );
     },
@@ -217,13 +299,13 @@ export const tools = [
 
   {
     name: 'prepare_enter',
-    description: 'Prepare the unsigned transactions for USDG → $xMoney. Returns an ERC-20 approve first when allowance is short, then enterRollup. Signs nothing.',
+    description: 'Prepare the unsigned transactions for USDG → $xMoney. Returns an ERC-20 approve first when allowance is short, then vault.enterRollup with an explicit recipient (safe from smart accounts and EIP-7702 wallets, unlike a direct inbox deposit). Refuses while the vault does not route to this chain. Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
         usdg_amount: amount('USDG to bridge in.'),
         from: { ...addr, description: 'The address that will sign and hold the USDG.' },
-        l3_recipient: { ...addr, description: 'Who receives $xMoney on xGas. Defaults to `from`.' },
+        l3_recipient: { ...addr, description: 'Who receives $xMoney on xGas. Defaults to `from`. Required when `from` is a contract wallet (not an EOA or an EIP-7702 EOA), because the same address on xGas is not necessarily yours.' },
       },
       required: ['usdg_amount', 'from'],
       additionalProperties: false,
@@ -231,14 +313,28 @@ export const tools = [
     async handler({ usdg_amount, from, l3_recipient }) {
       if (DEPOSITS_PAUSED) throw new Error(DEPOSITS_PAUSED_MSG);
       if (!isAddress(from)) throw new Error(`from is not an address: ${from}`);
-      const recipient = l3_recipient && l3_recipient !== ZERO ? l3_recipient : from;
+      const explicitRecipient = !!(l3_recipient && l3_recipient !== ZERO);
+      const recipient = explicitRecipient ? l3_recipient : from;
       if (!isAddress(recipient)) throw new Error(`l3_recipient is not an address: ${l3_recipient}`);
       const usdgWei = parseUsdg(usdg_amount);
 
-      const [balance, allowance] = await Promise.all([
+      const [balance, allowance, route, fromKind, recipientKind] = await Promise.all([
         parent.readContract({ address: L3.usdg, abi: ERC20_ABI, functionName: 'balanceOf', args: [from] }),
         parent.readContract({ address: L3.usdg, abi: ERC20_ABI, functionName: 'allowance', args: [from, L3.xMoney] }),
+        vaultRoute(),
+        accountKind(from),
+        explicitRecipient ? accountKind(recipient) : null,
       ]);
+      const recipientHasCode = ['eip7702', 'contract'].includes(explicitRecipient ? recipientKind : fromKind);
+      if (route.routes_to_this_chain !== true) {
+        return reply(`Nothing prepared. ${route.note}`, { blocked: 'vault_not_routed_to_this_chain', ...route });
+      }
+      if (fromKind === 'contract' && !explicitRecipient) {
+        return reply(
+          `Nothing prepared. ${from} is a contract wallet on the parent chain, and the same address on xGas is not necessarily controlled by you. Pass l3_recipient explicitly (an address you control on xGas).`,
+          { blocked: 'contract_sender_needs_explicit_recipient', from, from_kind: fromKind },
+        );
+      }
       if (balance < usdgWei) {
         return reply(`${from} holds ${fmtUsdg(balance)} USDG on the parent chain but this enter needs ${fmtUsdg(usdgWei)}. Nothing prepared.`,
           { blocked: 'insufficient_usdg', holds: fmtUsdg(balance), needs: fmtUsdg(usdgWei) });
@@ -275,9 +371,16 @@ export const tools = [
         net: `${fmtXMoney(m.net)} $xMoney as native gas on xGas L4`,
         timeline: ENTER_TIMELINE,
         irreversible: 'enterRollup locks your USDG in the vault. Getting it back means the full exit path (withdraw on xGas, wait for the assertion window on the parent, execute the Outbox, then exitRollup).',
-        notes: allowance < usdgWei
-          ? ['Two signatures: the approve must confirm before enterRollup is sent.']
-          : ['Allowance is already sufficient; one signature.'],
+        notes: [
+          allowance < usdgWei
+            ? 'Two signatures: the approve must confirm before enterRollup is sent.'
+            : 'Allowance is already sufficient; one signature.',
+          `The $xMoney is credited to ${recipient} on xGas ${XGAS_CHAIN_ID}: enterRollup names it as the ticket destination, so the deposit itself is not aliased.`,
+          ...(fromKind === 'eip7702' ? [`${from} is an EIP-7702 delegated account. ${ALIAS_WARNING}`] : []),
+          ...(recipientHasCode
+            ? [`${recipient} has code on the parent chain, so the Inbox aliases the ticket's refund addresses: the small unused-gas refund goes to the aliased address, and if the auto-redeem ever fails only the aliased address can cancel the ticket. Anyone can still redeem it, which delivers to ${recipient}.`]
+            : []),
+        ],
         steps,
       });
       return reply(renderApproval(p), p);
@@ -366,7 +469,7 @@ export const tools = [
 
   {
     name: 'quote_exit',
-    description: 'Quote $xMoney on xGas → USDG on the parent chain, end to end: the bridge-exit burn, the NAV redemption, the USDG rake, the contractual challenge window in Ethereum blocks, and whether the validator is currently asserting. Read-only.',
+    description: 'Quote $xMoney on xGas → USDG on the parent chain, end to end: the bridge-exit burn, the NAV redemption, the USDG rake, the contractual challenge window in Ethereum blocks, who can fast-confirm (a Safe of validator keys on 466302) and what that trusts, and whether the validators are currently asserting. Read-only.',
     inputSchema: { type: 'object', properties: { xmoney_amount: amount('Native $xMoney to withdraw, e.g. "25".') }, required: ['xmoney_amount'], additionalProperties: false },
     async handler({ xmoney_amount }) {
       const [m, w] = await Promise.all([exitMath(parseXMoney(xmoney_amount)), assertionWindow()]);
@@ -381,7 +484,7 @@ export const tools = [
         assertion_window: w,
         timeline: exitTimeline(w),
         honesty: w.summary
-          ? `${w.summary} If you want dollars today rather than whenever the validator asserts and confirms, quote the OTC route with ramp_quote instead.`
+          ? `${w.summary} If you want dollars today rather than whenever a validator asserts and the assertion confirms, quote the OTC route with ramp_quote instead.`
           : `${w.error || 'The exit wait could not be read.'} If you want dollars today, quote the OTC route with ramp_quote instead.`,
         raw: { usdg_out_raw: m.usdgOut, gross_raw: m.gross },
       };
@@ -389,9 +492,13 @@ export const tools = [
         `Burn ${fmtXMoney(m.xWei)} $xMoney → ${fmtUsdg(m.usdgOut)} USDG on the parent chain.\n` +
         `Fees: ${fmtXMoney(m.bridgeExitBurn)} xMoney burned on the way out of the bridge, then ${fmtUsdg(m.usdgRake)} USDG raked on redemption.\n` +
         (w.contractual
-          ? `Timing: the contractual window is ${w.contractual} (${w.confirm_period_blocks} Ethereum blocks) after an assertion covering your withdrawal is posted. With the fast confirmer online it is usually minutes after the next assertion.` +
+          ? `Timing: the contractual window is ${w.contractual} (${w.confirm_period_blocks} Ethereum blocks) after an assertion covering your withdrawal is posted. It is usually minutes after the next assertion ${w.fast_online || 'while the fast confirmer is online'}.` +
+            (w.fast_confirmer_safe
+              ? ` That fast path trusts the Safe: any ${w.fast_confirmer_safe.threshold} of its ${w.fast_confirmer_safe.owners.length} keys can confirm, and a confirmed assertion is final.`
+              : '') +
+            (w.validator_whitelist_disabled ? ' Validation is permissionless, so anyone can assert if the xGas validators stop.' : '') +
             (w.validator_idle
-              ? `\nWarning: the validator appears idle. Its last assertion was at least ${w.last_assertion.age_estimated} ago, and exits are waiting on it. There is no ETA until it resumes.`
+              ? `\nWarning: the validators appear idle. The last assertion was at least ${w.last_assertion.age_estimated} ago, and exits are waiting on one. There is no ETA until one is posted.`
               : w.last_assertion ? ` Last assertion: about ${w.last_assertion.age_estimated} ago.` : '')
           : `Timing: unknown. ${w.error || ''}`) +
         `\nAfter it is claimable, someone has to execute it on the Outbox: you from your own wallet, or the xGas host if you ask with claim_exit.`,
@@ -431,7 +538,7 @@ export const tools = [
         ],
         net: `${fmtXMoney(m.arrivesOnParent)} xMoney (ERC-20) on the parent chain, redeemable for about ${fmtUsdg(m.usdgOut)} USDG via exitRollup`,
         timeline: exitTimeline(w),
-        irreversible: `This burns your $xMoney on xGas immediately. The funds are unreachable until an assertion covering the withdrawal is posted and confirmed on the parent chain. There is no cancel and no way to speed it up.${w.validator_idle ? ` The validator appears idle right now (last assertion at least ${w.last_assertion.age_estimated} ago), so this withdrawal will wait until it resumes.` : ''}`,
+        irreversible: `This burns your $xMoney on xGas immediately. The funds are unreachable until an assertion covering the withdrawal is posted and confirmed on the parent chain. There is no cancel and no way to speed it up.${w.validator_idle ? ` The validators appear idle right now (last assertion at least ${w.last_assertion.age_estimated} ago), so this withdrawal will wait until one is posted.` : ''}`,
         notes: ['After this lands, use get_exit_status to watch it. Once it is claimable, execute it on the Outbox yourself or ask the host to with claim_exit; nothing claims it automatically.'],
       });
       return reply(renderApproval(p), p);
@@ -466,15 +573,19 @@ export const tools = [
         const ws = body.withdrawals || [];
         if (!ws.length) return reply(`No withdrawals found for ${address}.`, { ...body, address });
         const win = await assertionWindow();
-        const lines = ws.map((w) => `  #${w.position} ${w.amount} xMoney → ${w.destination}: ${w.status}${w.executedTx ? ` (executed ${w.executedTx})` : ''}`);
-        const pending = ws.filter((w) => w.status === 'pending').length;
+        // The host tracks the retired chain too; its entries carry chainId and legacy: true. Positions restart per
+        // chain, so pass chain_id to claim_exit for a legacy one.
+        const lines = ws.map((w) => `  #${w.position}${w.legacy ? ` (retired chain ${w.chainId})` : ''} ${w.amount} xMoney → ${w.destination}: ${w.status}${w.executedTx ? ` (executed ${w.executedTx})` : ''}`);
+        const pending = ws.filter((w) => w.status === 'pending' && !w.legacy).length;
+        const legacyPending = ws.filter((w) => w.status === 'pending' && w.legacy).length;
         return reply(
           `${ws.length} withdrawal(s) for ${address}:\n${lines.join('\n')}\n` +
           `Confirmed sends on the parent: ${body.confirmedSendCount}. "Claim for me" is ${body.executorEnabled ? 'available' : 'not configured on the host, so claim from your own wallet'}.` +
           (pending && win.contractual
-            ? `\nThe ${pending} pending one(s) wait on an assertion that covers them, then about ${win.contractual} (usually minutes with the fast confirmer online).` +
-              (win.validator_idle ? ` The validator appears idle (last assertion at least ${win.last_assertion.age_estimated} ago), so they are waiting on it.` : '')
-            : ''),
+            ? `\nThe ${pending} pending one(s) wait on an assertion that covers them, then about ${win.contractual} (usually minutes ${win.fast_online || 'while the fast confirmer is online'}).` +
+              (win.validator_idle ? ` The validators appear idle (last assertion at least ${win.last_assertion.age_estimated} ago), so they are waiting on an assertion.` : '')
+            : '') +
+          (legacyPending ? `\n${legacyPending} pending withdrawal(s) are on the retired chain; they confirm on its own rollup, and the estimate above does not apply to them.` : ''),
           { ...body, address, assertion_window: win },
         );
       } catch (e) {
@@ -495,15 +606,16 @@ export const tools = [
       properties: {
         tx_hash: { type: 'string', description: 'The xGas withdrawal transaction hash.' },
         position: { type: 'string', description: 'The L2ToL1Tx position, as shown by get_exit_status.' },
+        chain_id: { type: 'number', description: `Optional: the chain the withdrawal was made on. Defaults to any tracked chain; pass it for a withdrawal on the retired chain (${LEGACY?.chainId ?? 'legacy'}), since positions restart per chain.` },
       },
       additionalProperties: false,
     },
-    async handler({ tx_hash, position }) {
+    async handler({ tx_hash, position, chain_id }) {
       if (!tx_hash && !position) throw new Error('Give a tx_hash or a position.');
       const res = await fetch(`${XGAS_API}/api/withdrawals/execute`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ txHash: tx_hash, position }),
+        body: JSON.stringify({ txHash: tx_hash, position, ...(chain_id != null && { chainId: chain_id }) }),
         signal: AbortSignal.timeout(120_000),
       });
       const body = await res.json().catch(() => ({}));

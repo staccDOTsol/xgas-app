@@ -9,6 +9,7 @@ pragma solidity ^0.8.26;
  *         - 0.01% (1 bp) protocol rake is sent to Stacc Wizards / Homecoming Fee Fanout on Robinhood Chain
  *         - 0.02% (2 bp) goes to the buyback sink, which bridges it to XgasDevBuyback on Robinhood (buys + burns XGAS.DEV)
  *         - 99.96% is delivered net to the recipient.
+ *         Plain transfers with no calldata revert, so no value can be stranded here.
  */
 contract XGasRouter {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
@@ -42,6 +43,7 @@ contract XGasRouter {
     error NoValueProvided();
     error ZeroAddress();
     error TransferFailed();
+    error UseSendValue();
 
     function sendValue(address payable to, string calldata memo) external payable returns (uint256 netAmount, uint256 burnAmount, uint256 rakeAmount, uint256 buybackAmount) {
         if (msg.value == 0) revert NoValueProvided();
@@ -78,27 +80,9 @@ contract XGasRouter {
         if (!sendOk) revert TransferFailed();
     }
 
+    /// @notice Plain transfers are refused. The old receive() skimmed the fees and then kept the
+    ///         other 99.96% with no way out; value only moves through sendValue, to a named recipient.
     receive() external payable {
-        uint256 burnAmount = (msg.value * BURN_BPS) / 10000;
-        uint256 rakeAmount = (msg.value * FANOUT_RAKE_BPS) / 10000;
-        uint256 buybackAmount = (msg.value * BUYBACK_BPS) / 10000;
-
-        totalNativeBurned += burnAmount;
-        totalFanoutRaked += rakeAmount;
-        totalBuyback += buybackAmount;
-        totalNativeRouted += msg.value;
-
-        if (burnAmount > 0) {
-            (bool burnOk, ) = DEAD.call{value: burnAmount}("");
-            require(burnOk, "Burn failed");
-        }
-        if (rakeAmount > 0) {
-            (bool rakeOk, ) = FANOUT.call{value: rakeAmount}("");
-            require(rakeOk, "Rake failed");
-        }
-        if (buybackAmount > 0) {
-            (bool buybackOk, ) = BUYBACK.call{value: buybackAmount}("");
-            require(buybackOk, "Buyback failed");
-        }
+        revert UseSendValue();
     }
 }

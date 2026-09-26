@@ -13,6 +13,10 @@ pragma solidity ^0.8.26;
  *         - 0.01% (1 bp) $xMoney burned permanently to 0x000...dEaD
  *         - 0.01% (1 bp) $xMoney raked to the FanoutSink, which bridges it to the Stacc Wizards Fee Fanout on Robinhood
  *         - 0.02% (2 bp) $xMoney to the buyback sink, which bridges it to XgasDevBuyback (buys + burns XGAS.DEV)
+ *
+ *         Key buy split: 55% dividends to every key in the round (the buyer's own keys included),
+ *         35% to this round's jackpot, 4 bp fees, and the rest (9.96%) carried into the NEXT
+ *         round's jackpot. Ledger: balance == jackpotPot + nextRoundSeed + dividendReserve.
  */
 contract FomoAttritionL4 {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
@@ -36,6 +40,11 @@ contract FomoAttritionL4 {
     uint256 public totalBurned;
     uint256 public totalFanoutRaked;
     uint256 public totalBuyback;
+    /// @notice Carried remainder of this round's buys; becomes the next round's opening jackpot.
+    uint256 public nextRoundSeed;
+    /// @notice Dividends funded and not yet claimed, across all rounds. Every claimable balance
+    ///         is paid from here; per-player rounding always leaves dust here, never a shortfall.
+    uint256 public dividendReserve;
 
     struct Player {
         uint256 keys;
@@ -62,6 +71,8 @@ contract FomoAttritionL4 {
     event KeysPurchased(address indexed buyer, string xHandle, uint256 keysBought, uint256 costXMoney, uint256 newDeadline);
     event DividendsClaimed(address indexed player, uint256 amountXMoney);
     event JackpotAwarded(address indexed winner, string xHandle, uint256 jackpotAmountXMoney, uint256 newRoundId);
+    event JackpotSeeded(uint256 indexed roundId, uint256 amountXMoney);
+    event JackpotDonated(address indexed from, uint256 amountXMoney);
 
     error RoundExpired();
     error RoundNotExpired();
@@ -96,8 +107,18 @@ contract FomoAttritionL4 {
 
     function _owed(uint256 round, address player) internal view returns (uint256) {
         Player storage p = _players[round][player];
-        uint256 accumulated = (p.keys * _accFor(round)) / SCALE;
-        return (accumulated - p.rewardDebt) + p.pendingDividends;
+        return _accrued(p.keys, _accFor(round), p.rewardDebt) + p.pendingDividends;
+    }
+
+    /// @dev Earned since the debt was set: accumulated rounds DOWN and debt rounds UP, so no
+    ///      holder is ever credited more than their exact share (saturates at 0).
+    function _accrued(uint256 keys, uint256 acc, uint256 debt) internal pure returns (uint256) {
+        uint256 accumulated = (keys * acc) / SCALE;
+        return accumulated > debt ? accumulated - debt : 0;
+    }
+
+    function _debt(uint256 keys, uint256 acc) internal pure returns (uint256) {
+        return (keys * acc + SCALE - 1) / SCALE;
     }
 
     function buyKeys(string calldata xHandle, uint256 keyCount) external payable {
@@ -109,12 +130,13 @@ contract FomoAttritionL4 {
         if (msg.value < totalCost) revert InsufficientPayment();
 
         Player storage p = _players[roundId][msg.sender];
-        if (p.keys > 0) {
-            uint256 accumulated = (p.keys * accDividendPerKey) / SCALE;
-            p.pendingDividends += accumulated - p.rewardDebt;
-        }
+        uint256 accBefore = accDividendPerKey;
+        if (p.keys > 0) p.pendingDividends += _accrued(p.keys, accBefore, p.rewardDebt);
 
         p.keys += keyCount;
+        // Debt is pinned to the index BEFORE this buy's raise, so the buyer's keys (old and new)
+        // earn their pro-rata share of this purchase's dividend instead of it being stranded.
+        p.rewardDebt = _debt(p.keys, accBefore);
         p.xHandle = xHandle;
         totalKeys += keyCount;
 
@@ -130,20 +152,7 @@ contract FomoAttritionL4 {
             roundDeadline = base + timeAdded;
         }
 
-        // Splits in $xMoney:
-        // 55% to Dividends, 35% to Grand Jackpot, 0.01% burn, 0.01% Fanout, 0.02% buyback, remainder seeds the next round
-        uint256 burnAmount = (totalCost * BURN_BPS) / 10000;
-        uint256 rakeAmount = (totalCost * FANOUT_RAKE_BPS) / 10000;
-        uint256 buybackAmount = (totalCost * BUYBACK_BPS) / 10000;
-        uint256 divAmount = (totalCost * 5500) / 10000;
-        uint256 jackpotAmount = (totalCost * 3500) / 10000;
-
-        totalBurned += burnAmount;
-        totalFanoutRaked += rakeAmount;
-        totalBuyback += buybackAmount;
-        jackpotPot += jackpotAmount;
-        accDividendPerKey += (divAmount * SCALE) / totalKeys;
-        p.rewardDebt = (p.keys * accDividendPerKey) / SCALE;
+        (uint256 burnAmount, uint256 rakeAmount, uint256 buybackAmount) = _splitBuy(totalCost);
 
         emit KeysPurchased(msg.sender, xHandle, keyCount, totalCost, roundDeadline);
 
@@ -153,6 +162,31 @@ contract FomoAttritionL4 {
 
         uint256 refund = msg.value - totalCost;
         if (refund > 0) _send(msg.sender, refund);
+    }
+
+    /// @dev Splits in $xMoney: 55% to Dividends, 35% to Grand Jackpot, 0.01% burn, 0.01% Fanout,
+    ///      0.02% buyback, remainder (9.96%) seeds the next round's jackpot. Books everything but
+    ///      the three fee transfers, which the caller makes.
+    function _splitBuy(uint256 totalCost) internal returns (uint256 burnAmount, uint256 rakeAmount, uint256 buybackAmount) {
+        burnAmount = (totalCost * BURN_BPS) / 10000;
+        rakeAmount = (totalCost * FANOUT_RAKE_BPS) / 10000;
+        buybackAmount = (totalCost * BUYBACK_BPS) / 10000;
+        uint256 divAmount = (totalCost * 5500) / 10000;
+        uint256 jackpotAmount = (totalCost * 3500) / 10000;
+
+        // Reserve what the index raise can ever pay out (rounded up, still <= divAmount); the
+        // truncation dust joins the carried remainder instead of sitting unowned in the contract.
+        uint256 keys = totalKeys;
+        uint256 perKey = (divAmount * SCALE) / keys;
+        uint256 divReserved = (perKey * keys + SCALE - 1) / SCALE;
+        accDividendPerKey += perKey;
+
+        totalBurned += burnAmount;
+        totalFanoutRaked += rakeAmount;
+        totalBuyback += buybackAmount;
+        jackpotPot += jackpotAmount;
+        dividendReserve += divReserved;
+        nextRoundSeed += totalCost - burnAmount - rakeAmount - buybackAmount - jackpotAmount - divReserved;
     }
 
     function claimDividends() external {
@@ -166,12 +200,13 @@ contract FomoAttritionL4 {
 
     function _claim(uint256 round) internal {
         Player storage p = _players[round][msg.sender];
-        uint256 accumulated = (p.keys * _accFor(round)) / SCALE;
-        uint256 owed = (accumulated - p.rewardDebt) + p.pendingDividends;
+        uint256 acc = _accFor(round);
+        uint256 owed = _accrued(p.keys, acc, p.rewardDebt) + p.pendingDividends;
         if (owed == 0) revert NoDividendsToClaim();
 
         p.pendingDividends = 0;
-        p.rewardDebt = accumulated;
+        p.rewardDebt = _debt(p.keys, acc);
+        dividendReserve -= owed;
 
         uint256 burnAmount = (owed * BURN_BPS) / 10000;
         uint256 rakeAmount = (owed * FANOUT_RAKE_BPS) / 10000;
@@ -221,6 +256,11 @@ contract FomoAttritionL4 {
     function _startNewRound() internal {
         if (roundId > 0) roundAccDividendPerKey[roundId] = accDividendPerKey; // freeze the finished round
         roundId++;
+        // The previous round's carried remainder opens this round's jackpot.
+        uint256 seed = nextRoundSeed;
+        nextRoundSeed = 0;
+        jackpotPot += seed;
+        if (seed > 0) emit JackpotSeeded(roundId, seed);
         totalKeys = 0;
         accDividendPerKey = 0;
         currentLeader = address(0);
@@ -233,5 +273,9 @@ contract FomoAttritionL4 {
         if (!ok) revert TransferFailed();
     }
 
-    receive() external payable {}
+    /// @notice Plain $xMoney sent here is a donation to the current round's jackpot.
+    receive() external payable {
+        jackpotPot += msg.value;
+        emit JackpotDonated(msg.sender, msg.value);
+    }
 }

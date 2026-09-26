@@ -1,5 +1,5 @@
 import { encodeFunctionData, isAddress } from 'viem';
-import { L4, XGAS_CHAIN_ID, xgas, ZERO, BURN_BPS, FANOUT_RAKE_BPS, BUYBACK_BPS, TRADE_TIMEOUT_S } from '../config.mjs';
+import { L4, l4Address, XGAS_CHAIN_ID, xgas, ZERO, BURN_BPS, FANOUT_RAKE_BPS, BUYBACK_BPS, TRADE_TIMEOUT_S } from '../config.mjs';
 import { ESCROW_ABI } from '../abis.mjs';
 import { expectedCents, fmtXMoney, parseXMoney, rateToUsd, usd } from '../money.mjs';
 import { prepared, renderApproval, reply, submitFields } from '../approval.mjs';
@@ -9,7 +9,7 @@ const addr = { type: 'string', pattern: '^0x[a-fA-F0-9]{40}$' };
 const BPS = 10000n;
 const SIDE = ['ask', 'bid'];
 
-const read = (fn, args = []) => xgas.readContract({ address: L4.escrow, abi: ESCROW_ABI, functionName: fn, args });
+const read = (fn, args = []) => xgas.readContract({ address: l4Address('escrow'), abi: ESCROW_ABI, functionName: fn, args });
 
 /** fiatRateBps from either an explicit bps number or a friendlier "$0.99" style price. */
 /**
@@ -84,8 +84,11 @@ export const tools = [
       additionalProperties: false,
     },
     async handler({ side = 'both', active_only = true }) {
+      if (!L4.escrow) {
+        return reply(`There is no order book yet: the OTC escrow is not deployed on xGas ${XGAS_CHAIN_ID}. Until it is, move between USDG and $xMoney through the vault (quote_enter, quote_exit).`, { orders: [], escrow: null, deployed: false });
+      }
       const next = await read('nextOrderId');
-      if (next === 0n) return reply('The order book is empty — no orders have ever been posted on this escrow. To start one, use post_ask or post_bid.', { orders: [], next_order_id: 0 });
+      if (next === 0n) return reply('The order book is empty: no orders have ever been posted on this escrow. To start one, use post_ask or post_bid.', { orders: [], next_order_id: 0 });
       const ids = Array.from({ length: Number(next) }, (_, i) => i);
       const all = (await Promise.all(ids.map((i) => order(i).catch(() => null)))).filter(Boolean);
       const orders = all

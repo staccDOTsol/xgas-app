@@ -55,8 +55,10 @@ contract NguToken is ERC20, ReentrancyGuard {
     uint256 public immutable maxSupply;
     uint256 public immutable basePrice;
     uint16 public immutable stepBps;
-    /// @notice Floor protection in bps: buy price >= floor / (betaBps/10000).
-    ///         9000 = the redemption floor never sits below 90% of the buy price.
+    /// @notice Price support in bps: next buy price >= floor / (betaBps/10000).
+    ///         9000 = the floor is AT MOST 90% of the next price. It is a ceiling on the
+    ///         floor, not a promise: once the step term sets the price, price runs ahead
+    ///         and the floor can sit far below it. maxLossBps() reports the live gap.
     uint16 public immutable betaBps;
     /// @notice Genesis tokens minted to the creator, backed by the launch payment.
     uint256 public immutable seedQty;
@@ -182,11 +184,17 @@ contract NguToken is ERC20, ReentrancyGuard {
         return f > lastPrice ? lastPrice : f;
     }
 
-    /// @notice Worst case for a buyer who sells straight back, in bps of what they paid.
+    /// @notice Loss, in bps of what they paid (rounded up), for a buyer who mints one whole
+    ///         token at nextPrice() and sells it straight back. Read from live state: it is
+    ///         near 1 - beta only while floor / beta sets the price, and approaches 100% as
+    ///         the step term runs the price ahead of the floor.
     function maxLossBps() external view returns (uint256) {
-        // sell returns (1 - 0.04%) of min(floor, price); floor >= beta * price once beta binds.
-        uint256 recover = (uint256(betaBps) * (10_000 - BURN_BPS - FANOUT_BPS - BUYBACK_BPS)) / 10_000;
-        return 10_000 - recover;
+        // Replays buy(1) then sell(1) with their exact per-leg rounding.
+        uint256 p = nextPrice();
+        uint256 f = (reserve + p - _fees(p)) / (supply + 1);
+        uint256 b = f > p ? p : f; // _sellBase, with lastPrice = p after the buy
+        uint256 out = b - _fees(b);
+        return ((p - out) * 10_000 + p - 1) / p;
     }
 
     // buy / sell

@@ -4,8 +4,9 @@ pragma solidity ^0.8.26;
 import {NguToken} from "./NguToken.sol";
 
 /// @title NGU launcher: permissionless factory for fungible number-go-up tokens.
-/// @notice Zero launch fee. Every mint and burn pays 0.01% burn + 0.01% FanoutSink +
-///         0.02% XGAS.DEV buyback — the money is in the flow, not the launch toll.
+/// @notice Zero launch fee: the seed payment goes to the reserve untouched. Every curve
+///         mint and burn pays 0.01% burn + 0.01% FanoutSink + 0.02% XGAS.DEV buyback;
+///         the money is in the flow, not the launch toll.
 ///         Economics are immutable per token once launched.
 contract NguLauncher {
     /// @notice Protocol fee sink for every NGU token (xGas FanoutSink).

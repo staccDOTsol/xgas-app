@@ -8,6 +8,13 @@ import { json } from './money.mjs';
  */
 export function prepared({ action, chainId, to, data, value = 0n, asset, amount, counterparty, fees = [], net, timeline = [], irreversible, notes = [], steps }) {
   const txs = steps || [{ label: action, chainId, to, data, value }];
+  // A missing `to` would make the wallet deploy the calldata as a contract. That only happens when a
+  // contract is absent from the deployment file (say, before the L4 apps are redeployed on a new chain).
+  for (const t of txs) {
+    if (!t.to || /^0x0{40}$/i.test(t.to)) {
+      throw new Error(`Refusing to prepare "${t.label || action}": its target contract is not in the deployment file for chain ${t.chainId}. Nothing was prepared.`);
+    }
+  }
   return {
     kind: 'unsigned',
     action,
@@ -29,7 +36,7 @@ export function prepared({ action, chainId, to, data, value = 0n, asset, amount,
       data: t.data,
       value: (t.value ?? 0n).toString(),
     })),
-    next: `Review the terms above. Nothing is signed yet — sign the transaction${txs.length > 1 ? 's' : ''} in your own wallet, then call the matching submit_* tool with the signed payload and an idempotency key.`,
+    next: `Review the terms above. Nothing is signed yet. Sign the transaction${txs.length > 1 ? 's' : ''} in your own wallet, then call the matching submit_* tool with the signed payload and an idempotency key.`,
   };
 }
 
@@ -56,7 +63,7 @@ export function renderApproval(p) {
   if (a.irreversible) L.push(`IRREVERSIBLE: ${a.irreversible}`);
   L.push('');
   L.push(`${p.transactions.length} unsigned transaction${p.transactions.length > 1 ? 's' : ''} to sign in your wallet:`);
-  p.transactions.forEach((t, i) => L.push(`  ${i + 1}. ${t.label} — chain ${t.chainId}, to ${t.to}, value ${t.value}`));
+  p.transactions.forEach((t, i) => L.push(`  ${i + 1}. ${t.label}: chain ${t.chainId}, to ${t.to}, value ${t.value}`));
   L.push('');
   L.push(p.next);
   return L.join('\n');
