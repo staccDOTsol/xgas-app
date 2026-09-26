@@ -295,3 +295,50 @@ export const PlaidCheck: React.FC<PlaidCheckProps> = ({ tradeId, side, xHandle, 
     </div>
   );
 };
+
+/** The desk-level entry point: link or unlink accounts without needing a trade first. */
+export const PlaidAccounts: React.FC<{ xHandle: string }> = ({ xHandle }) => {
+  const [info, reload] = usePlaidInfo();
+  const [working, setWorking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { if (info?.configured) resumeOauth(() => { reload(); }); }, [info?.configured, reload]);
+  if (!info?.configured || !xHandle) return null;
+  const items = info.items || [];
+  const run = (fn: () => Promise<unknown>) => async () => {
+    setError(null);
+    try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setWorking(null); }
+  };
+  const link = run(async () => {
+    setWorking('Confirm with your passkey');
+    await ensurePasskey();
+    setWorking('Opening Plaid');
+    const { link_token } = await postJson<{ link_token: string }>('/api/plaid/link-token', {});
+    try { sessionStorage.setItem(TOKEN_KEY, link_token); } catch { /* OAuth resume just will not work */ }
+    if (await runLink(link_token)) await reload();
+  });
+  const unlink = (id: string, name: string) => run(async () => {
+    if (!window.confirm(`Unlink ${name}? xgas.dev stops reading it and asks Plaid to drop the connection.`)) return;
+    setWorking('Unlinking');
+    await postJson('/api/plaid/unlink', { item: id });
+    await reload();
+  })();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Landmark className="w-4 h-4 text-cyan-300" />
+      {items.map(it => (
+        <span key={it.id} className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] ${it.needsRelink ? 'border-rose-500/40 text-rose-300' : 'border-[#1e2538] text-slate-300'}`}>
+          {it.institution}{it.accounts.length ? ` · ${it.accounts.map(a => a.mask ? `••${a.mask}` : a.name).join(', ')}` : ''}
+          <button className="text-slate-500 hover:text-rose-300 cursor-pointer" title="Unlink" disabled={!!working} onClick={() => unlink(it.id, it.institution)}><Unlink className="w-3 h-3" /></button>
+        </span>
+      ))}
+      {items.length < 3 && (
+        <button className={items.length ? btnGhost : btnPrimary} disabled={!!working} onClick={link} title="Read-only: lets the desk confirm your X Money payments. Asks for your passkey first.">
+          <Fingerprint className="w-3.5 h-3.5 inline" /> {items.length ? 'Link another' : 'Link bank (Plaid)'}
+        </button>
+      )}
+      {info.env !== 'production' && <span className="text-[9px] text-amber-300 uppercase">Plaid {info.env}</span>}
+      {working && <span className="text-[10px] text-slate-400">{working}…</span>}
+      {error && <span className="basis-full text-[11px] text-rose-300">{error}</span>}
+    </div>
+  );
+};

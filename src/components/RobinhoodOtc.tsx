@@ -5,7 +5,7 @@ import { UserWallet } from '../types';
 import { CONTRACT_ADDRESSES, ROBINHOOD_OTC_ABI, ROBINHOOD_OTC_SIDE, ROBINHOOD_OTC_STATUS } from '../contracts/abis';
 import { publicClient, sendOnChainTx, switchNetwork, xLoginUrl, L3_CHAIN_ID, TxError } from '../contracts/web3Client';
 import { RobinhoodArbiters } from './RobinhoodArbiters';
-import { PlaidCheck } from './PlaidCheck';
+import { PlaidAccounts, PlaidCheck } from './PlaidCheck';
 
 // ---------------------------------------------------------------------------
 // Robinhood desk: dollars on X Money (off-chain, X account to X account) <-> native ETH on Robinhood Chain #4663.
@@ -1392,6 +1392,7 @@ export const RobinhoodOtc: React.FC<RobinhoodOtcProps> = ({ wallet, onConnectWal
           )}
           {account && <button className={btnGhost} onClick={() => switchNetwork(L3_CHAIN_ID)}>Switch to #{L3_CHAIN_ID}</button>}
         </div>
+        <PlaidAccounts xHandle={handle} />
         {owed > 0n && (
           <div className="flex items-center gap-2 px-2 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
             <span className="text-emerald-200">{fmtEth(owed)} ETH is waiting for you (a direct transfer failed, so it was credited)</span>
