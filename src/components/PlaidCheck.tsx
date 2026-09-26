@@ -214,7 +214,7 @@ export const PlaidCheck: React.FC<PlaidCheckProps> = ({ tradeId, side, xHandle, 
       ) : (
         <>
           <div className="text-[11px] text-slate-300">
-            Link the account your X Money dollars move through, and xgas.dev looks for exactly {dollars} {dir} with the memo xgas #{tradeId}. Read-only: it never moves money and never {side === 'seller' ? 'releases for you' : 'claims for you'}. Unlink any time.
+            Link your X Money wallet (search "X Money" in Plaid), or the bank your dollars land in, and xgas.dev looks for exactly {dollars} {dir} with the memo xgas #{tradeId}. Read-only: it never moves money and never {side === 'seller' ? 'releases for you' : 'claims for you'}. Unlink any time.
           </div>
           {items.length < 3 && (
             <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
@@ -332,7 +332,7 @@ export const PlaidAccounts: React.FC<{ xHandle: string }> = ({ xHandle }) => {
         </span>
       ))}
       {items.length < 3 && (
-        <button className={items.length ? btnGhost : btnPrimary} disabled={!!working} onClick={link} title="Read-only: lets the desk confirm your X Money payments. Asks for your passkey first.">
+        <button className={items.length ? btnGhost : btnPrimary} disabled={!!working} onClick={link} title="Read-only: lets the desk confirm your X Money payments. In Plaid, search &quot;X Money&quot; to link your X Money wallet itself. Asks for your passkey first.">
           <Fingerprint className="w-3.5 h-3.5 inline" /> {items.length ? 'Link another' : 'Link bank (Plaid)'}
         </button>
       )}
