@@ -1,6 +1,7 @@
-import { encodeAbiParameters, encodeFunctionData, isAddress, keccak256, parseUnits, formatUnits, parseAbi, parseTransaction, toFunctionSelector } from 'viem';
-import { XSWAP, PARENT_CHAIN_ID, parent, ZERO, FORGE_DEFAULT_SENDER, isXswapV1, validXswapOwner } from '../config.mjs';
-import { ERC20_ABI, XSWAP_INTENTS_ABI, XSWAP_ASKS_ABI } from '../abis.mjs';
+import { decodeFunctionData, encodeAbiParameters, encodeFunctionData, isAddress, keccak256, parseUnits, formatUnits, parseAbi, parseTransaction, toFunctionSelector } from 'viem';
+import { L3, XSWAP, XSWAP_LEGACY, XSWAP_V2, PARENT_CHAIN_ID, parent, ZERO, FORGE_DEFAULT_SENDER, isXswapV1, isXswapLegacy, validXswapOwner } from '../config.mjs';
+import { ERC20_ABI, XSWAP_INTENTS_ABI, XSWAP_ASKS_ABI, XSWAP_V2_INTENTS_ABI, XSWAP_V2_ASKS_ABI } from '../abis.mjs';
+import { assertXSwapV2NewOrdersEnabled, verifyXSwapV2, xswapV2GrossFor, xswapV2OutFunding, xswapV2InFloor } from '../xswapV2.mjs';
 import { fmtXMoney, parseXMoney } from '../money.mjs';
 import { prepared, renderApproval, reply } from '../approval.mjs';
 import { submitBatch, submitRaw } from '../idempotency.mjs';
@@ -51,6 +52,13 @@ const chainByKey = (v) => {
 const KIND = { native: 0, erc20: 1, nft: 2, nftAny: 3 };
 const INTENT_STATE = ['taking bids', 'bid in, delivering', 'delivered, checking', 'settled', 'disputed', 'refunded'];
 const ASK_STATE = ['taking bids', 'sold, send it', 'sent, buyer checking', 'settled', 'disputed', 'cancelled'];
+const VENUES = [
+  { side: 'out', contract: XSWAP_V2.intents, version: 2, abi: XSWAP_V2_INTENTS_ABI },
+  { side: 'in', contract: XSWAP_V2.asks, version: 2, abi: XSWAP_V2_ASKS_ABI },
+  ...XSWAP_LEGACY.intents.map((contract) => ({ side: 'out', contract, version: 1, abi: XSWAP_INTENTS_ABI })),
+  ...XSWAP_LEGACY.asks.map((contract) => ({ side: 'in', contract, version: 1, abi: XSWAP_ASKS_ABI })),
+];
+const venueOf = (contract) => VENUES.find((v) => v.contract.toLowerCase() === String(contract).toLowerCase()) || null;
 
 const readI = (fn, args = []) => parent.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: fn, args });
 const readA = (fn, args = []) => parent.readContract({ address: XSWAP.asks, abi: XSWAP_ASKS_ABI, functionName: fn, args });
@@ -99,13 +107,17 @@ const freshId = (seed) => keccak256(encodeAbiParameters([{ type: 'string' }, { t
 
 const secs = (n) => (n < 120 ? `${n}s` : n < 7200 ? `${Math.round(n / 60)} min` : `${(n / 3600).toFixed(1)} h`);
 
-async function intentOf(id) {
-  const i = await readI('get', [id]).catch(() => null);
+async function intentOf(id, venue) {
+  const i = await parent.readContract({ address: venue.contract, abi: venue.abi, functionName: 'get', args: [id] }).catch(() => null);
   if (!i || i.user === ZERO) return null;
   const now = Math.floor(Date.now() / 1000);
   return {
-    side: 'out', id, contract: XSWAP.intents, user: i.user,
+    side: 'out', id, contract: venue.contract, version: venue.version, user: i.user,
     escrowed: fmtXMoney(i.amount), escrowed_wei: i.amount,
+    ...(venue.version === 2 ? { actual_escrowed: fmtXMoney(i.escrowed), actual_escrowed_wei: i.escrowed,
+      protocol_bps: Number(i.protocolBps), opened_bond_bps: Number(i.openedBondBps),
+      site_fee_bps: Number(i.siteFeeBps), site_fee_recipient: i.siteFeeRecipient,
+      challenge_window_s: Number(i.challengeWindow), protocol_treasury: i.protocolTreasury } : {}),
     state: INTENT_STATE[Number(i.state)] || `state ${i.state}`, state_code: Number(i.state),
     solver: i.solver === ZERO ? null : i.solver,
     solver_ask: i.solver === ZERO ? null : fmtXMoney(i.ask), bond: fmtXMoney(i.bond),
@@ -114,20 +126,30 @@ async function intentOf(id) {
     claimed_at: Number(i.claimedAt) || null, want: i.want,
   };
 }
-async function askOf(id) {
-  const a = await readA('get', [id]).catch(() => null);
+async function askOf(id, venue) {
+  const a = await parent.readContract({ address: venue.contract, abi: venue.abi, functionName: 'get', args: [id] }).catch(() => null);
   if (!a || a.seller === ZERO) return null;
   const now = Math.floor(Date.now() / 1000);
   return {
-    side: 'in', id, contract: XSWAP.asks, seller: a.seller,
+    side: 'in', id, contract: venue.contract, version: venue.version, seller: a.seller,
     floor: fmtXMoney(a.floorPay), state: ASK_STATE[Number(a.state)] || `state ${a.state}`, state_code: Number(a.state),
+    ...(venue.version === 2 ? { min_seller_net: fmtXMoney(a.minSellerNet), min_seller_net_wei: a.minSellerNet,
+      protocol_bps: Number(a.protocolBps), opened_bond_bps: Number(a.openedBondBps),
+      site_fee_bps: Number(a.siteFeeBps), site_fee_recipient: a.siteFeeRecipient,
+      challenge_window_s: Number(a.challengeWindow), protocol_treasury: a.protocolTreasury } : {}),
     buyer: a.buyer === ZERO ? null : a.buyer,
     best_bid: a.buyer === ZERO ? null : fmtXMoney(a.pay), buyer_bond: fmtXMoney(a.bond),
     bidding_ends_in: Number(a.bidEnds) - now, deadline_in: Number(a.deadline) - now,
     delivered_at: Number(a.deliveredAt) || null, give: a.give,
   };
 }
-const either = async (id) => (await intentOf(id)) || (await askOf(id));
+async function either(id, contract = null) {
+  const venues = contract ? [venueOf(contract)].filter(Boolean) : VENUES;
+  if (contract && !venues.length) throw new Error('That XSwap contract is not a reviewed V2 or known legacy escrow.');
+  const found = (await Promise.all(venues.map((v) => v.side === 'out' ? intentOf(id, v) : askOf(id, v)))).filter(Boolean);
+  if (found.length > 1) throw new Error(`Swap id ${id} exists on multiple escrows. Give its exact contract address.`);
+  return found[0] || null;
+}
 
 /**
  * A memo is whatever the person who opened the swap wrote on chain. Only the five order fields survive, each checked
@@ -242,7 +264,10 @@ const BURN_NOTE = XSWAP.v1
 /** Why new swaps are off, or null when the configuration allows them (the live owner check still follows). */
 function pausedReason() {
   if (XSWAP.v1) {
-    return `XSwap is paused for new swaps. The escrow contracts this connector points at (intents ${XSWAP.intents}, asks ${XSWAP.asks}, Robinhood Chain 4663) have owner() = ${FORGE_DEFAULT_SENDER}, forge-std's default sender, which no one holds a key for: their deploy script read msg.sender before it started broadcasting. Only the owner can resolve a dispute, so on these contracts a disputed swap would stay frozen forever, escrow and bond both. Replacement contracts with a real owner are prepared but not deployed yet.`;
+    return `XSwap is paused for new swaps. The escrow contracts this connector points at (intents ${XSWAP.intents}, asks ${XSWAP.asks}, Robinhood Chain 4663) have owner() = ${FORGE_DEFAULT_SENDER}, forge-std's default sender, which no one holds a key for: their deploy script read msg.sender before it started broadcasting. Only the owner can resolve a dispute, so on these contracts a disputed swap would stay frozen forever, escrow and bond both. Reviewed V2 contracts are deployed, but new orders remain paused until the V2 solver and far delivery are reviewed.`;
+  }
+  if (isXswapLegacy(XSWAP.intents) || isXswapLegacy(XSWAP.asks)) {
+    return `New XSwap funding and claims are paused on the fee-free legacy escrows ${XSWAP.intents} and ${XSWAP.asks}. Existing orders remain readable and may be refunded, cancelled, settled or withdrawn through their original contract.`;
   }
   if (!XSWAP.addressesOk) return `XSwap is paused: the configured escrow addresses (intents ${XSWAP.intents}, asks ${XSWAP.asks}) are not both valid addresses.`;
   if (!XSWAP.flag) {
@@ -254,7 +279,7 @@ function pausedReason() {
       : 'no expected owner is configured (XSWAP_OWNER, or "owner" in the deployment file\'s xswap block)';
     return `XSwap is switched off on this host: ${why}. New swaps only open once owner() on both escrows can be checked against the owner the deployment says it set.`;
   }
-  return null;
+  return 'New XSwap orders must use the reviewed V2 site-fee path. This legacy ABI cannot prepare one.';
 }
 /**
  * What still works while new swaps are off. Dispute is only a way out when someone can rule on it: on a contract whose
@@ -270,9 +295,16 @@ export function stillWorks(arb) {
 /** Steps that start a swap or move one closer to a dispute: they need a switched-on XSwap with a real owner. */
 const GATED_ACTIONS = new Set(['bid', 'claim', 'accept', 'delivered']);
 const selectorsOf = (abi, names) => abi.filter((x) => x.type === 'function' && names.includes(x.name)).map((f) => toFunctionSelector(f));
-const GATED_SELECTORS = new Set([
+const LEGACY_FUNDING_SELECTORS = new Set([
   ...selectorsOf(XSWAP_INTENTS_ABI, ['open', 'openWith', 'bid', 'claim', 'accept']),
   ...selectorsOf(XSWAP_ASKS_ABI, ['ask', 'bid', 'accept', 'delivered']),
+]);
+const V2_FUNDING_SELECTORS = new Set([
+  ...selectorsOf(XSWAP_V2_INTENTS_ABI, ['openWithSiteFee', 'bid', 'claim', 'accept']),
+  ...selectorsOf(XSWAP_V2_ASKS_ABI, ['askWithSiteFee', 'bid', 'accept', 'delivered']),
+]);
+const KEYLESS_DISPUTE_SELECTORS = new Set([
+  ...selectorsOf(XSWAP_INTENTS_ABI, ['dispute']), ...selectorsOf(XSWAP_ASKS_ABI, ['dispute']),
 ]);
 
 /**
@@ -293,27 +325,43 @@ export function ownerProblems(arb) {
   return problems;
 }
 
-async function assertXswapOpen(what, nothing = 'Nothing was prepared.') {
-  const paused = pausedReason();
-  const arb = await arbiter().catch(() => null);
-  if (paused) throw new Error(`${what} refused. ${paused} ${stillWorks(arb)} ${nothing}`);
-  const problems = ownerProblems(arb || { out: { kind: 'unknown', contract: XSWAP.intents }, in: { kind: 'unknown', contract: XSWAP.asks } });
-  if (problems.length) throw new Error(`${what} refused: no verified owner can resolve disputes on these contracts. ${problems.join(' ')} ${stillWorks(arb)} ${nothing}`);
-}
-
 /** submit_xswap relays anything signed. It still will not relay a new swap, bid or claim to a contract that is paused. */
-async function assertRelayAllowed(raws) {
+export async function assertRelayAllowed(raws) {
   const configured = new Set([XSWAP.intents, XSWAP.asks].map((a) => a.toLowerCase()));
+  const legacy = new Set([...XSWAP_LEGACY.intents, ...XSWAP_LEGACY.asks].map((a) => a.toLowerCase()));
+  const v2 = new Set([XSWAP_V2.intents, XSWAP_V2.asks].map((a) => a.toLowerCase()));
   for (const raw of raws) {
     let tx;
     try { tx = parseTransaction(raw); } catch { continue; } // not a transaction: the RPC rejects it
     const to = tx.to ? tx.to.toLowerCase() : null;
     const sel = String(tx.data || tx.input || '0x').slice(0, 10).toLowerCase();
-    if (!to || !GATED_SELECTORS.has(sel)) continue;
-    if (isXswapV1(to)) {
-      throw new Error(`submit_xswap refused: this transaction starts or advances a swap on ${to}, a v1 XSwap contract whose owner() is ${FORGE_DEFAULT_SENDER}, an address no one holds a key for. A dispute there could never be resolved. Nothing was sent.`);
+    if (!to) continue;
+    if ((to === L3.xMoney.toLowerCase() || to === XSWAP.xmoney.toLowerCase())
+      && sel === toFunctionSelector(ERC20_ABI.find((f) => f.type === 'function' && f.name === 'approve'))) {
+      let spender = null;
+      try {
+        const decoded = decodeFunctionData({ abi: ERC20_ABI, data: tx.data || tx.input });
+        if (decoded.functionName === 'approve') spender = String(decoded.args[0]).toLowerCase();
+      } catch { /* malformed calldata is left for RPC to reject */ }
+      if (legacy.has(spender)) throw new Error('submit_xswap refused: approval to a legacy XSwap escrow would enable fee-free funding. Nothing was sent.');
+      if (v2.has(spender)) {
+        assertXSwapV2NewOrdersEnabled();
+        await verifyXSwapV2();
+      }
     }
-    if (configured.has(to)) await assertXswapOpen('submit_xswap', 'Nothing was sent.');
+    if (legacy.has(to) && LEGACY_FUNDING_SELECTORS.has(sel)) {
+      throw new Error(`submit_xswap refused: ${to} is a legacy XSwap escrow. New funding, bids and claims there are disabled. Nothing was sent.`);
+    }
+    if (isXswapV1(to) && KEYLESS_DISPUTE_SELECTORS.has(sel)) {
+      throw new Error(`submit_xswap refused: a dispute on keyless-owner legacy escrow ${to} cannot be resolved. Nothing was sent.`);
+    }
+    if (v2.has(to) && V2_FUNDING_SELECTORS.has(sel)) {
+      assertXSwapV2NewOrdersEnabled();
+      await verifyXSwapV2();
+    }
+    if (configured.has(to) && !legacy.has(to) && !v2.has(to) && LEGACY_FUNDING_SELECTORS.has(sel)) {
+      throw new Error('submit_xswap refused: new funding on an unreviewed XSwap escrow is disabled. Nothing was sent.');
+    }
   }
 }
 
@@ -326,6 +374,84 @@ async function terms() {
     out: { window_s: Number(iw), bidding_s: Number(ib), bond_bps: Number(ibond), fee_bps: Number(ifee) },
     in: { window_s: Number(aw), bidding_s: Number(ab), bond_bps: Number(abond), fee_bps: Number(afee) },
   };
+}
+
+async function prepareV2Out(args) {
+  assertXSwapV2NewOrdersEnabled();
+  const verified = await verifyXSwapV2();
+  if (!isAddress(args.from)) throw new Error('`from` must be an address.');
+  const order = orderFrom(args);
+  const gross = parseXMoney(args.xmoney_amount);
+  const funding = xswapV2OutFunding(gross);
+  const minutes = Math.max(5, Number(args.deadline_minutes ?? 60));
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + minutes * 60);
+  const id = args.id || freshId(args.from);
+  const [balance, allowance] = await Promise.all([
+    parent.readContract({ address: L3.xMoney, abi: ERC20_ABI, functionName: 'balanceOf', args: [args.from] }),
+    parent.readContract({ address: L3.xMoney, abi: ERC20_ABI, functionName: 'allowance', args: [args.from, XSWAP_V2.intents] }),
+  ]);
+  if (balance < gross) throw new Error(`That wallet holds ${fmtXMoney(balance)} X Money; this order may debit ${fmtXMoney(gross)}.`);
+  const steps = [];
+  if (allowance < gross) steps.push({ label: `Approve exactly ${fmtXMoney(gross)} X Money for the V2 escrow`,
+    chainId: PARENT_CHAIN_ID, to: L3.xMoney, value: 0n,
+    data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [XSWAP_V2.intents, gross] }) });
+  steps.push({ label: `Open the V2 intent with ${fmtXMoney(gross)} X Money gross wallet cap`,
+    chainId: PARENT_CHAIN_ID, to: XSWAP_V2.intents, value: 0n,
+    data: encodeFunctionData({ abi: XSWAP_V2_INTENTS_ABI, functionName: 'openWithSiteFee', args: [id, gross,
+      funding.escrowCeiling, deadline, wantHash(order), memoOf(order),
+      { minFilled: 0, maxFailBps: 0, minBondBps: 0, trustedOnly: false }, XSWAP_V2.collector, 10, verified.out.termsHash] }) });
+  const p = prepared({
+    action: `Send ${order._label} on ${order._chain.slug} to ${order.to}, paid in X Money`,
+    chainId: PARENT_CHAIN_ID, asset: 'X Money (Robinhood 4663)', amount: `${fmtXMoney(gross)} gross wallet debit cap`,
+    counterparty: 'a bonded V2 solver',
+    fees: [
+      { label: 'X Money inbound burn', amount: `${fmtXMoney(gross - funding.expectedEscrowReceived)} X Money` },
+      { label: 'site convenience fee', amount: `up to ${fmtXMoney(funding.siteFeeMax)} X Money`, note: '10 bp of the winning solver ask, sent to the site collector at settlement' },
+      { label: 'protocol fee', amount: `up to ${fmtXMoney(funding.protocolFeeMax)} X Money`, note: '50 bp of the winning solver ask' },
+    ],
+    net: `${order._label} on ${order._chain.slug}; unused escrow becomes withdrawal credit`,
+    timeline: [`bidding ${secs(verified.out.bidding)}`, `challenge window ${secs(verified.out.window)}`, `deadline ${new Date(Number(deadline) * 1000).toISOString()}`],
+    irreversible: 'Only confirm delivery after the far-chain asset actually arrives.',
+    notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'This connector does not verify far-chain delivery.'], steps,
+  });
+  return reply(renderApproval(p), { ...p, version: 2, contract: XSWAP_V2.intents, intent_id: id,
+    order: JSON.parse(memoOf(order)), want_hash: wantHash(order), deadline: Number(deadline),
+    gross_wallet_debit_wei: gross, escrow_ceiling_wei: funding.escrowCeiling,
+    expected_escrow_received_wei: funding.expectedEscrowReceived, terms_hash: verified.out.termsHash,
+    submit_with: 'submit_xswap' });
+}
+
+async function prepareV2In(args) {
+  assertXSwapV2NewOrdersEnabled();
+  const verified = await verifyXSwapV2();
+  if (!isAddress(args.from)) throw new Error('`from` must be an address.');
+  const order = orderFrom({ ...args, to: ZERO }, { recipientOptional: true });
+  const net = parseXMoney(args.want_xmoney);
+  const floor = xswapV2InFloor(net);
+  const minutes = Math.max(10, Number(args.deadline_minutes ?? 120));
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + minutes * 60);
+  const id = args.id || freshId(args.from);
+  const p = prepared({
+    action: `Sell ${order._label} on ${order._chain.slug} for X Money`,
+    chainId: PARENT_CHAIN_ID, asset: order._label, amount: `at least ${fmtXMoney(net)} X Money to your wallet`,
+    counterparty: 'a bonded V2 buyer',
+    fees: [
+      { label: 'site convenience fee', amount: `at least ${fmtXMoney(floor.siteFeeAtFloor)} X Money at the bid floor`, note: '10 bp of the winning payment' },
+      { label: 'protocol fee', amount: `at least ${fmtXMoney(floor.protocolFeeAtFloor)} X Money at the bid floor`, note: '50 bp of the winning payment' },
+    ],
+    net: `at least ${fmtXMoney(net)} X Money after both fees and the outbound X Money burn`,
+    timeline: [`bidding ${secs(verified.in.bidding)}`, `challenge window ${secs(verified.in.window)}`, `deadline ${new Date(Number(deadline) * 1000).toISOString()}`],
+    irreversible: 'Sending the far-chain asset is outside this escrow and cannot be undone from here.',
+    notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'Posting the ask moves no X Money. The buyer funds escrow before delivery.'],
+    steps: [{ label: `Post the V2 ask with ${fmtXMoney(net)} X Money net wallet floor`, chainId: PARENT_CHAIN_ID,
+      to: XSWAP_V2.asks, value: 0n,
+      data: encodeFunctionData({ abi: XSWAP_V2_ASKS_ABI, functionName: 'askWithSiteFee', args: [id, net,
+        deadline, wantHash(order), memoOf(order), XSWAP_V2.collector, 10, verified.in.termsHash] }) }],
+  });
+  return reply(renderApproval(p), { ...p, version: 2, contract: XSWAP_V2.asks, ask_id: id,
+    order: JSON.parse(memoOf(order)), give_hash: wantHash(order), deadline: Number(deadline),
+    min_seller_net_wei: net, gross_bid_floor_wei: floor.grossBidFloor, terms_hash: verified.in.termsHash,
+    submit_with: 'submit_xswap' });
 }
 
 const PERMISSIONLESS = 'Anyone can solve this: there is no allow-list. Posting the bond is the permission, and losing a dispute is the cost.';
@@ -348,7 +474,7 @@ export const tools = [
     description: 'The escrow\'s own terms on both directions, read from the contracts: bidding time, challenge window, bond and protocol fee, who can resolve a dispute (owner() read live) and what that owner can and cannot do, and whether new swaps are open on this connector.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
-      const [t, arb] = await Promise.all([terms(), arbiter()]);
+      const [t, arb, v2] = await Promise.all([terms(), arbiter(), verifyXSwapV2().catch(() => null)]);
       const line = (d, t2) => `${d}: bidding ${secs(t2.bidding_s)}, challenge window ${secs(t2.window_s)}, bond ${Number(t2.bond_bps) / 100}% of the escrow, protocol fee ${Number(t2.fee_bps) / 100}% of what the solver charges.`;
       const paused = pausedReason();
       const sameOwner = arb.out.owner && arb.in.owner && arb.out.owner.toLowerCase() === arb.in.owner.toLowerCase();
@@ -366,6 +492,8 @@ export const tools = [
         ...rules,
         ...(nobody ? [] : [ownerPowers(arb).out, ownerPowers(arb).in, PARAMS_IN_FLIGHT]),
         BURN_NOTE,
+        v2 ? `Reviewed V2 escrows are deployed and runtime verified (${XSWAP_V2.intents}, ${XSWAP_V2.asks}); site fee 10 bp. New V2 funding remains paused until solver bids and far delivery are reviewed.`
+          : 'V2 deployment could not be verified on this read; new V2 funding remains paused.',
         PERMISSIONLESS,
       ].join('\n'), {
         ...t,
@@ -376,6 +504,8 @@ export const tools = [
         expected_owner: XSWAP.expectedOwner,
         dispute_is_a_way_out: !nobody,
         intents: XSWAP.intents, asks: XSWAP.asks, xmoney: XSWAP.xmoney, chain_id: XSWAP.chainId, address_source: XSWAP.source,
+        v2: { intents: XSWAP_V2.intents, asks: XSWAP_V2.asks, collector: XSWAP_V2.collector,
+          runtime_verified: Boolean(v2), new_orders_open: false, site_fee_bps: 10, terms: v2 },
       });
     },
   },
@@ -396,21 +526,23 @@ export const tools = [
     },
     async handler(args) {
       const o = orderFrom(args, { recipientOptional: true });
-      const amount = parseXMoney(args.xmoney_amount);
-      const t = (await terms()).out;
-      const maxFee = (amount * BigInt(t.fee_bps)) / BPS;
-      const paused = pausedReason();
+      const gross = parseXMoney(args.xmoney_amount);
+      const funding = xswapV2OutFunding(gross);
+      const live = await verifyXSwapV2().catch(() => null);
+      const paused = 'V2 new orders are paused until the V2 solver and far delivery are reviewed.';
       return reply([
-        ...(paused ? [`PAUSED: this is a quote only; prepare_xswap_out will refuse. ${paused}`] : []),
+        `PAUSED: this is a read-only V2 calculation; prepare_xswap_out will refuse. ${paused}`,
         `Deliver ${o._label} on ${o._chain.slug}${o.to === ZERO ? '' : ` to ${o.to}`}.`,
-        `You escrow ${fmtXMoney(amount)} X Money. That is the most it can cost you: solvers bid down from it, and every bit the bidding saves comes back to you when the job settles.`,
-        `Protocol fee at most ${fmtXMoney(maxFee)} X Money (${t.fee_bps / 100}% of what the winning solver actually charges, not of your escrow).`,
-        `Bidding runs ${secs(t.bidding_s)}; the solver posts ${t.bond_bps / 100}% of the escrow as bond; you have ${secs(t.window_s)} after delivery to dispute.`,
-        `If nobody delivers by your deadline, you get the escrow back.`,
-        BURN_NOTE,
-        `Disputes are ruled on by the contract's owner; xswap_terms says who that is.`,
+        `Gross wallet debit cap ${fmtXMoney(gross)} X Money; estimated escrow receipt ${fmtXMoney(funding.expectedEscrowReceived)} after 1 bp transfer burn.`,
+        `Maximum solver ceiling ${fmtXMoney(funding.escrowCeiling)} X Money. The escrow also reserves up to ${fmtXMoney(funding.siteFeeMax)} X Money for the 10 bp site fee.`,
+        `Protocol fee at most ${fmtXMoney(funding.protocolFeeMax)} X Money (50 bp of the winning solver ask).`,
+        live ? `V2 bidding ${secs(live.out.bidding)}, bond ${live.out.bondBps / 100}%, challenge window ${secs(live.out.window)}.`
+          : 'The live V2 terms could not be verified in this quote; no order is offered.',
         NOT_A_BRIDGE,
-      ].join('\n'), { order: memoOf(o), want_hash: wantHash(o), escrow_wei: amount, max_fee_wei: maxFee, terms: t, paused_reason: paused });
+      ].join('\n'), { version: 2, order: memoOf(o), want_hash: wantHash(o), gross_wallet_debit_wei: gross,
+        expected_escrow_received_wei: funding.expectedEscrowReceived, escrow_ceiling_wei: funding.escrowCeiling,
+        site_fee_max_wei: funding.siteFeeMax, protocol_fee_max_wei: funding.protocolFeeMax,
+        terms: live?.out ?? null, paused_reason: paused });
     },
   },
   {
@@ -432,51 +564,7 @@ export const tools = [
       additionalProperties: false,
     },
     async handler(args) {
-      await assertXswapOpen('prepare_xswap_out');
-      if (!isAddress(args.from)) throw new Error('`from` must be an address.');
-      const o = orderFrom(args);
-      const amount = parseXMoney(args.xmoney_amount);
-      const mins = Math.max(5, Number(args.deadline_minutes ?? 60));
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + mins * 60);
-      const id = args.id || freshId(args.from);
-
-      const [bal, allowance, t, arb] = await Promise.all([
-        parent.readContract({ address: XSWAP.xmoney, abi: ERC20_ABI, functionName: 'balanceOf', args: [args.from] }),
-        parent.readContract({ address: XSWAP.xmoney, abi: ERC20_ABI, functionName: 'allowance', args: [args.from, XSWAP.intents] }),
-        terms(),
-        arbiter(),
-      ]);
-      if (bal < amount) throw new Error(`That wallet holds ${fmtXMoney(bal)} X Money and this intent escrows ${fmtXMoney(amount)}. Bridge in first, or escrow less.`);
-
-      const steps = [];
-      if (allowance < amount) {
-        steps.push({
-          label: `Approve the escrow for ${fmtXMoney(amount)} X Money`, chainId: PARENT_CHAIN_ID, to: XSWAP.xmoney, value: 0n,
-          data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [XSWAP.intents, amount] }),
-        });
-      }
-      steps.push({
-        label: `Open the intent (${fmtXMoney(amount)} X Money into escrow)`, chainId: PARENT_CHAIN_ID, to: XSWAP.intents, value: 0n,
-        data: encodeFunctionData({ abi: XSWAP_INTENTS_ABI, functionName: 'open', args: [id, amount, deadline, wantHash(o), memoOf(o)] }),
-      });
-
-      const p = prepared({
-        action: `Send ${o._label} on ${o._chain.slug} to ${o.to}, paid in X Money`,
-        chainId: PARENT_CHAIN_ID, asset: 'X Money (ERC-20 on Robinhood 4663)', amount: `${fmtXMoney(amount)} escrowed`,
-        counterparty: 'whichever solver bids lowest: permissionless, bonded',
-        fees: [{ label: 'protocol fee', amount: `up to ${fmtXMoney((amount * BigInt(t.out.fee_bps)) / BPS)} X Money`, note: `${t.out.fee_bps / 100}% of the winning ask` }],
-        net: `${o._label} on ${o._chain.slug}, plus whatever the bidding saves off your ${fmtXMoney(amount)}`,
-        timeline: [
-          `bidding open ${secs(t.out.bidding_s)} from the moment it lands; the lowest ask wins`,
-          `you can accept early to stop the clock`,
-          `after delivery you have ${secs(t.out.window_s)} to dispute; then the solver is paid`,
-          `nobody delivers by ${new Date(Number(deadline) * 1000).toISOString()}: refund in full`,
-        ],
-        irreversible: 'Once you confirm delivery, the escrow pays the solver and cannot be clawed back. Before that, a dispute inside the window returns your escrow and the solver\'s bond.',
-        notes: [PERMISSIONLESS, NOT_A_BRIDGE, `Disputes are ruled on by: ${whoRules(arb.out)}`, BURN_NOTE, 'This connector cannot see the destination chain. Check the asset arrived yourself before confirming.'],
-        steps,
-      });
-      return reply(renderApproval(p), { ...p, intent_id: id, order: JSON.parse(memoOf(o)), want_hash: wantHash(o), deadline: Number(deadline), submit_with: 'submit_xswap' });
+      return prepareV2Out(args);
     },
   },
   {
@@ -497,49 +585,16 @@ export const tools = [
       additionalProperties: false,
     },
     async handler(args) {
-      await assertXswapOpen('prepare_xswap_in');
-      if (!isAddress(args.from)) throw new Error('`from` must be an address.');
-      const o = orderFrom({ ...args, to: ZERO }, { recipientOptional: true });
-      const floor = parseXMoney(args.want_xmoney);
-      const mins = Math.max(10, Number(args.deadline_minutes ?? 120));
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + mins * 60);
-      const id = args.id || freshId(args.from);
-      const [{ in: t }, arb] = await Promise.all([terms(), arbiter()]);
-
-      const p = prepared({
-        action: `Sell ${o._label} on ${o._chain.slug} for X Money`,
-        chainId: PARENT_CHAIN_ID, asset: o._label, amount: `floor ${fmtXMoney(floor)} X Money`,
-        counterparty: 'whichever buyer bids highest, and their X Money is escrowed before you send',
-        fees: [{ label: 'protocol fee', amount: `${t.fee_bps / 100}% of the winning bid`, note: 'taken on settlement, not now' }],
-        net: `at least ${fmtXMoney(floor)} X Money, less the fee`,
-        timeline: [
-          `bidding open ${secs(t.bidding_s)}; the highest bid wins and you can accept early`,
-          `send the asset, then mark it delivered`,
-          `the buyer has ${secs(t.window_s)} to dispute; after that you settle and pull the X Money`,
-          `nothing agreed by ${new Date(Number(deadline) * 1000).toISOString()}: cancel and everyone is made whole`,
-        ],
-        irreversible: 'Sending the asset on the other chain is outside this escrow and cannot be undone. Only mark it delivered once it actually is.',
-        notes: [
-          'The recipient is not part of the hash on this side: the buyer tells you where to send after they win, and disputes if it never lands.',
-          'Posting the ask moves nothing. The buyer escrows first.',
-          `Disputes are ruled on by: ${whoRules(arb.in)}`,
-          PERMISSIONLESS,
-        ],
-        steps: [{
-          label: `Post the ask (floor ${fmtXMoney(floor)} X Money)`, chainId: PARENT_CHAIN_ID, to: XSWAP.asks, value: 0n,
-          data: encodeFunctionData({ abi: XSWAP_ASKS_ABI, functionName: 'ask', args: [id, floor, deadline, wantHash(o), memoOf(o)] }),
-        }],
-      });
-      return reply(renderApproval(p), { ...p, ask_id: id, order: JSON.parse(memoOf(o)), give_hash: wantHash(o), deadline: Number(deadline), submit_with: 'submit_xswap' });
+      return prepareV2In(args);
     },
   },
   {
     name: 'xswap_status',
     description: 'Where one swap stands, either direction: who took it, what they charge, what comes back to you, and how long the clocks have left. Read-only.',
-    inputSchema: { type: 'object', properties: { id: b32 }, required: ['id'], additionalProperties: false },
-    async handler({ id }) {
-      const s = await either(id);
-      if (!s) return reply(`No swap with id ${id} on either contract. An id only exists once its open/ask transaction has landed.`, { found: false });
+    inputSchema: { type: 'object', properties: { id: b32, contract: { ...addr, description: 'Exact V2 or legacy escrow address if this id exists on more than one contract.' } }, required: ['id'], additionalProperties: false },
+    async handler({ id, contract }) {
+      const s = await either(id, contract);
+      if (!s) return reply(`No swap with id ${id} on the known V2 or legacy escrows. An id only exists once its open/ask transaction has landed.`, { found: false });
       const clock = (n, what) => (n > 0 ? `${what} in ${secs(n)}` : `${what} passed ${secs(-n)} ago`);
       const L = s.side === 'out'
         ? [`X Money out · ${s.state}.`, `${s.user} escrowed ${s.escrowed} X Money.`,
@@ -549,8 +604,7 @@ export const tools = [
            s.buyer ? `Buyer ${s.buyer} has ${s.best_bid} escrowed, bond ${s.buyer_bond}.` : 'No bid yet.',
            `${clock(s.bidding_ends_in, 'bidding ends')}, ${clock(s.deadline_in, 'deadline')}.`];
       if (s.state_code === 4) { // Disputed, on both contracts
-        const arb = await arbiter();
-        const ruler = s.side === 'out' ? arb.out : arb.in;
+        const ruler = await ownerOf(s.contract);
         L.push(`Disputed. Who can rule on it: ${whoRules(ruler)}`);
         s.arbiter = ruler;
       }
@@ -570,23 +624,24 @@ export const tools = [
       const head = await parent.getBlockNumber({ cacheTime: 0 }); // a cached head can miss the swap that just landed
       const fromBlock = head > BigInt(lookback_blocks) ? head - BigInt(lookback_blocks) : 0n;
       const ev = (abi, name) => abi.find((a) => a.type === 'event' && a.name === name);
-      const [opened, asked] = await Promise.all([
-        parent.getLogs({ address: XSWAP.intents, event: ev(XSWAP_INTENTS_ABI, 'Opened'), args: { user: address }, fromBlock, toBlock: head }).catch(() => []),
-        parent.getLogs({ address: XSWAP.asks, event: ev(XSWAP_ASKS_ABI, 'Asked'), args: { seller: address }, fromBlock, toBlock: head }).catch(() => []),
-      ]);
+      const logs = await Promise.all(VENUES.map(async (venue) => ({ venue, logs: await parent.getLogs({
+        address: venue.contract, event: ev(venue.abi, venue.side === 'out' ? 'Opened' : 'Asked'),
+        args: venue.side === 'out' ? { user: address } : { seller: address }, fromBlock, toBlock: head,
+      }).catch(() => []) })));
       // Change from the bidding, solver payouts and won disputes all sit as credit until they are pulled.
-      const [creditOut, creditIn] = await Promise.all([
-        readI('credit', [address]).catch(() => 0n), readA('credit', [address]).catch(() => 0n),
-      ]);
+      const credits = await Promise.all(VENUES.map(async (venue) => ({ contract: venue.contract, side: venue.side,
+        amount: await parent.readContract({ address: venue.contract, abi: venue.abi, functionName: 'credit', args: [address] }).catch(() => 0n) })));
+      const creditOut = credits.filter((c) => c.side === 'out').reduce((sum, c) => sum + c.amount, 0n);
+      const creditIn = credits.filter((c) => c.side === 'in').reduce((sum, c) => sum + c.amount, 0n);
       const waiting = creditOut + creditIn > 0n
-        ? `\n${fmtXMoney(creditOut + creditIn)} X Money is waiting for you in the escrow (change from the bidding, payouts, dispute wins). Pull it with prepare_xswap_action action=withdraw.`
+        ? `\n${fmtXMoney(creditOut + creditIn)} X Money is waiting across the escrows. Pull each credit with prepare_xswap_action action=withdraw and that row's contract address.`
         : '';
-      const rows = [...opened.map((l) => ({ l, side: 'out' })), ...asked.map((l) => ({ l, side: 'in' }))]
+      const rows = logs.flatMap(({ venue, logs: venueLogs }) => venueLogs.map((l) => ({ l, venue })))
         .sort((a, b) => Number(b.l.blockNumber - a.l.blockNumber)).slice(0, limit);
-      if (!rows.length) return reply(`${address} has no swaps in the last ${lookback_blocks} blocks.${waiting}`, { swaps: [], credit_out: creditOut, credit_in: creditIn });
+      if (!rows.length) return reply(`${address} has no swaps in the last ${lookback_blocks} blocks.${waiting}`, { swaps: [], credit_out: creditOut, credit_in: creditIn, credits });
       const swaps = [];
       for (const r of rows) {
-        const s = r.side === 'out' ? await intentOf(r.l.args.id) : await askOf(r.l.args.id);
+        const s = r.venue.side === 'out' ? await intentOf(r.l.args.id, r.venue) : await askOf(r.l.args.id, r.venue);
         if (!s) continue;
         const order = orderFromMemo(r.l.args.memo, s.side === 'out' ? s.want : s.give); // typed fields only, re-hashed
         if (order) s.order = order;
@@ -596,19 +651,23 @@ export const tools = [
       const line = (s) => (s.side === 'out'
         ? `${s.id.slice(0, 10)}… out · ${s.escrowed} X Money → ${what(s, 'want')} · ${s.state}`
         : `${s.id.slice(0, 10)}… in · ${what(s, 'give')} → ${s.floor}+ X Money · ${s.state}`);
-      return reply(`${swaps.length} swap${swaps.length > 1 ? 's' : ''}:\n${swaps.map(line).join('\n')}${waiting}`, { swaps, credit_out: creditOut, credit_in: creditIn });
+      return reply(`${swaps.length} swap${swaps.length > 1 ? 's' : ''}:\n${swaps.map(line).join('\n')}${waiting}`, { swaps, credit_out: creditOut, credit_in: creditIn, credits });
     },
   },
   {
     name: 'xswap_reputation',
     description: 'What an address has actually done on the escrow: jobs filled and failed, intents opened, disputes raised and lost. Nobody grants this; it is only ever the sum of finished swaps. Read-only.',
-    inputSchema: { type: 'object', properties: { address: addr }, required: ['address'], additionalProperties: false },
-    async handler({ address }) {
+    inputSchema: { type: 'object', properties: { address: addr, contract: { ...addr, description: 'Optional known intents escrow; defaults to the deployed V2 intents.' } }, required: ['address'], additionalProperties: false },
+    async handler({ address, contract }) {
       if (!isAddress(address)) throw new Error(`Not an address: ${address}`);
-      const [filled, failed, opened, disputed, disputesLost, volume, since] = await readI('rep', [address]);
+      const venue = venueOf(contract || XSWAP_V2.intents);
+      if (!venue || venue.side !== 'out') throw new Error('Reputation is read from a known XSwap intents escrow.');
+      const [filled, failed, opened, disputed, disputesLost, volume, since] = await parent.readContract({
+        address: venue.contract, abi: venue.abi, functionName: 'rep', args: [address],
+      });
       const taken = filled + failed;
       const rep = {
-        address, filled: Number(filled), failed: Number(failed), opened: Number(opened),
+        address, contract: venue.contract, version: venue.version, filled: Number(filled), failed: Number(failed), opened: Number(opened),
         disputed: Number(disputed), disputes_lost: Number(disputesLost),
         volume_xmoney: fmtXMoney(volume), first_seen: since === 0n ? null : new Date(Number(since) * 1000).toISOString(),
         fail_bps: taken === 0n ? null : Number((failed * BPS) / taken),
@@ -632,31 +691,39 @@ export const tools = [
         reason: { type: 'string', description: 'Required for dispute: what did not arrive.' },
         proof: { ...b32, description: 'For delivered: the transaction hash on the other chain.' },
         side: { type: 'string', enum: ['out', 'in'], description: 'Only needed for withdraw, which has no id.' },
+        contract: { ...addr, description: 'Exact V2 or legacy escrow. Required for an older withdrawal; optional with a unique swap id.' },
       },
       required: ['action'], additionalProperties: false,
     },
-    async handler({ id, action, reason, proof, side, from, ask }) {
-      if (GATED_ACTIONS.has(action)) await assertXswapOpen(`prepare_xswap_action ${action}`);
+    async handler({ id, action, reason, proof, side, from, ask, contract }) {
       if (action === 'withdraw') {
-        const which = side === 'in' ? XSWAP.asks : XSWAP.intents;
-        const abi = side === 'in' ? XSWAP_ASKS_ABI : XSWAP_INTENTS_ABI;
+        const venue = contract ? venueOf(contract) : venueOf(side === 'in' ? XSWAP.asks : XSWAP.intents);
+        if (!venue || (side && venue.side !== side)) throw new Error('Choose a known XSwap escrow matching the requested side.');
         const p = prepared({
-          action: 'Pull everything the escrow owes you', chainId: PARENT_CHAIN_ID, to: which, value: 0n,
-          data: encodeFunctionData({ abi, functionName: 'withdraw', args: [] }),
+          action: 'Pull everything this escrow owes you', chainId: PARENT_CHAIN_ID, to: venue.contract, value: 0n,
+          data: encodeFunctionData({ abi: venue.abi, functionName: 'withdraw', args: [] }),
           asset: 'X Money', amount: 'your whole credit balance', irreversible: null,
           notes: ['Credit is what settlements and won disputes have already set aside for you. Pulling it changes nothing else.'],
         });
         return reply(renderApproval(p), { ...p, submit_with: 'submit_xswap' });
       }
       if (!id) throw new Error('Give the swap id.');
-      const s = await either(id);
+      const s = await either(id, contract);
       if (!s) throw new Error(`No swap with id ${id}.`);
+      if (GATED_ACTIONS.has(action)) {
+        if (s.version !== 2) throw new Error(`New bids, claims and delivery advances are paused on legacy escrow ${s.contract}. Existing refunds, cancellations, settlements and withdrawals remain available.`);
+        assertXSwapV2NewOrdersEnabled();
+        await verifyXSwapV2();
+      }
       const out = s.side === 'out';
-      const to = out ? XSWAP.intents : XSWAP.asks;
-      const abi = out ? XSWAP_INTENTS_ABI : XSWAP_ASKS_ABI;
-      const [allTerms, arb] = await Promise.all([terms(), arbiter()]);
-      const t = allTerms[out ? 'out' : 'in'];
-      const ruler = out ? arb.out : arb.in;
+      const to = s.contract;
+      const abi = venueOf(to).abi;
+      const [window, bondBps, ruler] = await Promise.all([
+        parent.readContract({ address: to, abi, functionName: 'window' }),
+        parent.readContract({ address: to, abi, functionName: 'bondBps' }),
+        ownerOf(to),
+      ]);
+      const t = { window_s: s.challenge_window_s ?? Number(window), bond_bps: s.opened_bond_bps ?? Number(bondBps) };
       const unresolvable = ruler.kind === 'nobody';
 
       const spec = {
@@ -728,24 +795,32 @@ export const tools = [
       }[action];
       if (!spec) throw new Error(`Unknown action: ${action}`);
       spec.require?.();
+      if (action === 'dispute' && unresolvable) throw new Error('A dispute on this keyless-owner legacy escrow cannot be resolved; no transaction was prepared.');
 
       const steps = [];
+      let bidGrossWalletCap = null;
       // A bid is collateral, not a promise: whoever bids has to let the escrow take the bond first.
-      if (action === 'bid' || action === 'claim') {
+      if (action === 'bid' || (action === 'claim' && s.version !== 2)) {
         if (!isAddress(from || '')) throw new Error('Give `from`: the address posting the bond.');
         const bond = out
-          ? (await readI('canClaim', [id, from]))[2]
-          : (parseXMoney(ask ?? '0') * BigInt((await terms()).in.bond_bps)) / BPS;
-        const need = action === 'bid' && !out ? parseXMoney(ask) + bond : bond;
-        const allowance = await parent.readContract({ address: XSWAP.xmoney, abi: ERC20_ABI, functionName: 'allowance', args: [from, to] });
+          ? (await parent.readContract({ address: to, abi, functionName: 'canClaim', args: [id, from] }))[2]
+          : (parseXMoney(ask ?? '0') * BigInt(t.bond_bps)) / BPS;
+        const target = action === 'bid' && !out ? parseXMoney(ask) + bond : bond;
+        const need = s.version === 2 ? xswapV2GrossFor(target) : target;
+        if (s.version === 2 && action === 'bid') {
+          bidGrossWalletCap = need;
+          spec.args.push(need);
+        }
+        const payToken = s.version === 2 ? L3.xMoney : XSWAP.xmoney;
+        const allowance = await parent.readContract({ address: payToken, abi: ERC20_ABI, functionName: 'allowance', args: [from, to] });
         if (allowance < need) {
           steps.push({
             label: `Approve the escrow for ${fmtXMoney(need)} X Money (bond${!out && action === 'bid' ? ' and payment' : ''})`,
-            chainId: PARENT_CHAIN_ID, to: XSWAP.xmoney, value: 0n,
+            chainId: PARENT_CHAIN_ID, to: payToken, value: 0n,
             data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [to, need] }),
           });
         }
-        spec.note += ` Bond for this one: ${fmtXMoney(bond)} X Money.`;
+        spec.note += ` Bond for this one: ${fmtXMoney(bond)} X Money. ${s.version === 2 ? `Gross wallet debit cap ${fmtXMoney(need)} X Money includes the transfer burn.` : ''}`;
       }
       steps.push({ label: spec.title, chainId: PARENT_CHAIN_ID, to, value: 0n, data: encodeFunctionData({ abi, functionName: spec.fn, args: spec.args }) });
 
@@ -756,7 +831,8 @@ export const tools = [
         net: null, timeline: [`swap is currently: ${s.state}`], irreversible: spec.irreversible, notes: [spec.note],
         steps,
       });
-      return reply(renderApproval(p), { ...p, id, side: s.side, state: s.state, submit_with: 'submit_xswap' });
+      return reply(renderApproval(p), { ...p, id, side: s.side, contract: to, version: s.version,
+        bid_gross_wallet_debit_cap_wei: bidGrossWalletCap, state: s.state, submit_with: 'submit_xswap' });
     },
   },
   {

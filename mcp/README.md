@@ -63,7 +63,7 @@ Environment overrides, all optional:
 | `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
 | `XSWAP_INTENTS` | `xswap.intents` from the deployment, else v1 `0xf8B4…9a35` (paused) | the X-Money-in escrow on the parent chain |
 | `XSWAP_ASKS` | `xswap.asks` from the deployment, else v1 `0x0a33…Cd13` (paused) | the X-Money-out escrow on the parent chain |
-| `XSWAP_ENABLED` | unset: `xswap.enabled` from the deployment, else off | `1` lets XSwap prepare new swaps. It never switches on the v1 addresses |
+| `XSWAP_ENABLED` | ignored for the known legacy escrows | A host flag cannot re-enable fee-free legacy funding or V2 orders. V2 needs a reviewed source change after solver delivery checks. |
 | `XSWAP_OWNER` | `xswap.owner` from the deployment | the owner new swaps require `owner()` to equal on both escrows |
 
 ## Chain 466302
@@ -120,6 +120,8 @@ its exits and Outbox claims keep working, and the deployment file keeps its addr
   creation.
 
 ## XSwap: X Money in, anything out
+
+**V2 transition (October 2026):** The reviewed Robinhood V2 collector is `0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e`; its intents and asks escrows are `0xdf6398ff5a694a03d85a614812490143c4e5d238` and `0x2f507a18043002d8f5d6d3022efd6265be7a87fc`. The connector verifies their runtime hashes, owner, collector link and live terms before a V2 preparation. New V2 funding and claims remain source-gated off until the solver's V2 bid and far-chain delivery have been reviewed. The current 5D/a999 and retired f8/0a escrows remain readable; refund, cancel, settle, confirm and per-contract withdrawal can be prepared for existing orders. Legacy open, ask, bid and claim transactions, including approval to a legacy escrow through `submit_xswap`, are refused. `quote_xswap` now treats its entered X Money amount as the gross wallet debit cap and shows the 1 bp transfer burn, 10 bp site fee and 50 bp protocol fee. `prepare_xswap_action action=withdraw` accepts `contract` to pull credit from a specific known escrow.
 
 `quote_xswap` and `prepare_xswap_out` escrow X Money against an order (chain, asset, amount, recipient) hashed the way every solver hashes it. Solvers bid the price down,
 the lowest ask wins, and whatever the bidding saves comes back to the payer as credit.

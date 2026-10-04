@@ -176,3 +176,43 @@ export const XSWAP_ASKS_ABI = parseAbi([
   'event Delivered(bytes32 indexed id, address indexed seller, bytes32 proof)',
   'event Settled(bytes32 indexed id, address indexed seller, uint256 paid, uint256 fee)',
 ]);
+
+// Reviewed site-fee V2 escrows on Robinhood. Kept separate from the fee-free legacy ABI so a
+// legacy bid(bytes32,uint256) can never be decoded as V2 bid(bytes32,uint256,uint256).
+export const XSWAP_V2_INTENTS_ABI = parseAbi([
+  'struct Policy { uint32 minFilled; uint16 maxFailBps; uint16 minBondBps; bool trustedOnly; }',
+  'struct Intent { address user; uint256 amount; uint256 escrowed; uint16 protocolBps; uint16 openedBondBps; uint64 challengeWindow; address protocolTreasury; address siteFeeRecipient; uint16 siteFeeBps; uint64 deadline; uint64 bidEnds; uint64 claimedAt; address solver; uint256 ask; uint256 bond; uint8 state; bytes32 want; Policy policy; }',
+  'function openWithSiteFee(bytes32 id,uint256 grossWalletDebit,uint256 escrowCeiling,uint64 deadline,bytes32 want,string memo,Policy policy,address siteFeeRecipient,uint16 siteFeeBps,bytes32 expectedTermsHash)',
+  'function bid(bytes32 id,uint256 ask,uint256 maxBondGrossDebit)',
+  'function accept(bytes32 id)', 'function claim(bytes32 id,bytes32 proof)',
+  'function confirm(bytes32 id)', 'function dispute(bytes32 id,string reason)',
+  'function refund(bytes32 id)', 'function settle(bytes32 id)', 'function withdraw() returns (uint256)',
+  'function get(bytes32 id) view returns (Intent)',
+  'function rep(address) view returns (uint64 filled,uint64 failed,uint64 opened,uint64 disputed,uint64 disputesLost,uint128 volume,uint64 since)',
+  'function canClaim(bytes32 id,address who) view returns (bool ok,string why,uint256 bond)',
+  'function credit(address) view returns (uint256)',
+  'function owner() view returns (address)', 'function xmoney() view returns (address)',
+  'function siteCollector() view returns (address)', 'function treasury() view returns (address)',
+  'function window() view returns (uint64)', 'function bidding() view returns (uint64)',
+  'function bondBps() view returns (uint16)', 'function feeBps() view returns (uint16)',
+  'function termsHash() view returns (bytes32)',
+  'event Opened(bytes32 indexed id,address indexed user,uint256 amount,uint64 deadline,bytes32 want,string memo)',
+  'event SiteFeeBound(bytes32 indexed id,address indexed recipient,uint16 bps,uint256 escrowed,uint256 ceiling)',
+]);
+
+export const XSWAP_V2_ASKS_ABI = parseAbi([
+  'struct Ask { address seller; uint256 floorPay; uint256 minSellerNet; uint16 protocolBps; uint16 openedBondBps; uint64 challengeWindow; address protocolTreasury; address siteFeeRecipient; uint16 siteFeeBps; uint64 deadline; uint64 bidEnds; uint64 deliveredAt; address buyer; uint256 pay; uint256 bond; uint8 state; bytes32 give; }',
+  'function askWithSiteFee(bytes32 id,uint256 minSellerNet,uint64 deadline,bytes32 give,string memo,address siteFeeRecipient,uint16 siteFeeBps,bytes32 expectedTermsHash)',
+  'function bid(bytes32 id,uint256 pay,uint256 maxWalletDebit)',
+  'function accept(bytes32 id)', 'function delivered(bytes32 id,bytes32 proof)',
+  'function confirm(bytes32 id)', 'function dispute(bytes32 id,string reason)',
+  'function cancel(bytes32 id)', 'function settle(bytes32 id)', 'function withdraw() returns (uint256)',
+  'function get(bytes32 id) view returns (Ask)', 'function credit(address) view returns (uint256)',
+  'function owner() view returns (address)', 'function xmoney() view returns (address)',
+  'function siteCollector() view returns (address)', 'function treasury() view returns (address)',
+  'function window() view returns (uint64)', 'function bidding() view returns (uint64)',
+  'function bondBps() view returns (uint16)', 'function feeBps() view returns (uint16)',
+  'function termsHash() view returns (bytes32)',
+  'event Asked(bytes32 indexed id,address indexed seller,uint256 floorPay,uint64 deadline,bytes32 give,string memo)',
+  'event SiteFeeBound(bytes32 indexed id,address indexed recipient,uint16 bps,uint256 minSellerNet)',
+]);

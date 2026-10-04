@@ -130,6 +130,26 @@ export const XSWAP_V1 = {
 const XSWAP_V1_SET = new Set(Object.values(XSWAP_V1).map((a) => a.toLowerCase()));
 export const isXswapV1 = (a) => XSWAP_V1_SET.has(String(a || '').toLowerCase());
 const XSWAP_FILE = DEPLOY.xswap || {};
+// Both the current fee-free escrows and the earlier keyless-owner escrows remain readable for exits only.
+export const XSWAP_LEGACY = {
+  intents: ['0x5D78651C728c15b715d5f6727bE40C1c3a02B53d', XSWAP_V1.intents, XSWAP_V1.firstIntents],
+  asks: ['0xa999BC26e184b83CECb3cF5b9640C438C5aDc8a3', XSWAP_V1.asks],
+};
+const XSWAP_LEGACY_SET = new Set([...XSWAP_LEGACY.intents, ...XSWAP_LEGACY.asks].map((a) => a.toLowerCase()));
+export const isXswapLegacy = (a) => XSWAP_LEGACY_SET.has(String(a || '').toLowerCase());
+// New V2 contracts are independent of legacy deployment.json and XSWAP_* environment overrides.
+// Funding/claim stays disabled until runtime pins and solver V2 far-delivery are reviewed.
+export const XSWAP_V2 = {
+  collector: '0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e',
+  collectorRuntimeHash: '0xb0eb9674d60fbfe03eb1f26c2453ee2446433812ff9e0690fd7db8c89032633b',
+  intents: '0xdf6398ff5a694a03d85a614812490143c4e5d238',
+  intentsRuntimeHash: '0xd5f3ec158647ae483ed942998d9f164aa0e26b98a1a2e29a4a0b6b3bd9a354eb',
+  asks: '0x2f507a18043002d8f5d6d3022efd6265be7a87fc',
+  asksRuntimeHash: '0x998aca274594b99b203562e5c0b9a46aa6f5794b3bfbbee762afdb125bf1f557',
+  expectedOwner: '0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158',
+  treasury: '0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8',
+  enabled: false,
+};
 const xswapIntents = process.env.XSWAP_INTENTS || XSWAP_FILE.intents || XSWAP_V1.intents;
 const xswapAsks = process.env.XSWAP_ASKS || XSWAP_FILE.asks || XSWAP_V1.asks;
 const xswapEnv = String(process.env.XSWAP_ENABLED ?? '').trim();
@@ -153,7 +173,8 @@ export const XSWAP = {
   addressesOk: xswapAddrsOk,
   // New swaps (open, ask, bid, claim, accept, delivered) only when switched on, on real addresses, never on v1, and
   // only with an expected owner to check owner() against. The live owner() check in tools/xswap.mjs runs on top of this.
-  enabled: xswapFlag && !xswapIsV1 && xswapAddrsOk && validXswapOwner(xswapExpectedOwner),
+  enabled: xswapFlag && !xswapIsV1 && !isXswapLegacy(xswapIntents) && !isXswapLegacy(xswapAsks)
+    && xswapAddrsOk && validXswapOwner(xswapExpectedOwner),
 };
 
 // Until the XMoney vault's timelocked setBridgeSystem points it at this chain's inbox, deposits reach xGas through
