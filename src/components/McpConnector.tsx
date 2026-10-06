@@ -67,7 +67,7 @@ interface WalletState { configured: boolean; wallet: { address: string; id: stri
  * A model is not a browser and has no cookie. This mints a token that carries only this person's X id,
  * so their agent can reach their wallet from any host, and nobody else's.
  */
-const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
+const ConnectAModel: React.FC<{ handle: string; autoMint?: boolean }> = ({ handle, autoMint = false }) => {
   const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [shown, setShown] = useState(false);
@@ -75,13 +75,21 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
   const [revokeNote, setRevokeNote] = useState<string | null>(null);
   const [mintErr, setMintErr] = useState<string | null>(null);
 
-  const mint = async () => {
+  const mint = React.useCallback(async () => {
     setBusy(true); setRevokeNote(null); setMintErr(null);
     const r = await fetch('/api/connector/token', { method: 'POST', credentials: 'same-origin' }).then(res => res.json()).catch(() => null);
     setToken(r?.token ?? null);
     if (!r?.token) setMintErr(r?.error ?? 'Could not mint a token. Nothing changed; try again.');
     setBusy(false);
-  };
+  }, []);
+  // Straight off a sign-in there is nothing to decide: mint the token so it is on screen the moment the page loads.
+  // Later visits keep the button (every mint is a new credential).
+  const autoMinted = React.useRef(false);
+  useEffect(() => {
+    if (!autoMint || token || busy || autoMinted.current) return;
+    autoMinted.current = true;
+    mint();
+  }, [autoMint, token, busy, mint]);
 
   // One switch for every token this person ever minted, including one pasted somewhere they have forgotten.
   const revoke = async () => {
@@ -135,17 +143,17 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
 
       {/* Step 3 */}
       <div>
-        <StepHeader n={3} state={token ? 'active' : 'upcoming'}>Copy host config</StepHeader>
+        <StepHeader n={3} state={token ? 'active' : 'upcoming'}>Copy your token</StepHeader>
         {token ? (
           <>
             <p className="text-xs text-slate-400 mb-2">
-              Paste this into your MCP host. Treat it like a key: anyone holding it can spend this wallet.
+              This is what a bot or MCP host asks you for. Treat it like a key: anyone holding it can spend this wallet.
             </p>
-            <CopyLine label="host config" text={config} mono primary />
+            <CopyLine label="bearer token" text={token} mono primary />
             <button onClick={() => setShown(v => !v)} className="mt-2 text-[11px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 rounded">
-              {shown ? 'hide the raw token' : 'show the raw token'}
+              {shown ? 'hide the host config' : 'need the full host config JSON instead?'}
             </button>
-            {shown && <div className="mt-1"><CopyLine label="token" text={token} /></div>}
+            {shown && <div className="mt-1"><CopyLine label="host config" text={config} /></div>}
           </>
         ) : (
           <p className="text-xs text-slate-500">Appears here once you have a token.</p>
@@ -186,6 +194,14 @@ const YourWallet: React.FC = () => {
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
+  // Straight off a sign-in, make the wallet without asking: the address is the whole point of landing here.
+  const autoCreated = React.useRef(false);
+  useEffect(() => {
+    if (!justSignedIn || loading || busy || autoCreated.current) return;
+    if (!state?.configured || state.wallet) return;
+    autoCreated.current = true;
+    create();
+  });
 
   // The address exists the moment they ask for it; nobody should have to go and find it.
   const create = async () => {
@@ -258,7 +274,7 @@ const YourWallet: React.FC = () => {
             </div>
           )}
           <p className="mt-2 text-[11px] text-slate-500">Send it a little $xMoney on the L4 for gas and it can start doing things. It holds what you put in it and no more.</p>
-          <ConnectAModel handle={user.handle} />
+          <ConnectAModel handle={user.handle} autoMint={justSignedIn} />
         </>
       ) : (
         <>

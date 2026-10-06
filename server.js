@@ -705,7 +705,8 @@ app.get('/auth/x/login', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   const verifier = crypto.randomBytes(48).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-  const returnTo = safeReturnTo(req.query.returnTo);
+  // No return target (a bot's plain /auth/x/login link) lands on the connector, where the wallet and token appear.
+  const returnTo = req.query.returnTo == null ? '/connector' : safeReturnTo(req.query.returnTo);
   setCookie(req, res, OAUTH_COOKIE, sign({ state, verifier, returnTo, exp: Date.now() + 10 * 60 * 1000 }), 600);
   const url = new URL(X_AUTH_URL);
   url.searchParams.set('response_type', 'code');
@@ -752,7 +753,7 @@ app.get('/auth/x/callback', async (req, res) => {
     console.log(`[X AUTH] @${me.data.username} signed in`);
     // Land somewhere that says so. A redirect that looks identical to the page you left is how people
     // end up asking whether it worked.
-    const back = pending.returnTo || '/';
+    const back = pending.returnTo || '/connector';
     res.redirect(`${back}${back.includes('?') ? '&' : '?'}xauth=ok`);
   } catch (e) {
     console.error('[X AUTH] callback error:', e);
