@@ -90,6 +90,11 @@ export interface L4Info {
   ready: boolean;
   // Null until the L4 apps are deployed on this chain (placeholders in l4-deployment.json).
   contracts: { escrow: string | null; fomo: string | null; router: string | null; nguLauncher?: string | null; legacy2bp?: { nguLauncher?: string | null } | null } | null;
+  fireball?: {
+    active: boolean;
+    contracts: { escrow?: string | null; fomo?: string | null; router?: string | null; nguLauncher?: string | null } | null;
+    parentForwarder?: string | null;
+  };
   bridge?: { lastScannedBlock: string | null; processedCount: number; pendingExits: number };
 }
 
@@ -124,6 +129,11 @@ export async function loadL4Info(force = false): Promise<L4Info | null> {
         l4Addresses.router = info.contracts.router || '';
         l4Addresses.nguLauncher = info.contracts.nguLauncher || '';
         l4Addresses.legacyNguLauncher = info.contracts.legacy2bp?.nguLauncher || '';
+        l4Addresses.fireballActive = info.fireball?.active === true;
+        l4Addresses.fireballEscrow = info.fireball?.contracts?.escrow || '';
+        l4Addresses.fireballFomo = info.fireball?.contracts?.fomo || '';
+        l4Addresses.fireballRouter = info.fireball?.contracts?.router || '';
+        l4Addresses.fireballNguLauncher = info.fireball?.contracts?.nguLauncher || '';
         l4Addresses.ready = !!info.ready;
       }
       return info;

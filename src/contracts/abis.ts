@@ -74,6 +74,12 @@ export const l4Addresses = {
   nguLauncher: '' as string,
   /** The first NGU launcher (0.01% + 0.01%, no XGAS.DEV buyback). Listed, never launched on. Empty if absent. */
   legacyNguLauncher: '' as string,
+  /** Separate new-product route; old NGU tokens remain on their own launcher. */
+  fireballNguLauncher: '' as string,
+  fireballEscrow: '' as string,
+  fireballFomo: '' as string,
+  fireballRouter: '' as string,
+  fireballActive: false,
   ready: false,
 };
 

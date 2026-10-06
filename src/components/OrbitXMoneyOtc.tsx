@@ -32,12 +32,15 @@ import { OrbitL4Explorer } from './OrbitL4Explorer';
 import { publicClient, l4PublicClient, sendOnChainTx, encodeAbiCall, fetchL4XMoneyBalance, loadL4Info, waitForL4Credit, fetchWithdrawals, executeWithdrawal, type Withdrawal, L3_CHAIN_ID, L4_CHAIN_ID } from '../contracts/web3Client';
 import { sendL4Tx, useL4Gas, isOwnAddress } from '../contracts/gas';
 import { L4GasPanel } from './L4GasPanel';
+import { Disclosure } from './Disclosure';
 import { sounds } from '../utils/audio';
 import confetti from 'canvas-confetti';
 import { formatEther, parseEther, parseAbi } from 'viem';
 
 interface OtcOrder {
   id: number;
+  contractAddress: string;
+  cohort: 'legacy' | 'fireball';
   maker: string;
   makerXHandle: string;
   side: 'ASK' | 'BID';
@@ -50,6 +53,8 @@ interface OtcOrder {
 
 interface OtcTrade {
   id: number;
+  contractAddress: string;
+  cohort: 'legacy' | 'fireball';
   orderId: number;
   side: 'ASK' | 'BID';
   seller: string;
@@ -167,17 +172,21 @@ const TAB_ALIASES: Record<string, TabId> = {
 };
 
 /** Parse /order/:id, /trade/:id, /<tab> or #<tab> into a route. */
-function parseRoute(): { tab: TabId; orderId: number | null; tradeId: number | null } {
-  if (typeof window === 'undefined') return { tab: 'otc', orderId: null, tradeId: null };
+function parseRoute(): { tab: TabId; orderId: number | null; tradeId: number | null; cohort: 'legacy' | 'fireball' | null } {
+  if (typeof window === 'undefined') return { tab: 'otc', orderId: null, tradeId: null, cohort: null };
   const raw = (window.location.pathname.replace(/^\/+|\/+$/g, '') || window.location.hash.replace(/^#\/?/, '')).toLowerCase();
-  const m = raw.match(/^(?:otc\/)?(order|offer|bid|ask|trade|settlement)\/(\d+)$/);
+  const m = raw.match(/^(?:(legacy|fireball)\/)?(?:otc\/)?(order|offer|bid|ask|trade|settlement)\/(\d+)$/);
   if (m) {
-    const id = parseInt(m[2], 10);
-    return m[1] === 'trade' || m[1] === 'settlement'
-      ? { tab: 'otc', orderId: null, tradeId: id }
-      : { tab: 'otc', orderId: id, tradeId: null };
+    const id = parseInt(m[3], 10);
+    // Historical /order/:id and /trade/:id links keep their original contract.
+    const cohort = m[1] === 'fireball' ? 'fireball' : 'legacy';
+    return m[2] === 'trade' || m[2] === 'settlement'
+      ? { tab: 'otc', orderId: null, tradeId: id, cohort }
+      : { tab: 'otc', orderId: id, tradeId: null, cohort };
   }
-  return { tab: TAB_ALIASES[raw] || 'otc', orderId: null, tradeId: null };
+  const cohort = raw.startsWith('legacy/') ? 'legacy' : raw.startsWith('fireball/') ? 'fireball' : null;
+  const tab = cohort ? raw.split('/').slice(1).join('/') : raw;
+  return { tab: TAB_ALIASES[tab] || 'otc', orderId: null, tradeId: null, cohort };
 }
 
 /** Resolve the tab from /path or #hash so every tab is a shareable URL. */
@@ -186,9 +195,46 @@ function tabFromLocation(): TabId {
 }
 
 const origin = () => (typeof window !== 'undefined' ? window.location.origin : '');
-export const deepLink = (tab: TabId) => `${origin()}/${tab}`;
-export const orderLink = (orderId: number) => `${origin()}/order/${orderId}`;
-export const tradeLink = (tradeId: number) => `${origin()}/trade/${tradeId}`;
+export const deepLink = (tab: TabId, cohort: 'legacy' | 'fireball' = 'fireball') => `${origin()}/${cohort === 'legacy' ? 'legacy/' : ''}${tab}`;
+export const orderLink = (orderId: number, cohort: 'legacy' | 'fireball' = 'legacy') => `${origin()}/${cohort === 'fireball' ? 'fireball/' : ''}order/${orderId}`;
+export const tradeLink = (tradeId: number, cohort: 'legacy' | 'fireball' = 'legacy') => `${origin()}/${cohort === 'fireball' ? 'fireball/' : ''}trade/${tradeId}`;
+
+/** Withdrawal progress in plain words: Withdrawn on L4 → Confirming on Robinhood (minutes) → Claimed → Redeem. */
+const WITHDRAWAL_STEPS: { key: Withdrawal['status'] | 'redeem'; label: string }[] = [
+  { key: 'pending', label: 'Withdrawn from L4' },
+  { key: 'claimable', label: 'Confirmed on Robinhood' },
+  { key: 'executed', label: 'Landed in your wallet' },
+  { key: 'redeem', label: 'Redeem for USDG' },
+];
+function WithdrawalSteps({ status }: { status: Withdrawal['status'] }) {
+  // How many steps are done. 'pending' = withdrawn, waiting on Robinhood; 'claimable' = confirmed, claim is next;
+  // 'executed' = claimed, redeem is optional and next.
+  const done = status === 'pending' ? 1 : status === 'claimable' ? 2 : 3;
+  const current = WITHDRAWAL_STEPS[Math.min(done, WITHDRAWAL_STEPS.length - 1)];
+  return (
+    <ol className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] font-mono" aria-label={`Withdrawal progress: ${current.label} is next`}>
+      {WITHDRAWAL_STEPS.map((s, i) => {
+        const isDone = i < done;
+        const isNext = i === done;
+        return (
+          <li key={s.key} className="flex items-center gap-1.5">
+            {i > 0 && <span aria-hidden="true" className={isDone || isNext ? 'text-slate-500' : 'text-slate-700'}>→</span>}
+            <span
+              aria-current={isNext ? 'step' : undefined}
+              className={`px-1.5 py-0.5 rounded border ${
+                isDone ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                : isNext ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                : 'border-[#1e2538] text-slate-600'
+              }`}
+            >
+              {isDone ? '✓ ' : ''}{s.label}{isNext && s.key === 'claimable' ? ' · waiting' : ''}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
 
 export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   wallet,
@@ -196,6 +242,12 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   xHandle = null
 }) => {
   const [activeTab, setActiveTabState] = useState<TabId>(() => tabFromLocation());
+  const [selectedCohort, setSelectedCohort] = useState<'legacy' | 'fireball'>(() => parseRoute().cohort || 'fireball');
+  const [fireballAvailable, setFireballAvailable] = useState(false);
+  const cohort = selectedCohort === 'fireball' && fireballAvailable ? 'fireball' : 'legacy';
+  const activeEscrowAddress = cohort === 'fireball' ? l4Addresses.fireballEscrow : l4Addresses.escrow;
+  const activeFomoAddress = cohort === 'fireball' ? l4Addresses.fireballFomo : l4Addresses.fomo;
+  const createEscrowAddress = fireballAvailable ? l4Addresses.fireballEscrow : l4Addresses.escrow;
   // Which gas pays L4 writes (xMoney, or XGAS.DEV through a paymaster); orders made from the xGas account count as yours.
   const { plan: gasPlan } = useL4Gas(wallet.connected ? wallet.address : '');
   const isMine = (addr: string) => wallet.connected && isOwnAddress(addr, wallet.address, gasPlan);
@@ -212,14 +264,24 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   // Deep links: /otc, /explorer, /fomo3d, /specs (and #fomo3d etc.) open that tab directly.
   const setActiveTab = (tab: TabId) => {
     setActiveTabState(tab);
-    if (typeof window !== 'undefined' && window.location.pathname !== `/${tab}`) {
-      window.history.pushState({ tab }, '', `/${tab}`);
+    const nextPath = `/${cohort === 'legacy' && fireballAvailable ? 'legacy/' : ''}${tab}`;
+    if (typeof window !== 'undefined' && window.location.pathname !== nextPath) {
+      window.history.pushState({ tab, cohort }, '', nextPath);
     }
+  };
+  const selectCohort = (next: 'legacy' | 'fireball') => {
+    setSelectedCohort(next);
+    setSelectedOrderForTrade(null);
+    setOrders([]);
+    setTrades([]);
+    setPastRoundDividends([]);
+    window.history.pushState({ tab: activeTab, cohort: next }, '', `/${next === 'legacy' ? 'legacy/' : ''}${activeTab}`);
   };
   useEffect(() => {
     const onPop = () => {
       const r = parseRoute();
       setActiveTabState(r.tab);
+      setSelectedCohort(r.cohort || 'fireball');
       setDeepOrderId(r.orderId);
       setDeepTradeId(r.tradeId);
       if (r.orderId == null) setSelectedOrderForTrade(null);
@@ -267,6 +329,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   const [newOrderMin, setNewOrderMin] = useState('10');
   const [newOrderMax, setNewOrderMax] = useState('50');
   const [isSubmittingTx, setIsSubmittingTx] = useState(false);
+  // Inline errors for the two modals and the game, instead of alert(). Cleared when the modal closes / next attempt starts.
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [fomoError, setFomoError] = useState<string | null>(null);
+  const [fomoBusy, setFomoBusy] = useState(false);
 
   // Fill Modal
   const [selectedOrderForTrade, setSelectedOrderForTrade] = useState<OtcOrder | null>(null);
@@ -313,9 +379,14 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
         ]);
 
         // Everything below the vault lives on the xgas Orbit L4
-        await loadL4Info();
-        const escrowAddr = l4Addresses.escrow as `0x${string}`;
-        const fomoAddr = l4Addresses.fomo as `0x${string}`;
+        const info = await loadL4Info();
+        const newReady = info?.fireball?.active === true
+          && !!info.fireball.contracts?.escrow && !!info.fireball.contracts?.fomo;
+        if (isMounted) setFireballAvailable(newReady);
+        const useFireball = selectedCohort === 'fireball' && newReady;
+        const escrowAddr = (useFireball ? l4Addresses.fireballEscrow : l4Addresses.escrow) as `0x${string}`;
+        const fomoAddr = (useFireball ? l4Addresses.fireballFomo : l4Addresses.fomo) as `0x${string}`;
+        const readCohort: 'legacy' | 'fireball' = useFireball ? 'fireball' : 'legacy';
         // Empty until the desk and the game are deployed on this chain: the vault, balances and withdrawals
         // still load, the order book and the game read as empty.
         const appsLive = !!escrowAddr && !!fomoAddr;
@@ -412,6 +483,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           if (isMounted) {
             const parsed: OtcOrder[] = rawOrders.map((o: any, idx: number) => ({
               id: idx,
+              contractAddress: escrowAddr,
+              cohort: readCohort,
               maker: o[0],
               makerXHandle: o[1],
               side: o[2] === 0 ? 'ASK' : 'BID',
@@ -444,6 +517,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           if (isMounted) {
             const parsedTrades: OtcTrade[] = rawTrades.map((t: any, idx: number) => ({
               id: idx,
+              contractAddress: escrowAddr,
+              cohort: readCohort,
               orderId: Number(t[0]),
               side: t[1] === 0 ? 'ASK' : 'BID',
               seller: t[2],
@@ -472,12 +547,12 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       isMounted = false;
       clearInterval(interval);
     };
-  }, [wallet.connected, wallet.address]);
+  }, [wallet.connected, wallet.address, selectedCohort]);
 
   // Deep link /order/:id -> open that offer/bid in the fill modal once the book has loaded
   useEffect(() => {
     if (deepOrderId == null || orders.length === 0 && trades.length === 0) return;
-    const order = orders.find(o => o.id === deepOrderId);
+    const order = orders.find(o => o.id === deepOrderId && o.cohort === selectedCohort);
     if (order) {
       setSelectedOrderForTrade(order);
       setTradeAmount(String(Math.min(10, order.maxAmount)));
@@ -486,11 +561,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       setDeepLinkNotice(`Order #${deepOrderId} is no longer open on the book (filled or cancelled).`);
     }
     setDeepOrderId(null);
-  }, [deepOrderId, orders, trades]);
+  }, [deepOrderId, orders, trades, selectedCohort]);
 
   useEffect(() => {
     if (deepTradeId == null || trades.length === 0) return;
-    const el = document.getElementById(`trade-${deepTradeId}`);
+    const el = document.getElementById(`trade-${selectedCohort}-${deepTradeId}`);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.classList.add('ring-2', 'ring-cyan-400');
@@ -499,17 +574,22 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       setDeepLinkNotice(`Trade #${deepTradeId} is not in active settlement (released or cancelled).`);
     }
     setDeepTradeId(null);
-  }, [deepTradeId, trades]);
+  }, [deepTradeId, trades, selectedCohort]);
 
   // Keep the URL in sync with the open offer/bid
   const openOrder = (order: OtcOrder) => {
     setSelectedOrderForTrade(order);
     setTradeAmount(String(Math.min(10, order.maxAmount)));
-    if (window.location.pathname !== `/order/${order.id}`) window.history.pushState({ order: order.id }, '', `/order/${order.id}`);
+    setModalError(null);
+    const path = order.cohort === 'fireball' ? `/fireball/order/${order.id}` : `/order/${order.id}`;
+    if (window.location.pathname !== path) window.history.pushState({ order: order.id, cohort: order.cohort }, '', path);
   };
   const closeOrder = () => {
     setSelectedOrderForTrade(null);
-    if (/^\/order\//.test(window.location.pathname)) window.history.replaceState({ tab: 'otc' }, '', '/otc');
+    setModalError(null);
+    if (/^\/(?:fireball\/)?order\//.test(window.location.pathname)) {
+      window.history.replaceState({ tab: 'otc', cohort }, '', `/${cohort === 'legacy' && fireballAvailable ? 'legacy/' : ''}otc`);
+    }
   };
 
   // Countdown timer string
@@ -585,14 +665,14 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       }
 
       // 2) enterRollup: USDG locked, xMoney minted and sent through the Orbit Inbox to you on the L4
-      setBridgeStatus('Locking USDG and sending through the Orbit Inbox…');
+      setBridgeStatus('Locking USDG and sending $xMoney to your L4 wallet…');
       const depositCall = viaHelper
         ? encodeAbiCall(EARLY_DEPOSITOR_ABI, 'deposit', [rawUnits, wallet.address], EARLY_DEPOSITOR, '0', L3_CHAIN_ID)
         : encodeAbiCall(XUSD_VAULT_ABI, 'enterRollup', [rawUnits, wallet.address], CONTRACT_ADDRESSES.XMONEY_USD_L3, '0', L3_CHAIN_ID);
       const res = await sendOnChainTx({ to: viaHelper ? EARLY_DEPOSITOR : CONTRACT_ADDRESSES.XMONEY_USD_L3, data: depositCall.calldata, from: wallet.address, chainId: L3_CHAIN_ID, waitForConfirmation: true });
 
       // 3) The sequencer includes the delayed message; the retryable auto-redeems and credits native gas
-      setBridgeStatus(`Bridging… the L4 sequencer is picking up your deposit (tx ${res.txHash.slice(0, 10)}…). Usually under a minute.`);
+      setBridgeStatus(`Deposit confirmed on Robinhood (tx ${res.txHash.slice(0, 10)}…). $xMoney gas arrives in your L4 wallet in under a minute.`);
       const after = await waitForL4Credit(wallet.address, before);
       if (after == null) {
         setBridgeStatus('Deposit is on Robinhood but the L4 credit is taking longer than expected. It will arrive; check back shortly.');
@@ -627,7 +707,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       const wCall = encodeAbiCall(ARBSYS_ABI, 'withdrawEth', [wallet.address], CONTRACT_ADDRESSES.ARB_SYS, formatEther(rawXMoney));
       await sendL4Tx({ to: CONTRACT_ADDRESSES.ARB_SYS, data: wCall.calldata, valueWei: rawXMoney, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
       sounds.playConnect();
-      setBridgeStatus('Withdrawal queued on the L4. It shows below as "pending" until Robinhood confirms the assertion, then "claimable".');
+      setBridgeStatus('Withdrawal started. It lands in your Robinhood wallet automatically once Robinhood confirms (usually minutes); progress is shown below.');
       await refreshL4Balance();
       fetchWithdrawals(wallet.address).then(w => { setWithdrawals(w.withdrawals); setExecutorEnabled(w.executorEnabled); }).catch(() => {});
     } catch (err: any) {
@@ -644,7 +724,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     try {
       const r = await executeWithdrawal(w.txHash, w.position, w.chainId);
       sounds.playConnect();
-      setBridgeStatus(r.alreadyExecuted ? 'Already claimed.' : `Claimed on Robinhood: ${w.amount} $xMoney is now in your wallet on L3. Redeem it for USDG below.`);
+      setBridgeStatus(r.alreadyExecuted ? 'Already delivered.' : `Delivered: ${w.amount} $xMoney is now in your Robinhood wallet (ERC-20). Hold it, or redeem it for USDG below.`);
       fetchWithdrawals(wallet.address).then(x => setWithdrawals(x.withdrawals)).catch(() => {});
     } catch (err: any) {
       alert(err?.message || 'Claim failed');
@@ -677,8 +757,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   const handleClaimPastRound = async (round: number) => {
     if (!wallet.connected) { onConnectWallet(); return; }
     try {
-      const c = encodeAbiCall(FOMO_ABI, 'claimDividendsForRound', [BigInt(round)], l4Addresses.fomo);
-      await sendL4Tx({ to: l4Addresses.fomo, data: c.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      const c = encodeAbiCall(FOMO_ABI, 'claimDividendsForRound', [BigInt(round)], activeFomoAddress);
+      await sendL4Tx({ to: activeFomoAddress, data: c.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
       sounds.playConnect();
       confetti({ particleCount: 50, spread: 70 });
       await refreshL4Balance();
@@ -705,9 +785,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       const handle = newOrderHandle.replace('@', '');
 
       if (orderSideToCreate === 'ASK') {
-        const askCall = encodeAbiCall(ESCROW_ABI, 'createSellAsk', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], l4Addresses.escrow);
+        const askCall = encodeAbiCall(ESCROW_ABI, 'createSellAsk', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], createEscrowAddress);
         const res = await sendL4Tx({
-          to: l4Addresses.escrow,
+          to: createEscrowAddress,
           data: askCall.calldata,
           valueWei: rawUnits,
           from: wallet.address,
@@ -718,11 +798,12 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           sounds.playConnect();
           confetti({ particleCount: 50, spread: 70 });
           setIsCreateOrderModalOpen(false);
+          if (fireballAvailable) selectCohort('fireball');
         }
       } else {
-        const bidCall = encodeAbiCall(ESCROW_ABI, 'createBuyBid', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], l4Addresses.escrow);
+        const bidCall = encodeAbiCall(ESCROW_ABI, 'createBuyBid', [handle, rawUnits, BigInt(bps), minRaw, maxRaw], createEscrowAddress);
         const res = await sendL4Tx({
-          to: l4Addresses.escrow,
+          to: createEscrowAddress,
           data: bidCall.calldata,
           from: wallet.address,
           chainId: L4_CHAIN_ID,
@@ -732,12 +813,13 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           sounds.playConnect();
           confetti({ particleCount: 50, spread: 70 });
           setIsCreateOrderModalOpen(false);
+          if (fireballAvailable) selectCohort('fireball');
         }
       }
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Create order error:', err);
-      alert(err?.shortMessage || err?.message || 'Transaction failed');
+      setModalError(err?.shortMessage || err?.message || 'Transaction failed');
     } finally {
       setIsSubmittingTx(false);
     }
@@ -755,11 +837,12 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
     try {
       const rawUnits = parseEther(tradeAmount || '0');
       const handle = takerHandle.replace('@', '');
+      const escrowAddress = selectedOrderForTrade.contractAddress;
 
       if (selectedOrderForTrade.side === 'ASK') {
-        const takeAskCall = encodeAbiCall(ESCROW_ABI, 'fillSellAsk', [BigInt(selectedOrderForTrade.id), rawUnits, handle], l4Addresses.escrow);
+        const takeAskCall = encodeAbiCall(ESCROW_ABI, 'fillSellAsk', [BigInt(selectedOrderForTrade.id), rawUnits, handle], escrowAddress);
         const res = await sendL4Tx({
-          to: l4Addresses.escrow,
+          to: escrowAddress,
           data: takeAskCall.calldata,
           from: wallet.address,
           chainId: L4_CHAIN_ID,
@@ -771,9 +854,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
           closeOrder();
         }
       } else {
-        const takeBidCall = encodeAbiCall(ESCROW_ABI, 'fillBuyBid', [BigInt(selectedOrderForTrade.id), rawUnits, handle], l4Addresses.escrow);
+        const takeBidCall = encodeAbiCall(ESCROW_ABI, 'fillBuyBid', [BigInt(selectedOrderForTrade.id), rawUnits, handle], escrowAddress);
         const res = await sendL4Tx({
-          to: l4Addresses.escrow,
+          to: escrowAddress,
           data: takeBidCall.calldata,
           valueWei: rawUnits,
           from: wallet.address,
@@ -789,23 +872,23 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Fill order error:', err);
-      alert(err?.shortMessage || err?.message || 'Transaction failed');
+      setModalError(err?.shortMessage || err?.message || 'Transaction failed');
     } finally {
       setIsSubmittingTx(false);
     }
   };
 
   // ON-CHAIN WRITE (L4): Release Escrow (0.01% burn to 0xdead + 0.01% rake to Fanout + 0.02% XGAS.DEV buyback, 99.96% to buyer)
-  const handleReleaseTradeOnChain = async (tradeId: number) => {
+  const handleReleaseTradeOnChain = async (trade: OtcTrade) => {
     if (!wallet.connected) {
       onConnectWallet();
       return;
     }
 
     try {
-      const releaseCall = encodeAbiCall(ESCROW_ABI, 'releaseTrade', [BigInt(tradeId)], l4Addresses.escrow);
+      const releaseCall = encodeAbiCall(ESCROW_ABI, 'releaseTrade', [BigInt(trade.id)], trade.contractAddress);
       const res = await sendL4Tx({
-        to: l4Addresses.escrow,
+        to: trade.contractAddress,
         data: releaseCall.calldata,
         from: wallet.address,
         chainId: L4_CHAIN_ID,
@@ -824,15 +907,15 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
   };
 
   // ON-CHAIN WRITE (L4): Cancel a maker order (refunds uncommitted escrowed $xMoney on Asks)
-  const handleCancelOrderOnChain = async (orderId: number) => {
+  const handleCancelOrderOnChain = async (order: OtcOrder) => {
     if (!wallet.connected) {
       onConnectWallet();
       return;
     }
     try {
-      const cancelCall = encodeAbiCall(ESCROW_ABI, 'cancelOrder', [BigInt(orderId)], l4Addresses.escrow);
+      const cancelCall = encodeAbiCall(ESCROW_ABI, 'cancelOrder', [BigInt(order.id)], order.contractAddress);
       await sendL4Tx({
-        to: l4Addresses.escrow,
+        to: order.contractAddress,
         data: cancelCall.calldata,
         from: wallet.address,
         chainId: L4_CHAIN_ID,
@@ -853,13 +936,15 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       return;
     }
 
+    setFomoBusy(true); setFomoError(null);
     try {
+      if (fireballAvailable && cohort === 'legacy') throw new Error('New keys are sold in the current game. Go back to the current game to buy.');
       const count = BigInt(Math.max(1, Math.floor(keysToBuy)));
-      const priceWei = await l4PublicClient.readContract({ address: l4Addresses.fomo as `0x${string}`, abi: FOMO_ABI, functionName: 'getKeyPrice' });
+      const priceWei = await l4PublicClient.readContract({ address: activeFomoAddress as `0x${string}`, abi: FOMO_ABI, functionName: 'getKeyPrice' });
       const costWei = priceWei * count;
-      const buyCall = encodeAbiCall(FOMO_ABI, 'buyKeys', [fomoXHandle.replace('@', ''), count], l4Addresses.fomo, formatEther(costWei));
+      const buyCall = encodeAbiCall(FOMO_ABI, 'buyKeys', [fomoXHandle.replace('@', ''), count], activeFomoAddress, formatEther(costWei));
       const res = await sendL4Tx({
-        to: l4Addresses.fomo,
+        to: activeFomoAddress,
         data: buyCall.calldata,
         valueWei: costWei,
         from: wallet.address,
@@ -874,7 +959,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Buy keys error:', err);
-      alert(err?.shortMessage || err?.message || 'Transaction failed');
+      setFomoError(err?.shortMessage || err?.message || 'Transaction failed');
+    } finally {
+      setFomoBusy(false);
     }
   };
 
@@ -885,10 +972,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       return;
     }
 
+    setFomoBusy(true); setFomoError(null);
     try {
-      const claimCall = encodeAbiCall(FOMO_ABI, 'claimDividends', [], l4Addresses.fomo);
+      const claimCall = encodeAbiCall(FOMO_ABI, 'claimDividends', [], activeFomoAddress);
       const res = await sendL4Tx({
-        to: l4Addresses.fomo,
+        to: activeFomoAddress,
         data: claimCall.calldata,
         from: wallet.address,
         chainId: L4_CHAIN_ID,
@@ -902,7 +990,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Claim dividends error:', err);
-      alert(err?.shortMessage || err?.message || 'Transaction failed');
+      setFomoError(err?.shortMessage || err?.message || 'Transaction failed');
+    } finally {
+      setFomoBusy(false);
     }
   };
 
@@ -912,10 +1002,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       onConnectWallet();
       return;
     }
+    setFomoBusy(true); setFomoError(null);
     try {
-      const jackpotCall = encodeAbiCall(FOMO_ABI, 'claimJackpot', [], l4Addresses.fomo);
+      const jackpotCall = encodeAbiCall(FOMO_ABI, 'claimJackpot', [], activeFomoAddress);
       const res = await sendL4Tx({
-        to: l4Addresses.fomo,
+        to: activeFomoAddress,
         data: jackpotCall.calldata,
         from: wallet.address,
         chainId: L4_CHAIN_ID,
@@ -928,33 +1019,38 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Claim jackpot error:', err);
-      alert(err?.shortMessage || err?.message || 'Transaction failed');
+      setFomoError(err?.shortMessage || err?.message || 'Transaction failed');
+    } finally {
+      setFomoBusy(false);
     }
   };
 
   // A winner whose wallet couldn't take the jackpot push gets it held on-chain; they pull it with withdrawJackpot.
   const [myJackpotOwed, setMyJackpotOwed] = useState(0n);
   useEffect(() => {
-    if (!wallet.connected || !l4Addresses.fomo) { setMyJackpotOwed(0n); return; }
+    if (!wallet.connected || !activeFomoAddress) { setMyJackpotOwed(0n); return; }
     let alive = true;
-    const read = () => l4PublicClient.readContract({ address: l4Addresses.fomo as `0x${string}`, abi: FOMO_ABI, functionName: 'jackpotOwed', args: [wallet.address as `0x${string}`] })
+    const read = () => l4PublicClient.readContract({ address: activeFomoAddress as `0x${string}`, abi: FOMO_ABI, functionName: 'jackpotOwed', args: [wallet.address as `0x${string}`] })
       .then((v) => { if (alive) setMyJackpotOwed(v as bigint); }).catch(() => {});
     read();
     const t = setInterval(read, 30_000);
     return () => { alive = false; clearInterval(t); };
-  }, [wallet.connected, wallet.address, l4Addresses.fomo]);
+  }, [wallet.connected, wallet.address, activeFomoAddress]);
 
   const handleWithdrawJackpotOnChain = async () => {
+    setFomoBusy(true); setFomoError(null);
     try {
-      const call = encodeAbiCall(FOMO_ABI, 'withdrawJackpot', [wallet.address], l4Addresses.fomo);
-      await sendL4Tx({ to: l4Addresses.fomo, data: call.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
+      const call = encodeAbiCall(FOMO_ABI, 'withdrawJackpot', [wallet.address], activeFomoAddress);
+      await sendL4Tx({ to: activeFomoAddress, data: call.calldata, from: wallet.address, chainId: L4_CHAIN_ID, waitForConfirmation: true });
       setMyJackpotOwed(0n);
       sounds.playConnect();
       confetti({ particleCount: 120, spread: 120 });
       await refreshL4Balance();
     } catch (err: any) {
       console.error('Withdraw jackpot error:', err);
-      alert(err?.shortMessage || err?.message || 'Transaction failed');
+      setFomoError(err?.shortMessage || err?.message || 'Transaction failed');
+    } finally {
+      setFomoBusy(false);
     }
   };
 
@@ -992,48 +1088,23 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 <ShieldCheck className="w-3 h-3" />
                 <span>100% FULL RESERVE BACKING</span>
               </span>
-              <a
-                href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e"
-                target="_blank"
-                rel="noreferrer"
-                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-mono border border-cyan-500/40 flex items-center gap-1 transition-colors"
-              >
-                <Award className="w-3 h-3" />
-                <span>0.01% TO STACC WIZARDS FEE FANOUT</span>
-                <ExternalLink className="w-2.5 h-2.5" />
-              </a>
-              <a
-                href="https://robinhoodchain.blockscout.com/address/0x000000000000000000000000000000000000dEaD"
-                target="_blank"
-                rel="noreferrer"
-                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-mono border border-amber-500/30 flex items-center gap-1 transition-colors"
-              >
-                <Flame className="w-3 h-3" />
-                <span>0.01% SUPPLY BURN TO 0xdead</span>
-                <ExternalLink className="w-2.5 h-2.5" />
-              </a>
-              <a
-                href={`https://robinhoodchain.blockscout.com/token/${CONTRACT_ADDRESSES.XGAS_DEV}`}
-                target="_blank"
-                rel="noreferrer"
-                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-mono border border-emerald-500/30 flex items-center gap-1 transition-colors"
-              >
-                <Flame className="w-3 h-3" />
-                <span>0.02% XGAS.DEV BUY & BURN</span>
-                <ExternalLink className="w-2.5 h-2.5" />
-              </a>
             </div>
 
-            <h1 className="text-lg sm:text-3xl font-black text-white font-display tracking-tight flex items-center gap-2.5 leading-tight">
-              <span>The @XMoney Gas Rollup on Robinhood Chain</span>
-              <span className="text-[10px] sm:text-xs px-2 py-0.5 rounded bg-emerald-500 text-slate-950 font-black shrink-0">L4 LIVE</span>
+            <h1 className="text-lg sm:text-3xl font-black text-white font-display tracking-tight leading-tight">
+              The @XMoney Gas Rollup on Robinhood Chain
             </h1>
 
-            <p className="hidden sm:block text-sm text-slate-400 max-w-3xl leading-relaxed">
-              100% full Reserve backing. Makers & Takers trade <strong className="text-white">$xMoney</strong> against X Money P2P fiat. 
-              0.01% of supply is burned to <code className="text-amber-400 font-mono">0xdead</code> on every transaction while the Reserve is <strong>NEVER burned</strong>, 
-              permanently ratcheting NAV higher and higher above $1.00 USD.
+            <p className="text-xs sm:text-sm text-slate-400 max-w-2xl leading-relaxed">
+              Deposit USDG, get $xMoney gas on the xgas L4. Trade it peer-to-peer for X Money, or withdraw it back to Robinhood and redeem USDG.
             </p>
+
+            {/* Fee meta: small, one line, linked. The breakdown lives in the fee disclosure on the desk. */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono text-slate-500">
+              <span>0.04% fee per trade:</span>
+              <a href="https://robinhoodchain.blockscout.com/address/0x000000000000000000000000000000000000dEaD" target="_blank" rel="noreferrer" className="text-amber-400/80 hover:text-amber-300 hover:underline">0.01% burn</a>
+              <a href="https://robinhoodchain.blockscout.com/address/0x04C9229Fba6AFDC6ac9eD4312acb4BC74f1a436e" target="_blank" rel="noreferrer" className="text-cyan-400/80 hover:text-cyan-300 hover:underline">0.01% Stacc Wizards fanout</a>
+              <a href={`https://robinhoodchain.blockscout.com/token/${CONTRACT_ADDRESSES.XGAS_DEV}`} target="_blank" rel="noreferrer" className="text-emerald-400/80 hover:text-emerald-300 hover:underline">0.02% XGAS.DEV buy &amp; burn</a>
+            </div>
           </div>
 
           {/* Real Metrics Cards */}
@@ -1102,7 +1173,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
             }`}
           >
             <Coins className="w-4 h-4" />
-            <span className="sm:hidden">Desk</span><span className="hidden sm:inline">P2P $xMoney Desk</span>
+            <span className="sm:hidden">Desk</span><span className="hidden sm:inline">P2P desk</span>
             <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-black/20 text-slate-900 font-mono">
               {orders.length}
             </span>
@@ -1132,7 +1203,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
             }`}
           >
             <Clock className="w-4 h-4" />
-            <span className="sm:hidden">FOMO3D</span><span className="hidden sm:inline">FOMO3D Attrition</span>
+            <span className="sm:hidden">FOMO3D</span><span className="hidden sm:inline">FOMO3D game</span>
             <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-rose-500/20 text-rose-300">
               POT: ${fomo.jackpotPot.toFixed(2)}
             </span>
@@ -1147,7 +1218,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
             }`}
           >
             <Info className="w-4 h-4" />
-            <span className="sm:hidden">Specs</span><span className="hidden sm:inline">Specs & Deep Links</span>
+            <span className="sm:hidden">Specs</span><span className="hidden sm:inline">Specs &amp; trust model</span>
           </button>
         </div>
 
@@ -1178,6 +1249,22 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
       {wallet.connected && (activeTab === 'otc' || activeTab === 'fomo3d') && <L4GasPanel owner={wallet.address} />}
 
+      {fireballAvailable && (activeTab === 'otc' || activeTab === 'fomo3d') && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/30 bg-[#0e1521] px-3 py-2 text-xs font-mono">
+          {cohort === 'legacy' ? (
+            <>
+              <span className="text-amber-200">Viewing older positions (original contracts).</span>
+              <button onClick={() => selectCohort('fireball')} className="rounded-lg px-3 py-1.5 bg-cyan-400 text-slate-950 font-black cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300">Back to current desk</button>
+            </>
+          ) : (
+            <>
+              <span className="text-slate-500">Have orders, trades or round rewards from before the relaunch?</span>
+              <button onClick={() => selectCohort('legacy')} className="text-amber-200 hover:text-white underline-offset-2 hover:underline cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 rounded">older positions</button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* 2.5 TAB: REAL L4 EXPLORER */}
       {activeTab === 'explorer' && <OrbitL4Explorer />}
 
@@ -1199,11 +1286,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                   <h3 className="text-base font-bold text-white font-display flex items-center gap-2">
                     <ArrowDownUp className="w-4 h-4 text-emerald-400" />
-                    <span>$xMoney Reserve Gateway: Enter & Exit</span>
+                    <span>Move money in and out</span>
                   </h3>
                 </div>
-                <p className="hidden sm:block text-xs text-slate-400 mt-0.5">
-                  Enter: USDG → vault mints $xMoney → Orbit Inbox → native gas on the L4 (one tx). Cash out: ArbSys withdraw → Outbox claim on Robinhood → redeem USDG.
+                <p className="text-xs text-slate-400 mt-0.5">
+                  <strong className="text-emerald-300">Deposit</strong> turns USDG into $xMoney gas on the L4. <strong className="text-rose-300">Withdraw</strong> is how $xMoney gets back to Robinhood, where you can redeem it for USDG.
                 </p>
               </div>
 
@@ -1225,14 +1312,17 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Enter Rollup (Mint $xMoney)</span>
+                    <span>Deposit USDG</span>
                   </span>
-                  <span className="text-[10px] text-slate-500">1:1 Backed</span>
+                  <span className="text-[10px] text-slate-500">1:1 backed · 0.01% fanout + 0.01% burn</span>
                 </div>
 
-                <p className="hidden sm:block text-[11px] text-slate-400 leading-relaxed font-sans">
-                  Locks USDG in the Robinhood vault; the vault sends net $xMoney through the canonical Orbit Inbox to your address on the L4. Lands in about a minute. 0.01% Fanout + 0.01% burn.
+                <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+                  Lands as <strong className="text-emerald-300">$xMoney gas in your L4 wallet</strong> in about a minute. Nothing arrives on Robinhood; to hold $xMoney there, withdraw it (right).
                 </p>
+                <Disclosure label="How it works">
+                  <p>Your USDG is locked in the XMoney vault on Robinhood Chain. The vault mints $xMoney and sends it through the canonical Orbit Inbox to your address on the L4, where it is the native gas token. One transaction, plus a USDG approval the first time.</p>
+                </Disclosure>
 
                 {DEPOSITS_PAUSED && (
                   <p className="text-[11px] leading-relaxed text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">{DEPOSITS_PAUSED_MSG}</p>
@@ -1253,9 +1343,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <button
                     type="submit"
                     disabled={isSubmittingTx || DEPOSITS_PAUSED}
-                    className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-md shadow-emerald-500/20 cursor-pointer shrink-0"
+                    aria-busy={isSubmittingTx || undefined}
+                    className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-md shadow-emerald-500/20 cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
                   >
-                    <span className="sm:hidden">Enter → L4</span><span className="hidden sm:inline">Enter Rollup → L4</span>
+                    <span className="sm:hidden">Deposit → L4 gas</span><span className="hidden sm:inline">Deposit → $xMoney gas on L4</span>
                   </button>
                 </form>
               </div>
@@ -1265,14 +1356,17 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
                     <Flame className="w-3.5 h-3.5" />
-                    <span>Cash Out (Burn $xMoney)</span>
+                    <span>Withdraw to Robinhood</span>
                   </span>
-                  <span className="text-[10px] text-slate-500">Full Reserve Backing</span>
+                  <span className="text-[10px] text-slate-500">Full reserve · 0.01% fanout on redeem</span>
                 </div>
 
-                <p className="hidden sm:block text-[11px] text-slate-400 leading-relaxed font-sans">
-                  Burns native $xMoney on the L4 via ArbSys. Once Robinhood confirms the assertion it becomes claimable below, then redeemable for USDG. 0.01% Fanout rake.
+                <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+                  Lands as <strong className="text-rose-300">$xMoney (ERC-20) in your Robinhood wallet</strong> automatically once Robinhood confirms, usually minutes. Redeem it for USDG there whenever you like.
                 </p>
+                <Disclosure label="How it works">
+                  <p>Withdrawing burns native $xMoney on the L4 and queues a message to Robinhood. Robinhood must confirm an L4 state assertion that includes it: usually minutes with fast confirmation, up to ~7 days if the fast confirmer is down. Once confirmed, xgas.dev executes the delivery on the Robinhood Outbox for you and pays that gas; the call is permissionless, so anyone can do it if the host does not. Then redeem $xMoney for USDG from the vault whenever you like.</p>
+                </Disclosure>
 
                 <form onSubmit={handleBurnXMoney} className="flex items-center gap-2">
                   <div className="relative flex-1">
@@ -1290,9 +1384,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <button
                     type="submit"
                     disabled={isSubmittingTx}
-                    className="px-5 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-md shadow-rose-500/20 cursor-pointer shrink-0"
+                    aria-busy={isSubmittingTx || undefined}
+                    className="px-5 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-md shadow-rose-500/20 cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
                   >
-                    <span className="sm:hidden">Withdraw</span><span className="hidden sm:inline">Withdraw (L4 → Robinhood)</span>
+                    <span className="sm:hidden">Withdraw</span><span className="hidden sm:inline">Withdraw → $xMoney on Robinhood</span>
                   </button>
                 </form>
               </div>
@@ -1309,32 +1404,39 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
             {wallet.connected && (withdrawals.length > 0 || userL3XMoney > 0) && (
               <div className="p-4 rounded-xl bg-[#121624] border border-[#1e2538] space-y-3 font-mono text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-white uppercase tracking-wider">Withdrawals to Robinhood</span>
-                  <span className="text-[10px] text-slate-500">{withdrawals.filter(w => w.status !== 'executed').length} open</span>
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">Your withdrawals</span>
+                  <span className="text-[10px] text-slate-500">{withdrawals.filter(w => w.status !== 'executed').length} in progress</span>
                 </div>
                 {withdrawals.filter(w => w.status !== 'executed').map(w => (
-                  <div key={`${w.txHash}:${w.position}`} className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-[#0e121d] border border-[#1e2538]">
-                    <div className="space-y-0.5">
+                  <div key={`${w.txHash}:${w.position}`} className="flex flex-wrap items-center justify-between gap-3 p-2.5 rounded-lg bg-[#0e121d] border border-[#1e2538]">
+                    <div className="space-y-1.5 min-w-0">
                       <div className="text-white font-bold">{Number(w.amount).toFixed(4)} $xMoney</div>
-                      <div className="text-[10px] text-slate-500">{w.legacy ? `Old chain #${w.chainId} · ` : ''}L4 tx {w.txHash.slice(0, 10)}… · position #{w.position}</div>
+                      <WithdrawalSteps status={w.status} />
+                      <div className="text-[10px] text-slate-500">{w.legacy ? `Old chain #${w.chainId} · ` : ''}L4 tx {w.txHash.slice(0, 10)}… · #{w.position}</div>
                     </div>
                     {w.status === 'claimable' ? (
-                      <button onClick={() => handleClaimWithdrawal(w)} disabled={isSubmittingTx || !executorEnabled} className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black cursor-pointer" title={executorEnabled ? 'Execute on the Robinhood Outbox' : 'Host executor not configured'}>
-                        Claim on Robinhood
-                      </button>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px]" title="Robinhood has confirmed it. xgas.dev delivers it to your wallet within about a minute.">Confirmed · landing in your wallet</span>
+                        {executorEnabled && (
+                          <button onClick={() => handleClaimWithdrawal(w)} disabled={isSubmittingTx} className="text-[10px] text-slate-500 hover:text-white underline-offset-2 hover:underline disabled:opacity-50 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 rounded" title="Deliver it now instead of waiting for the automatic run">
+                            {isSubmittingTx ? 'Delivering…' : 'deliver now'}
+                          </button>
+                        )}
+                      </div>
                     ) : (
-                      <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px]">Awaiting confirmation on Robinhood…</span>
+                      <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px]" title="Robinhood has to confirm an L4 state assertion that includes this withdrawal. Usually minutes.">Confirming on Robinhood · minutes</span>
                     )}
                   </div>
                 ))}
                 {userL3XMoney > 0 && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-[#0e121d] border border-emerald-500/30">
-                    <div>
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 rounded-lg bg-[#0e121d] border border-emerald-500/30">
+                    <div className="space-y-1.5">
                       <div className="text-white font-bold">{userL3XMoney.toFixed(4)} $xMoney on Robinhood</div>
-                      <div className="text-[10px] text-slate-500">Claimed from the L4. Redeem it for USDG from the vault (0.01% rake).</div>
+                      <WithdrawalSteps status="executed" />
+                      <div className="text-[10px] text-slate-500">Yours to hold, or redeem for USDG (0.01% fanout).</div>
                     </div>
-                    <button onClick={handleRedeemUsdg} disabled={isSubmittingTx} className="px-3 py-1.5 rounded-lg bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-slate-950 font-black cursor-pointer">
-                      Redeem → USDG
+                    <button onClick={handleRedeemUsdg} disabled={isSubmittingTx} className="px-3 py-1.5 rounded-lg bg-rose-500 hover:bg-rose-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300">
+                      {isSubmittingTx ? 'Redeeming…' : 'Redeem → USDG'}
                     </button>
                   </div>
                 )}
@@ -1352,11 +1454,14 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <div>
                     <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
                       <Coins className="w-4 h-4 text-emerald-400" />
-                      <span>$xMoney P2P OTC Order Book</span>
+                      <span>Order book</span>
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Sellers deposit $xMoney into escrow; buyers send fiat on X Money. 0.01% raked to Fanout, 0.01% burned to 0xdead, 0.02% buys and burns XGAS.DEV.
+                      Sellers escrow $xMoney on the L4; buyers pay them in X Money. 0.04% fee on release.
                     </p>
+                    {fireballAvailable && cohort === 'legacy' && (
+                      <p className="mt-1 text-xs text-amber-300">Older order book: you can still fill, cancel and release here. New orders go to the current desk.</p>
+                    )}
                   </div>
 
                   {/* Filter Side Pills */}
@@ -1384,9 +1489,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                       <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mx-auto text-slate-500">
                         <Coins className="w-6 h-6" />
                       </div>
-                      <div className="text-sm font-bold text-white font-display">No Active Orders on xgas Orbit L4 Yet</div>
+                      <div className="text-sm font-bold text-white font-display">No open orders yet</div>
                       <p className="text-xs text-slate-400 max-w-sm mx-auto font-sans">
-                        Contract is freshly deployed. Be the first to post a Sell Ask or Buy Bid on-chain!
+                        Post the first ask or bid.
                       </p>
                       <div className="flex flex-col sm:flex-row justify-center gap-2 pt-2">
                         <button
@@ -1445,7 +1550,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                             </div>
                             {mine ? (
                               <button
-                                onClick={() => handleCancelOrderOnChain(order.id)}
+                                onClick={() => handleCancelOrderOnChain(order)}
                                 className="w-full py-2 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-300 font-bold text-xs cursor-pointer"
                               >
                                 Cancel Mine
@@ -1459,10 +1564,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                               </button>
                             )}
                             <button
-                              onClick={() => copyLink(orderLink(order.id))}
+                              onClick={() => copyLink(orderLink(order.id, order.cohort))}
                               className="w-full py-1.5 rounded-lg bg-[#151c2d] text-slate-400 text-[11px] cursor-pointer"
                             >
-                              {copiedLink === orderLink(order.id) ? 'Link copied ✓' : `Copy link · /order/${order.id}`}
+                              {copiedLink === orderLink(order.id, order.cohort) ? 'Link copied ✓' : `Copy link · ${order.cohort === 'fireball' ? '/fireball' : ''}/order/${order.id}`}
                             </button>
                           </div>
                         );
@@ -1519,7 +1624,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                               <td className="py-3 text-right">
                                 {isMine(order.maker) ? (
                                   <button
-                                    onClick={() => handleCancelOrderOnChain(order.id)}
+                                    onClick={() => handleCancelOrderOnChain(order)}
                                     className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 border border-rose-500/40 text-rose-300 font-bold transition-all text-xs cursor-pointer"
                                     title="Cancel your order and withdraw escrowed $xMoney"
                                   >
@@ -1534,11 +1639,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                                   </button>
                                 )}
                                 <button
-                                  onClick={() => copyLink(orderLink(order.id))}
+                                  onClick={() => copyLink(orderLink(order.id, order.cohort))}
                                   className="ml-1.5 px-2 py-1.5 rounded-lg bg-[#151c2d] hover:bg-[#1c2438] text-slate-400 hover:text-white text-xs cursor-pointer align-middle"
-                                  title={`Copy deep link ${orderLink(order.id)}`}
+                                  title={`Copy deep link ${orderLink(order.id, order.cohort)}`}
                                 >
-                                  {copiedLink === orderLink(order.id) ? '✓' : <Link2 className="w-3.5 h-3.5 inline" />}
+                                  {copiedLink === orderLink(order.id, order.cohort) ? '✓' : <Link2 className="w-3.5 h-3.5 inline" />}
                                 </button>
                               </td>
                             </tr>
@@ -1556,46 +1661,44 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 <div className="flex items-center justify-between pb-3 border-b border-[#1b2234]">
                   <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
                     <ShieldCheck className="w-4 h-4 text-cyan-400" />
-                    <span>On-Chain Escrow Settlements</span>
+                    <span>Open trades</span>
                   </h3>
                   <span className="text-xs text-slate-400 font-mono">
-                    {trades.length} active settlements
+                    {trades.length} in escrow · seller releases once paid
                   </span>
                 </div>
 
                 <div className="mt-3 space-y-3">
                   {trades.length === 0 ? (
                     <div className="text-center py-6 text-slate-500 text-xs font-mono">
-                      No active trades in escrow. Take an order above to initiate settlement.
+                      No trades in escrow. Take an order above to start one.
                     </div>
                   ) : (
                     trades.map(trade => (
                       <div 
-                        key={trade.id} 
-                        id={`trade-${trade.id}`}
+                        key={`${trade.contractAddress}-${trade.id}`}
+                        id={`trade-${trade.cohort}-${trade.id}`}
                         className="p-3.5 rounded-xl border bg-[#121624] border-cyan-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-shadow"
                       >
                         <div className="space-y-1">
                           <div className="flex items-center gap-2">
                             <button
-                              onClick={() => copyLink(tradeLink(trade.id))}
+                              onClick={() => copyLink(tradeLink(trade.id, trade.cohort))}
                               className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono cursor-pointer"
-                              title={`Copy deep link ${tradeLink(trade.id)}`}
+                              title={`Copy deep link ${tradeLink(trade.id, trade.cohort)}`}
                             >
-                              {copiedLink === tradeLink(trade.id) ? 'LINK COPIED ✓' : `TRADE #${trade.id} 🔗`}
+                              {copiedLink === tradeLink(trade.id, trade.cohort) ? 'LINK COPIED ✓' : `TRADE #${trade.id} 🔗`}
                             </button>
                             <span className="text-xs font-bold text-white font-sans">
                               @{trade.buyerXHandle} taking ${trade.xMoneyAmount.toFixed(2)} from @{trade.sellerXHandle}
                             </span>
                           </div>
                           <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3 font-mono">
-                            <span>Fiat: <strong className="text-emerald-400">${(trade.expectedCents / 100).toFixed(2)} USD</strong></span>
+                            <span>Buyer pays <strong className="text-emerald-400">${(trade.expectedCents / 100).toFixed(2)}</strong> in X Money</span>
                             <span>•</span>
-                            <span>0.01% Burn: <strong className="text-amber-400">${((trade.xMoneyAmount * 1) / 10000).toFixed(4)}</strong></span>
-                            <span>•</span>
-                            <span>0.01% Fanout Rake: <strong className="text-cyan-400">${((trade.xMoneyAmount * 1) / 10000).toFixed(4)}</strong></span>
-                            <span>•</span>
-                            <span>0.02% XGAS.DEV Buy & Burn: <strong className="text-emerald-400">${((trade.xMoneyAmount * 2) / 10000).toFixed(4)}</strong></span>
+                            <span title={`0.01% burn $${((trade.xMoneyAmount * 1) / 10000).toFixed(4)} · 0.01% fanout $${((trade.xMoneyAmount * 1) / 10000).toFixed(4)} · 0.02% XGAS.DEV buy & burn $${((trade.xMoneyAmount * 2) / 10000).toFixed(4)}`}>
+                              0.04% fee: <strong className="text-amber-400">${((trade.xMoneyAmount * 4) / 10000).toFixed(4)}</strong>
+                            </span>
                           </div>
                         </div>
 
@@ -1621,11 +1724,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                           </a>
 
                           <button
-                            onClick={() => handleReleaseTradeOnChain(trade.id)}
+                            onClick={() => handleReleaseTradeOnChain(trade)}
                             className="px-3 py-2 sm:py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-slate-950 font-bold text-xs shadow-md shadow-emerald-500/20 cursor-pointer flex items-center justify-center gap-1.5 font-display"
                           >
                             <CheckCircle className="w-3.5 h-3.5" />
-                            <span>Release On-Chain</span>
+                            <span>Release $xMoney</span>
                           </button>
                         </div>
                       </div>
@@ -1642,7 +1745,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-4 shadow-xl space-y-3">
                 <h4 className="text-sm font-bold text-white flex items-center gap-2 font-display">
                   <ExternalLink className="w-4 h-4 text-emerald-400" />
-                  <span>Deep Links to Everything</span>
+                  <span>Links &amp; contracts</span>
                 </h4>
                 <div className="space-y-2 text-xs font-mono">
                   <div className="grid grid-cols-2 gap-2">
@@ -1654,7 +1757,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                         className={`p-2.5 rounded-lg border flex items-center justify-between transition-colors ${
                           activeTab === tab ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : 'bg-[#141a29] hover:bg-[#1a2336] border-[#1e2538] text-slate-300'
                         }`}
-                        title={`Deep link: ${deepLink(tab)}`}
+                        title={`Deep link: ${deepLink(tab, cohort)}`}
                       >
                         <span className="font-bold">
                           {tab === 'otc' ? 'P2P Desk' : tab === 'explorer' ? 'L4 Explorer' : tab === 'fomo3d' ? 'FOMO3D' : 'Specs'}
@@ -1664,14 +1767,16 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                     ))}
                   </div>
                   <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#0b0e17] border border-[#1e2538]">
-                    <span className="text-slate-400 truncate">{deepLink(activeTab)}</span>
+                    <span className="text-slate-400 truncate">{deepLink(activeTab, cohort)}</span>
                     <button
-                      onClick={() => navigator.clipboard.writeText(deepLink(activeTab))}
+                      onClick={() => navigator.clipboard.writeText(deepLink(activeTab, cohort))}
                       className="px-2 py-1 rounded bg-emerald-500 text-slate-950 font-black uppercase text-[10px] cursor-pointer shrink-0"
                     >
                       Copy link
                     </button>
                   </div>
+                  <Disclosure label="Details / contracts" className="pt-1">
+                  <div className="space-y-2 font-mono text-xs">
                   <a
                     href={`https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESSES.XMONEY_USD_L3}`}
                     target="_blank"
@@ -1692,7 +1797,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   >
                     <span className="text-slate-400">P2P Escrow (Orbit L4):</span>
                     <span className="text-emerald-400 font-bold flex items-center gap-1">
-                      <span>{l4Addresses.escrow.slice(0, 8)}...</span>
+                      <span>{activeEscrowAddress.slice(0, 8)}...</span>
                       <ExternalLink className="w-3 h-3" />
                     </span>
                   </a>
@@ -1735,6 +1840,8 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                       <ExternalLink className="w-3 h-3" />
                     </span>
                   </a>
+                  </div>
+                  </Disclosure>
 
                   <a
                     href={`https://x.com/intent/post?text=${encodeURIComponent(`Trading @XMoney P2P on @xgas_dev L4! Every single trade burns 1 bp to 0xdead, rakes 1 bp to the @staccpad Stacc Wizards Fee Fanout on Robinhood Chain, and spends 2 bp buying and burning XGAS.DEV. xgas.dev`)}`}
@@ -1743,7 +1850,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                     className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-500/20 to-cyan-500/20 hover:brightness-110 border border-blue-500/40 text-cyan-300 font-bold flex items-center justify-center gap-2 transition-colors mt-2 font-sans"
                   >
                     <Share2 className="w-3.5 h-3.5" />
-                    <span>Share Desk on X Timeline</span>
+                    <span>Share on X</span>
                   </a>
                 </div>
               </div>
@@ -1752,15 +1859,20 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               <div className="bg-gradient-to-b from-[#111726] to-[#0d111c] border border-amber-500/30 rounded-2xl p-4 shadow-xl">
                 <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-2 font-mono">
                   <Flame className="w-4 h-4" />
-                  <span>On-Chain Fee Mechanics</span>
+                  <span>Fees</span>
                 </div>
-                <h4 className="text-sm font-bold text-white mb-2 font-display">0.04% Fee Structure</h4>
-                <p className="text-xs text-slate-400 leading-relaxed space-y-2 font-sans">
-                  Every release sends 0.01% of the trade to <code className="text-amber-400 font-mono">0xdead</code> on the L4, 0.01% to the <code className="text-cyan-400 font-mono" title="0x652125E71C7f209e640C0069e4a5e77FAfa99b4B">FanoutSink 0x6521...9b4B</code> on xgas, which bridges to the Stacc Wizards Fee Fanout on Robinhood once it holds 0.01 xMoney, and 0.02% to buy and burn <code className="text-emerald-400 font-mono">XGAS.DEV</code> on Robinhood.
+                <h4 className="text-sm font-bold text-white mb-1 font-display">0.04% per trade, taken on release</h4>
+                <p className="text-xs text-slate-400 leading-relaxed font-sans">
+                  0.01% burned, 0.01% to the Stacc Wizards fanout, 0.02% buys and burns XGAS.DEV.
                 </p>
-                <p className="text-xs text-slate-500 leading-relaxed mt-2 font-sans">
-                  This is not deflation. Burns on the L4 do not reduce the supply the vault counts, and each vault deposit also mints 0.0001 unbacked xMoney to pay L4 delivery gas. The burns are small: NAV rose about 0.018% in the last week. r/s (vault USDG over circulating xMoney) is a division, not a forecast.
-                </p>
+                <Disclosure label="Where each part goes, and why this is not deflation" className="mt-2">
+                  <p>
+                    The burn goes to <code className="text-amber-400 font-mono">0xdead</code> on the L4. The fanout share goes to <code className="text-cyan-400 font-mono" title="0x652125E71C7f209e640C0069e4a5e77FAfa99b4B">FanoutSink 0x6521...9b4B</code> on the L4, which bridges to the Stacc Wizards Fee Fanout on Robinhood once it holds 0.01 xMoney. The buyback buys and burns <code className="text-emerald-400 font-mono">XGAS.DEV</code> on Robinhood.
+                  </p>
+                  <p>
+                    Burns on the L4 do not reduce the supply the vault counts, and each vault deposit also mints 0.0001 unbacked xMoney to pay L4 delivery gas. The burns are small: NAV rose about 0.018% in the last week. r/s (vault USDG over circulating xMoney) is a division, not a forecast.
+                  </p>
+                </Disclosure>
 
                 <div className="mt-4 p-3 rounded-xl bg-black/40 border border-amber-500/20 space-y-2 font-mono text-xs">
                   <div className="flex justify-between text-slate-400">
@@ -1802,7 +1914,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
               {/* Countdown Clock */}
               <div className="space-y-1 my-4">
-                <div className="text-[11px] font-mono uppercase tracking-widest text-slate-400">TIME REMAINING UNTIL JACKPOT PAYOUT</div>
+                <div className="text-[11px] font-mono uppercase tracking-widest text-slate-400">Time left · last key buyer wins the pot</div>
                 <div className="text-[13vw] sm:text-7xl font-black font-mono tracking-tighter leading-none text-transparent bg-clip-text bg-gradient-to-r from-rose-400 via-amber-300 to-rose-400 animate-pulse">
                   {timeLeftStr}
                 </div>
@@ -1811,7 +1923,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               {/* Current King */}
               <div className="mt-4 p-4 rounded-xl bg-black/50 border border-rose-500/30 max-w-xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-3 font-mono">
                 <div className="text-left space-y-0.5 min-w-0">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">CURRENT KING OF THE HILL</div>
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">Leader · last key buyer</div>
                   <div className="text-base font-bold text-white flex items-center gap-2 font-sans">
                     <Award className="w-4 h-4 text-amber-400" />
                     <span className="truncate">{fomo.currentLeaderXHandle ? `@${fomo.currentLeaderXHandle}` : 'No Leader Yet'}</span>
@@ -1820,7 +1932,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 </div>
 
                 <div className="text-left sm:text-right flex sm:block items-baseline justify-between gap-2 border-t sm:border-0 border-rose-500/20 pt-2 sm:pt-0">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">ESTIMATED WIN</div>
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">Pot</div>
                   <div className="text-lg font-black text-emerald-400 font-mono">
                     ${fomo.jackpotPot.toFixed(2)} USD
                   </div>
@@ -1861,7 +1973,9 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   {myJackpotOwed > 0n && (
                     <button
                       onClick={handleWithdrawJackpotOnChain}
-                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-400 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg transition-all cursor-pointer shrink-0"
+                      disabled={fomoBusy}
+                      aria-busy={fomoBusy || undefined}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-400 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg transition-all cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-200"
                     >
                       Withdraw your held jackpot: {Number(formatEther(myJackpotOwed)).toFixed(4)} xMoney
                     </button>
@@ -1869,30 +1983,39 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   {roundExpired ? (
                     <button
                       onClick={handleClaimJackpotOnChain}
-                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-amber-500/30 transition-all cursor-pointer shrink-0"
+                      disabled={fomoBusy}
+                      aria-busy={fomoBusy || undefined}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-amber-500/30 transition-all cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200"
                     >
                       Round over: pay ${fomo.jackpotPot.toFixed(2)} jackpot &amp; start round #{fomo.roundId + 1}
+                    </button>
+                  ) : fireballAvailable && cohort === 'legacy' ? (
+                    <button onClick={() => selectCohort('fireball')} className="px-6 py-2.5 rounded-xl bg-cyan-400 text-slate-950 font-black text-xs font-display cursor-pointer shrink-0">
+                      Back to the current game to buy keys
                     </button>
                   ) : (
                     <button
                       onClick={handleBuyKeysOnChain}
-                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-500 via-amber-500 to-rose-500 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-rose-500/30 transition-all cursor-pointer shrink-0"
+                      disabled={fomoBusy}
+                      aria-busy={fomoBusy || undefined}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-500 via-amber-500 to-rose-500 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-rose-500/30 transition-all cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
                     >
-                      Buy {keysToBuy} Keys for ${(keysToBuy * fomo.keyPrice).toFixed(3)} $xMoney
+                      {fomoBusy ? 'Buying…' : `Buy ${keysToBuy} ${keysToBuy === 1 ? 'key' : 'keys'} for ${(keysToBuy * fomo.keyPrice).toFixed(3)} $xMoney`}
                     </button>
                   )}
                 </div>
 
+                {fomoError && (
+                  <p role="alert" className="text-[11px] font-mono text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 break-words text-left">{fomoError}</p>
+                )}
                 <div className="text-[11px] text-slate-400 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
-                  <span>55% Dividends</span>
-                  <span>•</span>
-                  <span>35% Jackpot</span>
-                  <span>•</span>
-                  <span className="text-amber-400">0.01% Burn</span>
-                  <span>•</span>
-                  <span className="text-cyan-400">0.01% Fanout Rake</span>
-                  <span>•</span>
-                  <span className="text-emerald-400">0.02% XGAS.DEV Buy & Burn</span>
+                  <span>Each key: 55% to key holders · 35% to the pot · 0.04% fee</span>
+                </div>
+                <div className="flex justify-center">
+                  <Disclosure label="Details / contracts">
+                    <p className="text-left">Fee split per key: <span className="text-amber-400">0.01% burned</span>, <span className="text-cyan-400">0.01% to the Stacc Wizards fanout</span>, <span className="text-emerald-400">0.02% buys and burns XGAS.DEV</span>. Every key adds +30s to the clock; the last buyer when it hits zero takes the pot.</p>
+                    <p className="text-left font-mono">Game contract (L4): <a href="#explorer" onClick={(ev) => { ev.preventDefault(); setActiveTab('explorer'); }} className="text-cyan-400 hover:underline">{activeFomoAddress}</a></p>
+                  </Disclosure>
                 </div>
               </div>
             </div>
@@ -1916,11 +2039,13 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
 
               <button
                 onClick={handleClaimDividendsOnChain}
-                disabled={fomo.playerDividends <= 0}
-                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 transition-all cursor-pointer flex items-center justify-center gap-2"
+                disabled={fomo.playerDividends <= 0 || fomoBusy}
+                aria-busy={fomoBusy || undefined}
+                title={fomo.playerDividends <= 0 ? 'Nothing to claim yet' : undefined}
+                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 transition-all cursor-pointer flex items-center justify-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
               >
-                <CheckCircle className="w-4 h-4" />
-                <span>Claim On-Chain Dividends</span>
+                <CheckCircle className="w-4 h-4" aria-hidden="true" />
+                <span>{fomoBusy ? 'Working…' : 'Claim dividends'}</span>
               </button>
 
               {pastRoundDividends.map(pr => (
@@ -1949,7 +2074,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                     onClick={(ev) => { ev.preventDefault(); setActiveTab('explorer'); }}
                     className="text-cyan-400 hover:underline flex items-center gap-1"
                   >
-                    <span>{l4Addresses.fomo.slice(0, 8)}... (Orbit L4)</span>
+                    <span>{activeFomoAddress.slice(0, 8)}... (Orbit L4)</span>
                     <ExternalLink className="w-2.5 h-2.5" />
                   </a>
                 </div>
@@ -1968,6 +2093,11 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               <ShieldCheck className="w-4 h-4 text-emerald-400" />
               <span>Trust Model, Units &amp; Admin Powers</span>
             </h3>
+            {/* The short version. Must stay consistent with the detail below: the chain-owner key has UpgradeExecutor with no timelock. */}
+            <p className="text-xs leading-relaxed text-slate-300 font-sans border-l-2 border-amber-500/50 pl-3">
+              <strong className="text-white">Short version:</strong> chain data and exits are verifiable on Robinhood without trusting xgas.dev. Today you still trust the single xgas.dev sequencer, a 2-of-3 validator Safe that fast-confirms state, and one chain-owner key that can upgrade the Rollup, Bridge, Inbox and Outbox and force-confirm assertions with no timelock. The vault itself sits behind a 24-hour timelock.
+            </p>
+            <Disclosure label="Full detail: what is verifiable, admin powers, units &amp; accounting" className="pt-1">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[11px] leading-relaxed text-slate-300">
               <div className="space-y-2">
                 <div className="text-emerald-400 font-bold uppercase tracking-wider">What is verifiable</div>
@@ -1990,13 +2120,16 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 <p>0x…dEaD on Robinhood is a shared sink used by other projects; only XMoney's own balance there is xgas burn.</p>
               </div>
             </div>
+            </Disclosure>
           </div>
           <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-5 shadow-xl space-y-3">
             <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
               <Layers className="w-4 h-4 text-cyan-400" />
-              <span>Orbit L4 Topology Specs</span>
+              <span>Chain</span>
             </h3>
-            <div className="space-y-2 text-slate-300">
+            <p className="text-xs text-slate-400 font-sans">An Arbitrum Orbit rollup that settles on Robinhood Chain. Gas is $xMoney, backed by USDG in the vault.</p>
+            <Disclosure label="Details / contracts">
+            <div className="space-y-2 text-slate-300 font-mono text-xs">
               <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] flex justify-between">
                 <span className="text-slate-500">Rollup Framework:</span>
                 <span className="text-white font-bold">Arbitrum Nitro (Orbit L4)</span>
@@ -2031,14 +2164,17 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 </a>
               </div>
             </div>
+            </Disclosure>
           </div>
 
           <div className="bg-[#0e121d] border border-[#1e2538] rounded-2xl p-5 shadow-xl space-y-3">
             <h3 className="text-base font-bold text-white flex items-center gap-2 font-display">
               <Hash className="w-4 h-4 text-emerald-400" />
-              <span>Verified On-Chain Contracts</span>
+              <span>Contracts</span>
             </h3>
-            <div className="space-y-2 text-slate-300">
+            <p className="text-xs text-slate-400 font-sans">The vault lives on Robinhood Chain; the P2P escrow and the game live on the L4. Source is linked from the trust model above.</p>
+            <Disclosure label="Details / contracts">
+            <div className="space-y-2 text-slate-300 font-mono text-xs">
               <div className="p-2.5 rounded-lg bg-[#141a29] border border-[#1e2538] space-y-1">
                 <div className="flex justify-between text-slate-400">
                   <span>$xMoney Vault Contract:</span>
@@ -2065,7 +2201,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   onClick={(ev) => { ev.preventDefault(); setActiveTab('explorer'); }}
                   className="text-white hover:text-emerald-400 flex items-center gap-1 truncate"
                 >
-                  <span className="truncate">{l4Addresses.escrow} · xgas Orbit L4 #{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}</span>
+                  <span className="truncate">{activeEscrowAddress} · xgas Orbit L4 #{CONTRACT_ADDRESSES.ORBIT_L4_CHAIN_ID}</span>
                   <ExternalLink className="w-3 h-3 shrink-0" />
                 </a>
               </div>
@@ -2086,6 +2222,7 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 </a>
               </div>
             </div>
+            </Disclosure>
           </div>
         </div>
       )}
@@ -2099,9 +2236,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 <Coins className="w-4 h-4 text-emerald-400" />
                 <span>Post {orderSideToCreate === 'ASK' ? 'Sell Ask' : 'Buy Bid'} ($xMoney)</span>
               </h3>
-              <button 
-                onClick={() => setIsCreateOrderModalOpen(false)}
-                className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer"
+              <button
+                onClick={() => { setIsCreateOrderModalOpen(false); setModalError(null); }}
+                aria-label="Close"
+                className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 rounded"
               >
                 ✕
               </button>
@@ -2179,16 +2317,20 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               </div>
 
               <div className="p-3 rounded-xl bg-black/40 border border-slate-800 text-[11px] text-slate-400 space-y-1">
-                <div>Price Rate: <strong className="text-emerald-400">${(1 + parseFloat(newOrderSpread || '0') / 100).toFixed(3)} USD / 1 xMoney</strong></div>
-                <div>0.01% Burn on Release + 0.01% Stacc Wizards Fee Fanout Rake + 0.02% XGAS.DEV Buy & Burn</div>
+                <div>Price: <strong className="text-emerald-400">${(1 + parseFloat(newOrderSpread || '0') / 100).toFixed(3)} USD per $xMoney</strong></div>
+                <div>0.04% fee on release (0.01% burn · 0.01% fanout · 0.02% XGAS.DEV buy &amp; burn)</div>
               </div>
 
+              {modalError && (
+                <p role="alert" className="text-[11px] font-mono text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 break-words">{modalError}</p>
+              )}
               <button
                 type="submit"
                 disabled={isSubmittingTx}
-                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
+                aria-busy={isSubmittingTx || undefined}
+                className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-emerald-500/20 transition-all cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
               >
-                {isSubmittingTx ? 'Broadcasting on xgas Orbit L4...' : `Post ${orderSideToCreate === 'ASK' ? 'Sell Ask' : 'Buy Bid'} On-Chain`}
+                {isSubmittingTx ? 'Posting…' : orderSideToCreate === 'ASK' ? 'Post sell ask · escrows your $xMoney' : 'Post buy bid'}
               </button>
             </form>
           </div>
@@ -2206,15 +2348,15 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
               </h3>
               <div className="flex items-center gap-1">
                 <button
-                  onClick={() => copyLink(orderLink(selectedOrderForTrade.id))}
+                  onClick={() => copyLink(orderLink(selectedOrderForTrade.id, selectedOrderForTrade.cohort))}
                   className="px-2 py-1 rounded-lg bg-[#151c2d] hover:bg-[#1c2438] text-slate-300 hover:text-white text-[11px] cursor-pointer flex items-center gap-1"
-                  title={orderLink(selectedOrderForTrade.id)}
+                  title={orderLink(selectedOrderForTrade.id, selectedOrderForTrade.cohort)}
                 >
                   <Link2 className="w-3.5 h-3.5" />
-                  <span>{copiedLink === orderLink(selectedOrderForTrade.id) ? 'Copied' : 'Link'}</span>
+                  <span>{copiedLink === orderLink(selectedOrderForTrade.id, selectedOrderForTrade.cohort) ? 'Copied' : 'Link'}</span>
                 </button>
                 <a
-                  href={`https://x.com/intent/post?text=${encodeURIComponent(`${selectedOrderForTrade.side === 'ASK' ? 'Buy' : 'Sell'} ${selectedOrderForTrade.availableXMoney.toFixed(2)} $xMoney @ $${(selectedOrderForTrade.fiatRateBps / 10000).toFixed(3)} from @${selectedOrderForTrade.makerXHandle} on @xgas_dev L4 → ${orderLink(selectedOrderForTrade.id)}`)}`}
+                  href={`https://x.com/intent/post?text=${encodeURIComponent(`${selectedOrderForTrade.side === 'ASK' ? 'Buy' : 'Sell'} ${selectedOrderForTrade.availableXMoney.toFixed(2)} $xMoney @ $${(selectedOrderForTrade.fiatRateBps / 10000).toFixed(3)} from @${selectedOrderForTrade.makerXHandle} on @xgas_dev L4 → ${orderLink(selectedOrderForTrade.id, selectedOrderForTrade.cohort)}`)}`}
                   target="_blank"
                   rel="noreferrer"
                   className="p-1.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
@@ -2222,9 +2364,10 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                 >
                   <Share2 className="w-3.5 h-3.5" />
                 </a>
-                <button 
+                <button
                   onClick={closeOrder}
-                  className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer px-1"
+                  aria-label="Close"
+                  className="text-slate-400 hover:text-white text-lg font-bold cursor-pointer px-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 rounded"
                 >
                   ✕
                 </button>
@@ -2265,19 +2408,23 @@ export const OrbitXMoneyOtc: React.FC<OrbitXMoneyOtcProps> = ({
                   <span className="text-white">${(selectedOrderForTrade.fiatRateBps / 10000).toFixed(3)}</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
-                  <span>Fiat Owed on X Money:</span>
+                  <span>{selectedOrderForTrade.side === 'ASK' ? 'You pay in X Money:' : 'You receive in X Money:'}</span>
                   <span className="text-emerald-400 font-black text-sm">
                     ${((parseFloat(tradeAmount || '0') * selectedOrderForTrade.fiatRateBps) / 10000).toFixed(2)} USD
                   </span>
                 </div>
               </div>
 
+              {modalError && (
+                <p role="alert" className="text-[11px] font-mono text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 break-words">{modalError}</p>
+              )}
               <button
                 onClick={handleFillOrderOnChain}
                 disabled={isSubmittingTx}
-                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 hover:brightness-110 text-slate-950 font-black text-xs font-display shadow-lg shadow-cyan-500/20 transition-all cursor-pointer"
+                aria-busy={isSubmittingTx || undefined}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-black text-xs font-display shadow-lg shadow-cyan-500/20 transition-all cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
               >
-                {isSubmittingTx ? 'Broadcasting on xgas Orbit L4...' : 'Lock Escrow On-Chain'}
+                {isSubmittingTx ? 'Starting trade…' : selectedOrderForTrade.side === 'ASK' ? 'Start trade · then pay the seller in X Money' : 'Escrow $xMoney · get paid in X Money'}
               </button>
             </div>
           </div>

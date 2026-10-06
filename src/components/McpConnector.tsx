@@ -23,13 +23,14 @@ const PROMPTS = [
   'Has anyone bid on my swap yet, and what is it costing me?',
 ];
 
-const CopyLine: React.FC<{ text: string; label?: string; mono?: boolean }> = ({ text, label, mono = true }) => {
+const CopyLine: React.FC<{ text: string; label?: string; mono?: boolean; primary?: boolean }> = ({ text, label, mono = true, primary = false }) => {
   const [done, setDone] = useState(false);
   return (
     <button
       onClick={() => { navigator.clipboard.writeText(text).then(() => { setDone(true); setTimeout(() => setDone(false), 1400); }); }}
-      className="group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-[#0b0e17] border border-[#1e2538] hover:border-emerald-500/40 text-left cursor-pointer transition-colors"
+      className={`group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-[#0b0e17] border text-left cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 ${primary ? 'border-emerald-500/60 shadow-md shadow-emerald-500/10 hover:border-emerald-400' : 'border-[#1e2538] hover:border-emerald-500/40'}`}
       title="Copy"
+      aria-label={label ? `Copy ${label}` : 'Copy'}
     >
       <div className="min-w-0 flex-1">
         {label && <div className="text-[10px] uppercase font-black tracking-wide text-slate-500 mb-0.5">{label}</div>}
@@ -39,6 +40,21 @@ const CopyLine: React.FC<{ text: string; label?: string; mono?: boolean }> = ({ 
     </button>
   );
 };
+
+/** Numbered onboarding step: done (✓), active (the one to do now, visually primary) or upcoming (dimmed). */
+const StepHeader: React.FC<{ n: number; state: 'done' | 'active' | 'upcoming'; children: React.ReactNode }> = ({ n, state, children }) => (
+  <div className="flex items-center gap-2 mb-2" aria-current={state === 'active' ? 'step' : undefined}>
+    <span className={`w-5 h-5 rounded-full text-[10px] font-black font-mono flex items-center justify-center shrink-0 ${
+      state === 'done' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+      : state === 'active' ? 'bg-emerald-500 text-slate-950'
+      : 'bg-[#121624] text-slate-500 border border-[#1e2538]'}`}>
+      {state === 'done' ? <Check className="w-3 h-3" aria-hidden="true" /> : n}
+    </span>
+    <span className={`text-[11px] uppercase font-black tracking-widest font-mono ${state === 'active' ? 'text-emerald-300' : state === 'done' ? 'text-slate-300' : 'text-slate-500'}`}>
+      {children}
+    </span>
+  </div>
+);
 
 interface XUser { id: string; handle: string; name?: string; avatar?: string }
 interface WalletState { configured: boolean; wallet: { address: string; id: string; source: string } | null; balances?: { xgas_native_xmoney: string; parent_usdg: string; parent_xmoney: string } }
@@ -57,11 +73,13 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
   const [shown, setShown] = useState(false);
   const [revoking, setRevoking] = useState(false);
   const [revokeNote, setRevokeNote] = useState<string | null>(null);
+  const [mintErr, setMintErr] = useState<string | null>(null);
 
   const mint = async () => {
-    setBusy(true); setRevokeNote(null);
+    setBusy(true); setRevokeNote(null); setMintErr(null);
     const r = await fetch('/api/connector/token', { method: 'POST', credentials: 'same-origin' }).then(res => res.json()).catch(() => null);
     setToken(r?.token ?? null);
+    if (!r?.token) setMintErr(r?.error ?? 'Could not mint a token. Nothing changed; try again.');
     setBusy(false);
   };
 
@@ -80,10 +98,13 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
   };
 
   const revokeButton = (
-    <button onClick={revoke} disabled={revoking}
-      className="px-4 py-2 rounded-xl bg-[#121624] border border-rose-500/40 text-rose-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033] disabled:opacity-60">
-      {revoking ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3.5 h-3.5" />} {revoking ? 'revoking…' : 'Revoke all connector tokens'}
-    </button>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <button onClick={revoke} disabled={revoking} aria-busy={revoking || undefined}
+        className="px-4 py-2 rounded-xl bg-[#121624] border border-rose-500/40 text-rose-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033] disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300">
+        {revoking ? <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />} {revoking ? 'revoking…' : 'Revoke all connector tokens'}
+      </button>
+      <span className="text-[11px] text-slate-500">Leaked or lost a token? This is how you rotate it: every token stops working, then mint a new one. Signing out and back in does not revoke anything.</span>
+    </div>
   );
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://xgas.dev';
@@ -92,40 +113,49 @@ const ConnectAModel: React.FC<{ handle: string }> = ({ handle }) => {
     : '';
 
   return (
-    <div className="mt-4 pt-4 border-t border-[#1e2538]">
-      <div className="flex items-center gap-2 mb-2">
-        <Link2 className="w-3.5 h-3.5 text-cyan-400" />
-        <span className="text-[11px] uppercase font-black tracking-widest text-cyan-300 font-mono">connect a model to this wallet</span>
-      </div>
-      {!token ? (
-        <>
-          <p className="text-xs text-slate-400 mb-3">
-            Your browser has a session; a model somewhere else does not. Mint a token and paste it into your host,
-            and that model acts as @{handle} on this wallet, nothing more.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <button onClick={mint} disabled={busy}
-              className="px-4 py-2 rounded-xl bg-[#121624] border border-cyan-500/40 text-cyan-300 text-xs font-black font-mono flex items-center gap-2 cursor-pointer hover:bg-[#1a2033]">
-              {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />} {busy ? 'minting…' : 'Mint my connector token'}
+    <div className="mt-4 pt-4 border-t border-[#1e2538] space-y-4">
+      {/* Step 2 */}
+      <div>
+        <StepHeader n={2} state={token ? 'done' : 'active'}>Mint my connector token</StepHeader>
+        {!token ? (
+          <>
+            <p className="text-xs text-slate-400 mb-3">
+              A model somewhere else has no browser session. A token lets it act as @{handle} on this wallet, nothing more.
+            </p>
+            <button onClick={mint} disabled={busy} aria-busy={busy || undefined}
+              className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black font-mono flex items-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300">
+              {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <Link2 className="w-3.5 h-3.5" aria-hidden="true" />} {busy ? 'minting…' : 'Mint my connector token'}
             </button>
-            {revokeButton}
-          </div>
-        </>
-      ) : (
-        <>
-          <p className="text-xs text-slate-400 mb-2">
-            Paste this into your MCP host. Treat it like a key: anyone holding it can spend this wallet. It lasts 180 days,
-            or until you revoke it.
-          </p>
-          <CopyLine label="host config" text={config} mono />
-          <button onClick={() => setShown(v => !v)} className="mt-2 text-[11px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer">
-            {shown ? 'hide the raw token' : 'show the raw token'}
-          </button>
-          {shown && <div className="mt-1"><CopyLine label="token" text={token} /></div>}
-          <div className="mt-3">{revokeButton}</div>
-        </>
-      )}
-      {revokeNote && <p className="mt-2 text-[11px] font-mono text-slate-400">{revokeNote}</p>}
+            {mintErr && <p role="alert" className="mt-2 text-[11px] font-mono text-rose-300">{mintErr}</p>}
+          </>
+        ) : (
+          <p className="text-xs text-slate-400">Minted. It lasts 180 days, or until you revoke it.</p>
+        )}
+      </div>
+
+      {/* Step 3 */}
+      <div>
+        <StepHeader n={3} state={token ? 'active' : 'upcoming'}>Copy host config</StepHeader>
+        {token ? (
+          <>
+            <p className="text-xs text-slate-400 mb-2">
+              Paste this into your MCP host. Treat it like a key: anyone holding it can spend this wallet.
+            </p>
+            <CopyLine label="host config" text={config} mono primary />
+            <button onClick={() => setShown(v => !v)} className="mt-2 text-[11px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 rounded">
+              {shown ? 'hide the raw token' : 'show the raw token'}
+            </button>
+            {shown && <div className="mt-1"><CopyLine label="token" text={token} /></div>}
+          </>
+        ) : (
+          <p className="text-xs text-slate-500">Appears here once you have a token.</p>
+        )}
+      </div>
+
+      <div className="pt-3 border-t border-[#1e2538]">
+        {revokeButton}
+        {revokeNote && <p className="mt-2 text-[11px] font-mono text-slate-400" role="status">{revokeNote}</p>}
+      </div>
     </div>
   );
 };
@@ -137,16 +167,21 @@ const YourWallet: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // A failed or hung /api/connector/wallet_status used to leave the spinner up forever. Now it times out and says so.
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const justSignedIn = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('xauth') === 'ok';
 
   const load = React.useCallback(async () => {
-    setLoading(true);
-    const me = await fetch('/api/me', { credentials: 'same-origin' }).then(r => r.json()).catch(() => null);
+    setLoading(true); setLoadErr(null);
+    const me = await fetch('/api/me', { credentials: 'same-origin', signal: AbortSignal.timeout(15_000) }).then(r => r.json()).catch(() => null);
+    if (!me) { setLoadErr('Could not reach xgas.dev to check your sign-in.'); setLoading(false); return; }
     setConfigured(!!me?.configured);
     setUser(me?.user ?? null);
     if (!me?.user) { setState(null); setLoading(false); return; }
-    const w = await fetch('/api/connector/wallet_status', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })
-      .then(r => r.json()).catch(() => null);
+    const w = await fetch('/api/connector/wallet_status', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(15_000) })
+      .then(async r => { const j = await r.json(); return r.ok ? j : { error: j?.error ?? `wallet_status failed (${r.status})` }; })
+      .catch((e: unknown) => ({ error: (e as Error)?.name === 'TimeoutError' ? 'Timed out reading your wallet.' : 'Could not read your wallet.' }));
+    if (w?.error || !w?.data) setLoadErr(w?.error ?? 'Could not read your wallet.');
     setState(w?.data ?? null);
     setLoading(false);
   }, []);
@@ -162,16 +197,24 @@ const YourWallet: React.FC = () => {
     setBusy(false);
   };
 
-  if (!configured) return null;
+  if (!configured && !loadErr) return null;
 
   if (!user) {
+    if (loadErr) {
+      return (
+        <section className="rounded-2xl border border-rose-500/30 bg-[#0b0e17] p-4 sm:p-5 flex flex-wrap items-center gap-3 text-xs font-mono">
+          <span className="text-rose-300" role="alert">{loadErr}</span>
+          <button onClick={load} className="ml-auto px-3 py-1.5 rounded-lg bg-[#121624] border border-[#1e2538] text-slate-300 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300">Retry</button>
+        </section>
+      );
+    }
     return (
       <section className="rounded-2xl border border-[#1e2538] bg-[#0b0e17] p-4 sm:p-5 flex flex-wrap items-center gap-3">
         <Wallet className="w-4 h-4 text-emerald-400" />
         <div className="text-sm text-slate-300 mr-auto">
           Sign in with X and this connector runs a wallet of your own. Nothing to install, nothing to paste.
         </div>
-        <a href={`/auth/x/login?returnTo=${encodeURIComponent('/')}`}
+        <a href={`/auth/x/login?returnTo=${encodeURIComponent('/connector')}`}
           className="px-4 py-2 rounded-xl bg-white text-black text-xs font-black font-mono flex items-center gap-2 hover:bg-slate-200">
           <span className="font-black">𝕏</span> Sign in with X
         </a>
@@ -186,20 +229,25 @@ const YourWallet: React.FC = () => {
         <span className="text-[11px] uppercase font-black tracking-widest text-emerald-300 font-mono">
           {justSignedIn ? `thanks for connecting, @${user.handle}` : `signed in as @${user.handle}`}
         </span>
-        <button onClick={load} className="ml-auto p-1.5 rounded-lg bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white cursor-pointer" title="Refresh">
-          <RefreshCw className="w-3.5 h-3.5" />
+        <button onClick={load} disabled={loading} className="ml-auto p-1.5 rounded-lg bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white cursor-pointer disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300" title="Refresh" aria-label="Refresh wallet">
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
         </button>
       </div>
 
       {loading ? (
-        <div className="text-xs font-mono text-slate-500 flex items-center gap-2"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> reading your wallet…</div>
+        <div className="text-xs font-mono text-slate-500 flex items-center gap-2" role="status"><RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> reading your wallet…</div>
+      ) : loadErr ? (
+        <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+          <span className="text-rose-300" role="alert">{loadErr}</span>
+          <button onClick={load} className="px-3 py-1.5 rounded-lg bg-[#121624] border border-[#1e2538] text-slate-300 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300">Retry</button>
+        </div>
       ) : !state?.configured ? (
         <div className="text-xs font-mono text-slate-400">Wallets are not switched on for this host yet.</div>
       ) : state.wallet ? (
         <>
+          <StepHeader n={1} state="done">Create my wallet</StepHeader>
           <p className="text-xs text-slate-400 mb-2">
-            This is your wallet on this connector. Only you can ask it to sign, signed in with X or through a connector token you minted.
-            It is custodial: this server signs for it through Privy, so keep in it only what you are willing to have an agent spend.
+            Your wallet on this connector. Only you can ask it to sign (signed in with X, or via a token you minted). It is custodial, signed by this server through Privy: keep in it only what you are willing to have an agent spend.
           </p>
           <CopyLine label="your address" text={state.wallet.address} />
           {state.balances && (
@@ -209,19 +257,24 @@ const YourWallet: React.FC = () => {
               <div className="px-3 py-2 rounded-xl bg-[#0b0e17] border border-[#1e2538]"><span className="text-slate-500">parent xMoney</span><br /><span className="text-slate-200">{state.balances.parent_xmoney}</span></div>
             </div>
           )}
-          <p className="mt-2 text-[11px] text-slate-500">Send it a little $xMoney on L4 for gas and it can start doing things. It holds what you put in it and no more.</p>
+          <p className="mt-2 text-[11px] text-slate-500">Send it a little $xMoney on the L4 for gas and it can start doing things. It holds what you put in it and no more.</p>
           <ConnectAModel handle={user.handle} />
         </>
       ) : (
         <>
-          <p className="text-xs text-slate-400 mb-3">You do not have a wallet here yet. Make one and its address appears right below, ready to fund.</p>
-          <button onClick={create} disabled={busy}
-            className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black font-mono flex items-center gap-2 cursor-pointer disabled:opacity-60">
-            {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Wallet className="w-3.5 h-3.5" />} {busy ? 'making it…' : 'Create my wallet'}
+          <StepHeader n={1} state="active">Create my wallet</StepHeader>
+          <p className="text-xs text-slate-400 mb-3">Its address appears right below, ready to fund.</p>
+          <button onClick={create} disabled={busy} aria-busy={busy || undefined}
+            className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black font-mono flex items-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300">
+            {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" /> : <Wallet className="w-3.5 h-3.5" aria-hidden="true" />} {busy ? 'making it…' : 'Create my wallet'}
           </button>
+          <div className="mt-4 pt-4 border-t border-[#1e2538] space-y-3 opacity-70">
+            <StepHeader n={2} state="upcoming">Mint my connector token</StepHeader>
+            <StepHeader n={3} state="upcoming">Copy host config</StepHeader>
+          </div>
         </>
       )}
-      {err && <div className="mt-2 text-[11px] font-mono text-rose-300">{err}</div>}
+      {err && <div className="mt-2 text-[11px] font-mono text-rose-300" role="alert">{err}</div>}
     </section>
   );
 };
@@ -264,10 +317,8 @@ export const McpConnector: React.FC = () => {
         </h1>
         <p className="mt-3 text-sm sm:text-base text-slate-400 max-w-3xl leading-relaxed">
           {info ? `${info.tool_count} tools` : 'Tools'} over the whole xGas stack: the USDG vault bridge, the P2P OTC desk, NGU curves, fiat ramps,
-          and X Money swaps that land an asset on any of 39 EVM chains. Ask in words; it quotes, it prepares, and your own
-          wallet signs. That part is non-custodial. Or sign in with X and it runs a wallet of your own, held by Privy, which
-          this server signs for with its app secret: that wallet is custodial, it is opt-in, and nobody reaches it without
-          being signed in as you or holding a token you minted.
+          and XSwap, which is open: pay in X Money, receive native ETH on Base (a solver fills it; 10 X Money per order). Other chains fill when a solver bids.
+          Ask in words; it quotes, it prepares, your own wallet signs. Or sign in with X above for a wallet this server holds for you (custodial, via Privy, opt-in): only you, or a token you minted, can reach it.
         </p>
 
         <div className="mt-6 grid gap-3 md:grid-cols-2">

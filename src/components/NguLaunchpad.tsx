@@ -5,6 +5,7 @@ import { l4Addresses } from '../contracts/abis';
 import { l4PublicClient, encodeAbiCall, loadL4Info, L4_CHAIN_ID } from '../contracts/web3Client';
 import { sendL4Tx } from '../contracts/gas';
 import { L4GasPanel } from './L4GasPanel';
+import { Disclosure } from './Disclosure';
 import { UserWallet } from '../types';
 import { trueMaxLoss, contractSkew } from '../utils/nguRisk';
 import { Rocket, TrendingUp, TrendingDown, Plus, RefreshCw, AlertTriangle, Wallet, Info } from 'lucide-react';
@@ -292,7 +293,7 @@ function LaunchForm({ launcher, wallet, onConnectWallet, onLaunched }: { launche
         className="mt-3 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 text-sm font-black cursor-pointer">
         {busy ? 'Launching…' : 'Launch token'}
       </button>
-      <div className="text-[10px] font-mono text-slate-600 mt-2">Seed $xMoney backs your seed tokens at genesis — no fee, no curve step. Economics are immutable after launch.</div>
+      <div className="text-[10px] font-mono text-slate-600 mt-2">Seed $xMoney backs your seed tokens at launch (no fee, no curve step). Curve settings cannot be changed afterwards.</div>
     </div>
   );
 }
@@ -305,14 +306,15 @@ export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; 
 
   const load = useCallback(async () => {
     await loadL4Info().catch(() => null);
-    const la = l4Addresses.nguLauncher;
+    const la = l4Addresses.fireballActive && l4Addresses.fireballNguLauncher
+      ? l4Addresses.fireballNguLauncher : l4Addresses.nguLauncher;
     setLauncher(la);
     if (!la || la === ZERO) { setTokens([]); setLoading(false); return; }
     try {
       // Tokens from the current launcher first, then the legacy one (0.02% curves); each newest first.
       // Launching only ever goes through the current launcher.
       const addrs: string[] = [];
-      for (const l of [la, l4Addresses.legacyNguLauncher]) {
+      for (const l of [la, l4Addresses.nguLauncher, l4Addresses.legacyNguLauncher]) {
         if (!l || l === ZERO) continue;
         const n: bigint = await l4PublicClient.readContract({ address: addr(l), abi: NGU_LAUNCHER_ABI, functionName: 'allTokensLength' });
         for (let i = n - 1n; i >= 0n; i--) {
@@ -342,23 +344,22 @@ export function NguLaunchpad({ wallet, onConnectWallet }: { wallet: UserWallet; 
         <div className="flex flex-wrap items-center gap-2 justify-between">
           <div>
             <div className="font-black text-xl text-white font-display tracking-tight">NGU <span className="text-emerald-400">LAUNCHPAD</span></div>
-            <div className="text-xs font-mono text-slate-400 mt-1">Number go up: the collection is its own market. Every buy mints on a rising curve; every sell burns and redeems from the reserve.</div>
+            <div className="text-xs font-mono text-slate-400 mt-1">Tokens on a bonding curve: buys mint at a rising price, sells burn and redeem from the reserve.</div>
           </div>
-          <button onClick={() => { setRefreshing(true); load(); }} className="p-2 rounded-xl bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white cursor-pointer" title="Refresh">
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+          <button onClick={() => { setRefreshing(true); load(); }} className="p-2 rounded-xl bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400" title="Refresh" aria-label="Refresh tokens">
+            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
           </button>
         </div>
-        <div className="mt-3 flex items-start gap-2 text-[11px] font-mono text-slate-500">
-          <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-slate-600" />
-          <span>The contract guarantees the mint price and the redemption floor never decrease, on the primary curve only. If a token also trades on a DEX, that price can deviate. Each card shows the worst case for buying then selling straight back, worked out from the curve's live reserve and supply.</span>
-        </div>
+        <Disclosure label={<span className="inline-flex items-center gap-1"><Info className="w-3 h-3" aria-hidden="true" /> What "max instant loss" means</span>} className="mt-3">
+          <p>The contract guarantees the mint price and the redemption floor never decrease, on the primary curve only. If a token also trades on a DEX, that price can deviate. Each card shows the worst case for buying then selling straight back, worked out from the curve's live reserve and supply.</p>
+        </Disclosure>
       </div>
 
       {(!launcher || launcher === ZERO) ? (
         <div className="rounded-2xl bg-[#0b0e17] border border-amber-500/30 p-6 text-center">
           <AlertTriangle className="w-6 h-6 text-amber-400 mx-auto mb-2" />
           <div className="font-bold text-white">NGU launcher not deployed yet</div>
-          <div className="text-xs font-mono text-slate-400 mt-1">Contracts are built and tested (20/20). Once the launcher deploys, this page lights up — launch with zero fee, trade on the curve.</div>
+          <div className="text-xs font-mono text-slate-400 mt-1">Launching and trading open here once it is deployed.</div>
         </div>
       ) : (<>
         {!wallet.connected && (

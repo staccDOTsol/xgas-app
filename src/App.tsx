@@ -27,6 +27,17 @@ type AppTab = 'mcp' | 'otc' | 'ngu' | 'robinhood';
 // /robinhood (and anything under it) is the X Money dollars <-> ETH desk on Robinhood Chain. The Express catch-all
 // serves index.html for it, so the path alone decides the tab on load and on back/forward.
 const isRobinhoodPath = () => typeof window !== 'undefined' && /^\/robinhood(\/|$)/i.test(window.location.pathname);
+// Every tab is a real URL, so a link (or a bot's instructions) can land someone on the right screen:
+// /mcp, /ngu, /robinhood, and /otc (the desk writes its own sub-paths such as /fomo3d or /order/:id).
+const TAB_PATHS: Record<AppTab, string> = { otc: '/otc', mcp: '/connector', ngu: '/ngu', robinhood: '/robinhood' };
+const tabFromPath = (): AppTab => {
+  if (typeof window === 'undefined') return 'otc';
+  if (isRobinhoodPath()) return 'robinhood';
+  const first = window.location.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+  if (first === 'mcp' || first === 'connector') return 'mcp';
+  if (first === 'ngu' || first === 'launchpad') return 'ngu';
+  return 'otc';
+};
 
 function shortChainLabel(id: number): string {
   if (id === L4_CHAIN_ID) return 'L4';
@@ -55,27 +66,21 @@ export default function App() {
   const [tab, setTabState] = useState<AppTab>(() => {
     // Back from Sign in with X: put a parked /robinhood/order/:id or /robinhood/trade/:id link back before anything reads the path.
     restoreRobinhoodReturn();
-    return isRobinhoodPath() ? 'robinhood' : 'otc';
+    return tabFromPath();
   });
   // The desk tab owns /robinhood; every other tab lives under '/' (the OTC desk then writes its own sub-path).
   // The tab is also kept in history.state (appTab) so back/forward returns to MCP or NGU, not just the OTC desk.
   const setTab = (next: AppTab) => {
     if (next === tab) return;
-    if (next === 'robinhood') {
-      if (!isRobinhoodPath()) {
-        window.history.replaceState({ ...(window.history.state || {}), appTab: tab }, '');
-        window.history.pushState({ appTab: 'robinhood' }, '', '/robinhood');
-      }
-    } else if (isRobinhoodPath()) {
-      window.history.pushState({ appTab: next }, '', '/');
-    } else {
-      window.history.replaceState({ ...(window.history.state || {}), appTab: next }, '');
+    if (tabFromPath() !== next) {
+      window.history.replaceState({ ...(window.history.state || {}), appTab: tab }, '');
+      window.history.pushState({ appTab: next }, '', TAB_PATHS[next]);
     }
     setTabState(next);
   };
-  // A direct visit to /robinhood lands on the desk, not on the hero above it.
+  // A direct visit to any tab URL lands on that tab, not on the hero above it.
   useEffect(() => {
-    if (!isRobinhoodPath()) return;
+    if (typeof window === 'undefined' || window.location.pathname === '/') return;
     requestAnimationFrame(() => {
       const el = document.getElementById('play');
       if (!el) return;
@@ -85,12 +90,7 @@ export default function App() {
     });
   }, []);
   useEffect(() => {
-    const onPop = (e: PopStateEvent) => {
-      if (isRobinhoodPath()) { setTabState('robinhood'); return; }
-      const saved = e.state?.appTab as AppTab | undefined;
-      if (saved && saved !== 'robinhood') setTabState(saved);
-      else setTabState(prev => (prev === 'robinhood' ? 'otc' : prev));
-    };
+    const onPop = () => { setTabState(tabFromPath()); };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
@@ -352,11 +352,11 @@ export default function App() {
                 <span className="font-black text-lg sm:text-xl text-white font-display tracking-tight">
                   XMONEY<span className="text-emerald-400"> ORBIT</span>
                 </span>
-                <span className="hidden sm:inline px-1.5 py-0.5 rounded text-[10px] font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-mono">
-                  L4 #{L4_CHAIN_ID}
-                </span>
-                <span className="hidden sm:inline px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#121624] text-slate-400 border border-[#1e2538] font-mono">
-                  settles on Robinhood #{L3_CHAIN_ID}
+                <span
+                  className="hidden sm:inline px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#121624] text-slate-400 border border-[#1e2538] font-mono cursor-help"
+                  title={`xgas Orbit L4, chain #${L4_CHAIN_ID}. Settles on Robinhood Chain, #${L3_CHAIN_ID}. Full details on the Specs tab.`}
+                >
+                  L4 on Robinhood Chain
                 </span>
               </div>
             </div>
@@ -442,10 +442,10 @@ export default function App() {
             <button
               onClick={handleImportToken}
               className="flex px-3 py-1.5 rounded-xl bg-[#121624] hover:bg-[#1a2033] border border-[#1e2538] text-xs font-mono font-bold text-slate-300 items-center gap-1.5 transition-colors cursor-pointer"
-              title={`Import the L3 $xMoney claim token (${CONTRACT_ADDRESSES.XMONEY_USD_L3}) into Rabby / MetaMask`}
+              title={`Show the $xMoney ERC-20 on Robinhood Chain (${CONTRACT_ADDRESSES.XMONEY_USD_L3}) in Rabby / MetaMask. This is what withdrawals from the L4 arrive as.`}
             >
               {tokenImported ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Plus className="w-3.5 h-3.5 text-cyan-400" />}
-              <span>{tokenImported ? 'Imported!' : '+ L3 $xMoney claim'}</span>
+              <span>{tokenImported ? 'Imported!' : '+ $xMoney on Robinhood'}</span>
             </button>
 
             <button
