@@ -52,7 +52,9 @@
     ],
     "xgasDevBuyback": "0x6067E608d1e0C4a67d406447FaA42a7C7452f7F8",
     "xgasDev": "0x006D2D9e65f847e8B5f5053C9eb3a7824ec7dFa3",
-    "earlyDepositor": "0x36e52831ba473e9374bad7cc22ed942a99b4d431"
+    "earlyDepositor": "0x36e52831ba473e9374bad7cc22ed942a99b4d431",
+    "otcArbitration": "0x16BCd95b5eB685DfaA04295462564d56979f35b4",
+    "robinhoodOtc": "0x534df478ea378C1B4A596a10f8d3b5659486a8Cb"
   },
   "l4": {
     "escrow": "0x842E6904e4eB64d5957CC2E9Eb640A9a8C006754",
@@ -64,7 +66,13 @@
     "validatorFeeSplitter": "0xa924c725b64cc346f275269efa4bd0538cfba97e",
     "arbSys": "0x0000000000000000000000000000000000000064",
     "nodeInterface": "0x00000000000000000000000000000000000000C8",
-    "fomoRetiredNoJackpotFallback": "0xB907c064FCD431FC01c76CEF06d5fDC78dB409F1"
+    "fomoRetiredNoJackpotFallback": "0xB907c064FCD431FC01c76CEF06d5fDC78dB409F1",
+    "entryPoint": "0x78546FE8666E4fD4b67C764cdEa7619C6037B870",
+    "simpleAccountFactory": "0xf13ad263AB0F4Cd007a933B449C1d6Cf80B23195",
+    "xgasDevPaymaster": "0x3f484cdf443A0bDa9c0993e0d4BA1024B4c1CE64",
+    "xgasDevPaymasterDeployBlock": 25,
+    "altoPimlicoSimulations": "0xa16fdef4d58d6428835c3759e2652b3c3488d84c",
+    "altoEntryPointSimulations07": "0x7eb803a33222e5969b40b35f31f7ba14de44da3a"
   },
   "legacy466301": {
     "status": "retired: old inbox paused on Robinhood, holders refunded in USDG. Kept only so withdrawals started on 466301 can still be tracked and claimed on its Outbox.",
@@ -106,5 +114,35 @@
         "nguLauncher": "0xEA2cE320B5CDbF14bc734FeB60c78097e146f1B0"
       }
     }
+  },
+  "xswap": {
+    "intents": "0x5D78651C728c15b715d5f6727bE40C1c3a02B53d",
+    "asks": "0xa999BC26e184b83CECb3cF5b9640C438C5aDc8a3",
+    "owner": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "treasury": "0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8",
+    "chainId": 4663,
+    "enabled": true,
+    "retiredV1": {
+      "intents": [
+        "0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35",
+        "0x3d4428cB247792e9183332c95A6A3C37b89E8301"
+      ],
+      "asks": "0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13",
+      "reason": "owner is forge-std DEFAULT_SENDER (no key): disputes unresolvable"
+    }
+  },
+  "fireball": {
+    "status": "live",
+    "active": true,
+    "fanout": "0x0a87Da84277232720e0908CC7470e3A7f925748f",
+    "parentForwarder": "0x44a0438e85C3947C369B1B8A7D9991741040A7FF",
+    "l4": {
+      "fanoutSink": "0x4ca8826FBb7F69F55B858485313eAC56a1b4F458",
+      "escrow": "0xf8Dbd439A994ff913509e68085B2ED3deC94c26A",
+      "fomo": "0xDefE7c5e5B36B964894e931A83768083B040ad62",
+      "router": "0x82334088CB47E95eFaB8D65591157190Ac40e00A",
+      "nguLauncher": "0x9e9BC96c318996b4DC147069E1Ed17d828245e53"
+    },
+    "note": "Current generation of the L4 desk contracts (new rewards). When active, the site and the MCP post new orders, keys and launches here; the l4.* originals stay readable for existing positions."
   }
 }

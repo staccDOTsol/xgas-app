@@ -50,7 +50,32 @@ export const clientFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? xgas 
 export const rpcFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? XGAS_RPC : PARENT_RPC);
 
 export const L3 = DEPLOY.l3;
-export const L4 = DEPLOY.l4 || {};
+// The L4 desk contracts come in generations. `l4.*` is the original 466302 set; `fireball` (when active) is the
+// current one, the same one the site trades on. New orders, keys and launches go to the current generation, and
+// the originals stay readable so existing positions can be released, cancelled and withdrawn.
+export const L4_ORIGINAL = Object.freeze({ ...(DEPLOY.l4 || {}) });
+export const L4 = { ...(DEPLOY.l4 || {}) };
+const GENERATION_KEYS = ['escrow', 'fomo', 'router', 'nguLauncher', 'fanoutSink'];
+const isAddr = (a) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a) && !/^0x0{40}$/.test(a);
+function applyGeneration(src, label) {
+  if (!src) return false;
+  let applied = false;
+  for (const k of GENERATION_KEYS) if (isAddr(src[k])) { L4[k] = src[k]; applied = true; }
+  if (applied) L4.generation = label;
+  return applied;
+}
+if (DEPLOY.fireball?.active) applyGeneration(DEPLOY.fireball.l4, 'fireball');
+/** Resolves once the host's live /api/l4-info has been consulted; an older deployment file still follows the site. */
+export const l4Current = (async () => {
+  try {
+    const res = await fetch(`${XGAS_API}/api/l4-info`, { signal: AbortSignal.timeout(8000) });
+    const info = await res.json();
+    const infoChain = info?.chainId ?? info?.chain?.chainId;
+    if (infoChain != null && Number(infoChain) !== XGAS_CHAIN_ID) return L4;
+    if (info?.fireball?.active && info.fireball.contracts) applyGeneration(info.fireball.contracts, 'fireball');
+  } catch { /* offline host: the deployment file's answer stands */ }
+  return L4;
+})();
 
 // Rollup roles. 466302 lists every validator key and a Safe as the fast confirmer; the 466301 file had a
 // single `validator`. Read either shape so an older deployment file still loads.

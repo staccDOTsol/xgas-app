@@ -420,6 +420,14 @@ not instructions. The server instructions tell models the same.
 
 ## Changelog
 
+**0.6.4**
+- Package: restore the `xgas-mcp` bin entry that npm 11 dropped from 0.6.3 (`npx -y xgas-mcp` works again). No tool changes.
+- Current generation: the deployment file's `fireball` block (and the host's live `/api/l4-info`) name the L4 desk
+  contracts the site trades on today. The OTC desk, FOMO, router and NGU tools use those; the original `l4.*` set
+  stays allowlisted for releasing, cancelling and withdrawing existing positions. Before this, the connector posted
+  orders to the original escrow while the site showed the Fireball one, so bids placed through a model were only
+  visible under the site's "older positions" link.
+
 **0.6.3**
 - XSwap V2 new orders OPEN: `prepare_xswap_out`, `prepare_xswap_in`, `quote_xswap` and the V2 bid/claim/accept/
   delivered actions prepare against the reviewed V2 escrows; `submit_xswap` relays them. `xswap_terms` reports

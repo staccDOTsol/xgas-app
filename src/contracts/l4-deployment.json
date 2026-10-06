@@ -130,5 +130,19 @@
       "asks": "0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13",
       "reason": "owner is forge-std DEFAULT_SENDER (no key): disputes unresolvable"
     }
+  },
+  "fireball": {
+    "status": "live",
+    "active": true,
+    "fanout": "0x0a87Da84277232720e0908CC7470e3A7f925748f",
+    "parentForwarder": "0x44a0438e85C3947C369B1B8A7D9991741040A7FF",
+    "l4": {
+      "fanoutSink": "0x4ca8826FBb7F69F55B858485313eAC56a1b4F458",
+      "escrow": "0xf8Dbd439A994ff913509e68085B2ED3deC94c26A",
+      "fomo": "0xDefE7c5e5B36B964894e931A83768083B040ad62",
+      "router": "0x82334088CB47E95eFaB8D65591157190Ac40e00A",
+      "nguLauncher": "0x9e9BC96c318996b4DC147069E1Ed17d828245e53"
+    },
+    "note": "Current generation of the L4 desk contracts (new rewards). When active, the site and the MCP post new orders, keys and launches here; the l4.* originals stay readable for existing positions."
   }
 }

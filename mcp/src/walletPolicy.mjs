@@ -20,7 +20,7 @@
 import fs from 'fs';
 import path from 'path';
 import { decodeFunctionData, formatUnits, getAddress, isAddress, parseAbi, parseAbiItem } from 'viem';
-import { PARENT_CHAIN_ID, XGAS_CHAIN_ID, L3, L4, EARLY_DEPOSITOR, XSWAP, ZERO, XGAS_API, parent, xgas, nguLauncher } from './config.mjs';
+import { PARENT_CHAIN_ID, XGAS_CHAIN_ID, L3, L4, L4_ORIGINAL, EARLY_DEPOSITOR, XSWAP, ZERO, XGAS_API, parent, xgas, nguLauncher } from './config.mjs';
 import {
   ERC20_ABI, VAULT_ABI, EARLY_DEPOSITOR_ABI, ARBSYS_ABI, ESCROW_ABI, NGU_TOKEN_ABI, NGU_LAUNCHER_ABI, XSWAP_INTENTS_ABI, XSWAP_ASKS_ABI,
 } from './abis.mjs';
@@ -81,6 +81,14 @@ export function staticAllowlist() {
   add(X, L4.router, 'xGas router', 'router');
   add(X, L4.fomo, 'FOMO', 'fomo');
   add(X, L4.nguLauncher, 'NGU launcher', 'nguLauncher');
+  // The original generation stays allowlisted so existing positions there can still be released, cancelled,
+  // claimed and withdrawn; new orders, keys and launches go to the current generation above.
+  if (L4.generation) {
+    for (const [k, label] of [['escrow', 'xGas OTC escrow (original)'], ['router', 'xGas router (original)'],
+      ['fomo', 'FOMO (original)'], ['nguLauncher', 'NGU launcher (original)']]) {
+      if (L4_ORIGINAL[k] && L4_ORIGINAL[k].toLowerCase() !== String(L4[k]).toLowerCase()) add(X, L4_ORIGINAL[k], label, `${k}Original`);
+    }
+  }
   add(X, L4.xgasDevPaymaster, 'XGAS.DEV paymaster', 'paymaster');
   return out;
 }
