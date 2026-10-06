@@ -17,12 +17,27 @@ import { createPaymasterService, resolveConfig as resolvePaymasterConfig } from 
 import { enableApprovalPage, approvalStore, approvalView, decideApproval } from './mcp/src/walletApprovals.mjs';
 import { setEthUsdSource } from './mcp/src/walletPolicy.mjs';
 import { renderApprovalPage } from './server/approve/page.mjs';
+import { createSerialExecutor } from './server/keeper/serialized.mjs';
+import { createFireballFeeKeeper, FIREBALL_MIN_FLUSH } from './server/keeper/fireball.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // The single source of truth for every address: written by the Orbit deployment, committed to the repo.
 const DEPLOY = JSON.parse(fs.readFileSync(path.join(__dirname, 'src', 'contracts', 'l4-deployment.json'), 'utf8'));
+// Additive successor manifest. Historical contract addresses above remain the
+// source for old order/round/Outbox claims after a future Fireball cutover.
+const FIREBALL_DEPLOY = JSON.parse(fs.readFileSync(path.join(__dirname, 'src', 'contracts', 'fireball-relaunch.json'), 'utf8'));
+const fireballAddr = (v) => typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v) && v !== '0x0000000000000000000000000000000000000000';
+const FIREBALL_L4_CONFIGURED = FIREBALL_DEPLOY.parentChainId === 4663 && FIREBALL_DEPLOY.l4ChainId === 466302
+  && FIREBALL_DEPLOY.fanout?.toLowerCase() === '0x0a87da84277232720e0908cc7470e3a7f925748f'
+  && FIREBALL_DEPLOY.xMoney?.toLowerCase() === DEPLOY.l3.xMoney.toLowerCase()
+  && fireballAddr(FIREBALL_DEPLOY.parentForwarder)
+  && ['fanoutSink', 'escrow', 'fomo', 'router', 'nguLauncher'].every((k) => fireballAddr(FIREBALL_DEPLOY.l4?.[k]));
+const FIREBALL_L4_ACTIVE = FIREBALL_DEPLOY.active === true && FIREBALL_L4_CONFIGURED;
+const FIREBALL_OTC_ACTIVE = FIREBALL_L4_ACTIVE
+  && fireballAddr(FIREBALL_DEPLOY.robinhood?.otcArbitration)
+  && fireballAddr(FIREBALL_DEPLOY.robinhood?.robinhoodOtc);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -46,6 +61,13 @@ const L4_RPC_PUBLIC = DEPLOY.publicRpcUrl; // https://xgas.dev/rpc — the only 
 // The Fly secret is still named L2_EXECUTOR_KEY from before the L2->L3->L4 rename.
 // Accept either, so renaming the code does not silently switch the Outbox executor off.
 const L3_EXECUTOR_KEY = process.env.L3_EXECUTOR_KEY || process.env.L2_EXECUTOR_KEY || '';
+const FIREBALL_KEEPER_REQUESTED = process.env.FIREBALL_FEE_KEEPER_ENABLED === 'true';
+// Once the Fireball keeper is requested, every writer using this key (including
+// existing Outbox and buyback actions) must run on the same designated machine.
+const EXECUTOR_WRITER_ENABLED = !process.env.FLY_APP_NAME || !FIREBALL_KEEPER_REQUESTED
+  || (!!process.env.FIREBALL_FEE_KEEPER_MACHINE_ID && process.env.FIREBALL_FEE_KEEPER_MACHINE_ID === process.env.FLY_MACHINE_ID);
+const withL3Executor = createSerialExecutor();
+const withL4Executor = createSerialExecutor();
 
 // Off Fly only, XGAS_DATA_DIR_DEV points local test runs at a scratch directory so they never touch l4-data.
 const DATA_DIR = (!process.env.FLY_APP_NAME && process.env.XGAS_DATA_DIR_DEV)
@@ -82,6 +104,20 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
+});
+
+// ---------------------------------------------------------------------------
+// /api/quote -> the xgas router: a fork of Uniswap's routing-api (github.com/staccDOTsol/routing-api, on AWS).
+// One endpoint for same-chain pool routes, XSwap crosschain (X Money) and omni-peg crosschain (via=<claim>).
+// ---------------------------------------------------------------------------
+const ROUTER_URL = process.env.ROUTER_URL || 'https://xn644o3px9.execute-api.us-east-2.amazonaws.com/prod/quote';
+app.get(['/api/quote', '/quote'], async (req, res) => {
+  try {
+    const r = await fetch(`${ROUTER_URL}?${new URLSearchParams(req.query)}`, { headers: { 'x-universal-router-version': '2.0' }, signal: AbortSignal.timeout(25_000) });
+    res.status(r.status).type('application/json').send(await r.text());
+  } catch (e) {
+    res.status(502).json({ errorCode: 'ROUTER_UNREACHABLE', detail: String(e?.message || e).slice(0, 120) });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -126,7 +162,7 @@ function assertionSummary(c) {
 }
 app.get('/api/health', (_req, res) => {
   res.json({
-    ok: true, l4Ready: Date.now() - l4Head.at < 60_000, l4Head: l4Head.block, chainId: ORBIT_L4_CHAIN_ID, executor: !!L3_EXECUTOR_KEY,
+    ok: true, l4Ready: Date.now() - l4Head.at < 60_000, l4Head: l4Head.block, chainId: ORBIT_L4_CHAIN_ID, executor: !!L3_EXECUTOR_KEY && EXECUTOR_WRITER_ENABLED,
     latestConfirmedAssertion: assertionSummary(CURRENT.confirmed),
     legacy: LEGACY_CHAIN ? { chainId: LEGACY_CHAIN.chainId, latestConfirmedAssertion: assertionSummary(LEGACY_CHAIN.confirmed), lastError: LEGACY_CHAIN.lastError } : null,
   });
@@ -137,6 +173,7 @@ app.get('/api/l4-info', (_req, res) => {
     chainId: ORBIT_L4_CHAIN_ID, rpcPath: '/rpc', rpcUrl: L4_RPC_PUBLIC, wsUrl: DEPLOY.wsUrl,
     l3ChainId: L3_CHAIN_ID, vault: DEPLOY.l3.xMoney, ready: Date.now() - l4Head.at < 60_000, head: l4Head.block,
     contracts: DEPLOY.l4, l3: DEPLOY.l3,
+    fireball: { active: FIREBALL_L4_ACTIVE, contracts: FIREBALL_DEPLOY.l4, parentForwarder: FIREBALL_DEPLOY.parentForwarder },
     deployment: {
       createRollupTx: DEPLOY.createRollupTx, createdAt: DEPLOY.createdAt, deployedAtBlock: DEPLOY.deployedAtBlock, owner: DEPLOY.owner,
       batchPoster: DEPLOY.batchPoster, validator: DEPLOY.validator, validators: DEPLOY.validators || [DEPLOY.validator],
@@ -281,7 +318,7 @@ app.get('/api/withdrawals/:address', async (req, res) => {
         .map(w => ({ ...w, amount: formatEther(BigInt(w.callvalue)), chainId: c.chainId, legacy: c.legacy })));
     }
     // The top-level counts describe the current chain, as before; legacy entries carry chainId and legacy: true.
-    res.json({ chainId: CURRENT.chainId, confirmedSendCount: CURRENT.confirmed.count.toString(), confirmedL4Block: CURRENT.confirmed.l4Block ?? null, executorEnabled: !!L3_EXECUTOR_KEY,
+    res.json({ chainId: CURRENT.chainId, confirmedSendCount: CURRENT.confirmed.count.toString(), confirmedL4Block: CURRENT.confirmed.l4Block ?? null, executorEnabled: !!L3_EXECUTOR_KEY && EXECUTOR_WRITER_ENABLED,
       withdrawals: out });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -305,7 +342,7 @@ function findWithdrawal({ txHash, position, chainId }) {
 
 app.post('/api/withdrawals/execute', async (req, res) => {
   try {
-    if (!L3_EXECUTOR_KEY) return res.status(503).json({ error: 'Executor not configured on host; execute the Outbox claim from your own wallet.' });
+    if (!L3_EXECUTOR_KEY || !EXECUTOR_WRITER_ENABLED) return res.status(503).json({ error: 'Executor not configured on this host; execute the Outbox claim from your own wallet.' });
     const found = findWithdrawal(req.body || {});
     if (!found) return res.status(404).json({ error: 'Unknown withdrawal' });
     const { c, w } = found;
@@ -322,24 +359,58 @@ app.post('/api/withdrawals/execute', async (req, res) => {
 
 /** Execute a claimable L4 -> Robinhood send on that chain's Outbox with the host's executor key. */
 async function executeOutbox(c, w) {
-  const size = c.confirmed.count;
-  const proofRes = await c.client.readContract({ address: DEPLOY.l4.nodeInterface, abi: NODE_INTERFACE_ABI, functionName: 'constructOutboxProof', args: [size, BigInt(w.position)] });
-  const [, , proof] = proofRes;
-  const account = privateKeyToAccount(L3_EXECUTOR_KEY);
-  const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
-  const hash = await wallet.writeContract({
-    address: c.outbox, abi: OUTBOX_ABI, functionName: 'executeTransaction', chain: null,
-    args: [proof, BigInt(w.position), w.caller, w.destination, BigInt(w.arbBlockNum), BigInt(w.ethBlockNum), BigInt(w.timestamp), BigInt(w.callvalue), w.data],
+  return withL3Executor(async () => {
+    // API requests and both keepers can observe the same claimable withdrawal.
+    // Check again inside the signer queue before allocating a nonce.
+    const alreadySpent = await l3Client.readContract({ address: c.outbox, abi: OUTBOX_ABI, functionName: 'isSpent', args: [BigInt(w.position)] });
+    if (alreadySpent) {
+      w.status = 'executed'; saveWithdrawals(c);
+      return { hash: w.executedTx || null, ok: true, alreadyExecuted: true };
+    }
+    const size = c.confirmed.count;
+    const proofRes = await c.client.readContract({ address: DEPLOY.l4.nodeInterface, abi: NODE_INTERFACE_ABI, functionName: 'constructOutboxProof', args: [size, BigInt(w.position)] });
+    const [, , proof] = proofRes;
+    const account = privateKeyToAccount(L3_EXECUTOR_KEY);
+    const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
+    const hash = await wallet.writeContract({
+      address: c.outbox, abi: OUTBOX_ABI, functionName: 'executeTransaction', chain: null,
+      args: [proof, BigInt(w.position), w.caller, w.destination, BigInt(w.arbBlockNum), BigInt(w.ethBlockNum), BigInt(w.timestamp), BigInt(w.callvalue), w.data],
+    });
+    const rc = await l3Client.waitForTransactionReceipt({ hash });
+    if (rc.status !== 'success') return { hash, ok: false };
+    w.status = 'executed'; w.executedTx = hash; saveWithdrawals(c);
+    return { hash, ok: true };
   });
-  const rc = await l3Client.waitForTransactionReceipt({ hash });
-  if (rc.status !== 'success') return { hash, ok: false };
-  w.status = 'executed'; w.executedTx = hash; saveWithdrawals(c);
-  return { hash, ok: true };
 }
 
 const refreshAllConfirmed = () => Promise.all(CHAINS.map(refreshConfirmedSendCount));
 setInterval(refreshAllConfirmed, 15_000); refreshAllConfirmed();
 setInterval(scanAllWithdrawals, 10_000);
+
+// Claimable withdrawals are executed by the host on their own: once the assertion covering a send is confirmed
+// on Robinhood, nobody should have to press a button (or POST) for their X Money to land. One pass at a time,
+// through the same serialized executor as every other writer using this key.
+let autoClaimRunning = false;
+async function autoExecuteClaimable() {
+  if (autoClaimRunning || !L3_EXECUTOR_KEY || !EXECUTOR_WRITER_ENABLED) return;
+  autoClaimRunning = true;
+  try {
+    for (const c of CHAINS) {
+      if (c.confirmed.count === 0n) continue;
+      const due = Object.values(c.withdrawals).filter((w) => w.status !== 'executed' && BigInt(w.position) < c.confirmed.count);
+      for (const w of due) {
+        await withdrawalStatus(c, w);
+        if (w.status !== 'claimable') continue;
+        try {
+          const { hash, ok } = await executeOutbox(c, w);
+          console.log(`[withdrawals ${c.chainId}] auto-executed position ${w.position} (${formatEther(BigInt(w.callvalue))} xMoney -> ${w.destination}) ${ok ? hash : 'REVERTED ' + hash}`);
+        } catch (e) { chainError(c, `auto-execute position ${w.position}`, e); }
+      }
+      if (due.length) saveWithdrawals(c);
+    }
+  } finally { autoClaimRunning = false; }
+}
+setInterval(autoExecuteClaimable, 20_000);
 
 // ---------------------------------------------------------------------------
 // XGAS.DEV flywheel. Every L4 fee path sends 0.02% to the buyback FanoutSink. The keeper flushes that sink to
@@ -375,7 +446,7 @@ async function buybackBalances() {
 }
 
 async function runBuybackKeeper() {
-  if (!L3_EXECUTOR_KEY || !XGAS_BUYBACK || buybackKeeper.running) return;
+  if (!L3_EXECUTOR_KEY || !EXECUTOR_WRITER_ENABLED || !XGAS_BUYBACK || buybackKeeper.running) return;
   buybackKeeper.running = true;
   try {
     const account = privateKeyToAccount(L3_EXECUTOR_KEY);
@@ -383,9 +454,13 @@ async function runBuybackKeeper() {
     // 1. L4: push the sink's xMoney toward Robinhood.
     const pending = BUYBACK_SINK ? await l4Client.getBalance({ address: BUYBACK_SINK }) : 0n;
     if (BUYBACK_SINK && pending >= BUYBACK_FLUSH_MIN) {
-      const l4Wallet = createWalletClient({ account, transport: viemHttp(L4_RPC_INTERNAL) });
-      const hash = await l4Wallet.writeContract({ address: BUYBACK_SINK, abi: SINK_ABI, functionName: 'flush', chain: null });
-      await l4Client.waitForTransactionReceipt({ hash });
+      const hash = await withL4Executor(async () => {
+        const l4Wallet = createWalletClient({ account, transport: viemHttp(L4_RPC_INTERNAL) });
+        const tx = await l4Wallet.writeContract({ address: BUYBACK_SINK, abi: SINK_ABI, functionName: 'flush', chain: null });
+        const rc = await l4Client.waitForTransactionReceipt({ hash: tx });
+        if (rc.status !== 'success') throw new Error(`buyback sink flush reverted: ${tx}`);
+        return tx;
+      });
       buybackKeeper.lastFlushTx = hash;
       console.log(`[buyback] flushed ${formatEther(pending)} xMoney from the L4 sink: ${hash}`);
     }
@@ -407,9 +482,12 @@ async function runBuybackKeeper() {
     if (xMoney >= 10n ** 16n || usdg >= 10_000n || eth >= 10n ** 13n) {
       const { result } = await l3Client.simulateContract({ account, address: XGAS_BUYBACK, abi: BUYBACK_ABI, functionName: 'execute', args: [0n] });
       const minOut = (result * (10_000n - BUYBACK_SLIPPAGE_BPS)) / 10_000n;
-      const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
-      const hash = await wallet.writeContract({ address: XGAS_BUYBACK, abi: BUYBACK_ABI, functionName: 'execute', args: [minOut], chain: null });
-      const rc = await l3Client.waitForTransactionReceipt({ hash });
+      const { hash, rc } = await withL3Executor(async () => {
+        const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
+        const hash = await wallet.writeContract({ address: XGAS_BUYBACK, abi: BUYBACK_ABI, functionName: 'execute', args: [minOut], chain: null });
+        const rc = await l3Client.waitForTransactionReceipt({ hash });
+        return { hash, rc };
+      });
       buybackKeeper.lastBurnTx = hash;
       console.log(`[buyback] ${rc.status === 'success' ? 'burned' : 'REVERTED, simulated'} ~${formatEther(result)} XGAS.DEV: ${hash}`);
     }
@@ -424,6 +502,92 @@ async function runBuybackKeeper() {
 }
 setInterval(runBuybackKeeper, Number(process.env.BUYBACK_INTERVAL_MS || 5 * 60_000));
 setTimeout(runBuybackKeeper, 30_000);
+
+// ---------------------------------------------------------------------------
+// Fireball L4 product fees. This is independent of public creation: it can be
+// enabled after deployments while the new UI remains closed. Fly requires one
+// explicit keeper machine, so horizontal replicas cannot race the same wallet.
+// Existing buyback and user Outbox calls share the per-chain signer queues above.
+// ---------------------------------------------------------------------------
+const FIREBALL_KEEPER_ENABLED = FIREBALL_KEEPER_REQUESTED && FIREBALL_L4_CONFIGURED
+  && !!L3_EXECUTOR_KEY && EXECUTOR_WRITER_ENABLED;
+const FIREBALL_FORWARDER_ABI = parseAbi([
+  'function xMoney() view returns (address)',
+  'function fanout() view returns (address)',
+  'function forward() returns (uint256 sent, uint256 credited)',
+]);
+const FIREBALL_FANOUT_ABI = parseAbi(['function isAssetActive(address token) view returns (bool)']);
+const FIREBALL_SINK_ABI = parseAbi(['function fanout() view returns (address)']);
+const fireballFeeKeeper = createFireballFeeKeeper({
+  verifyWiring: async () => {
+    if (!FIREBALL_KEEPER_ENABLED) throw new Error('Fireball fee keeper is not enabled on this machine');
+    const [parentChain, l4Chain, token, fanout, sinkParent, assetActive] = await Promise.all([
+      l3Client.getChainId(), l4Client.getChainId(),
+      l3Client.readContract({ address: FIREBALL_DEPLOY.parentForwarder, abi: FIREBALL_FORWARDER_ABI, functionName: 'xMoney' }),
+      l3Client.readContract({ address: FIREBALL_DEPLOY.parentForwarder, abi: FIREBALL_FORWARDER_ABI, functionName: 'fanout' }),
+      l4Client.readContract({ address: FIREBALL_DEPLOY.l4.fanoutSink, abi: FIREBALL_SINK_ABI, functionName: 'fanout' }),
+      l3Client.readContract({ address: FIREBALL_DEPLOY.fanout, abi: FIREBALL_FANOUT_ABI, functionName: 'isAssetActive', args: [FIREBALL_DEPLOY.xMoney] }),
+    ]);
+    if (parentChain !== 4663 || l4Chain !== 466302
+      || token.toLowerCase() !== FIREBALL_DEPLOY.xMoney.toLowerCase()
+      || fanout.toLowerCase() !== FIREBALL_DEPLOY.fanout.toLowerCase()
+      || sinkParent.toLowerCase() !== FIREBALL_DEPLOY.parentForwarder.toLowerCase()
+      || !assetActive) throw new Error('Fireball fee route has wrong chain, wiring, or inactive xMoney asset');
+  },
+  sinkBalance: () => l4Client.getBalance({ address: FIREBALL_DEPLOY.l4.fanoutSink }),
+  flush: () => withL4Executor(async () => {
+    const balance = await l4Client.getBalance({ address: FIREBALL_DEPLOY.l4.fanoutSink });
+    if (balance < FIREBALL_MIN_FLUSH) return null;
+    const account = privateKeyToAccount(L3_EXECUTOR_KEY);
+    const wallet = createWalletClient({ account, transport: viemHttp(L4_RPC_INTERNAL) });
+    const hash = await wallet.writeContract({ address: FIREBALL_DEPLOY.l4.fanoutSink, abi: SINK_ABI, functionName: 'flush', chain: null });
+    const rc = await l4Client.waitForTransactionReceipt({ hash });
+    if (rc.status !== 'success') throw new Error(`Fireball L4 sink flush reverted: ${hash}`);
+    console.log(`[fireball fees] L4 sink flushed ${formatEther(balance)} xMoney: ${hash}`);
+    return hash;
+  }),
+  scanWithdrawals: async () => { await scanWithdrawals(CURRENT); await refreshConfirmedSendCount(CURRENT); },
+  forwarderWithdrawals: async () => Object.values(CURRENT.withdrawals).filter(w =>
+    w.destination.toLowerCase() === FIREBALL_DEPLOY.parentForwarder.toLowerCase() && w.status !== 'executed'),
+  isClaimable: async w => (await withdrawalStatus(CURRENT, w)).status === 'claimable',
+  executeOutbox: async w => {
+    const { hash, ok } = await executeOutbox(CURRENT, w);
+    if (!ok) throw new Error(`Fireball Outbox execution reverted: ${hash}`);
+    console.log(`[fireball fees] Outbox delivered ${formatEther(BigInt(w.callvalue))} xMoney: ${hash || 'already spent'}`);
+    return hash;
+  },
+  forwarderBalance: () => l3Client.readContract({
+    address: FIREBALL_DEPLOY.xMoney, abi: ERC20_BALANCE_ABI, functionName: 'balanceOf', args: [FIREBALL_DEPLOY.parentForwarder],
+  }),
+  forward: () => withL3Executor(async () => {
+    const amount = await l3Client.readContract({ address: FIREBALL_DEPLOY.xMoney, abi: ERC20_BALANCE_ABI, functionName: 'balanceOf', args: [FIREBALL_DEPLOY.parentForwarder] });
+    if (amount === 0n) return null;
+    const account = privateKeyToAccount(L3_EXECUTOR_KEY);
+    await l3Client.simulateContract({ account, address: FIREBALL_DEPLOY.parentForwarder, abi: FIREBALL_FORWARDER_ABI, functionName: 'forward' });
+    const wallet = createWalletClient({ account, transport: viemHttp(L3_RPC) });
+    const hash = await wallet.writeContract({ address: FIREBALL_DEPLOY.parentForwarder, abi: FIREBALL_FORWARDER_ABI, functionName: 'forward', chain: null });
+    const rc = await l3Client.waitForTransactionReceipt({ hash });
+    if (rc.status !== 'success') throw new Error(`Fireball fee forward reverted: ${hash}`);
+    console.log(`[fireball fees] forwarded delivered xMoney to product ledger: ${hash}`);
+    return hash;
+  }),
+});
+if (FIREBALL_KEEPER_REQUESTED && !FIREBALL_KEEPER_ENABLED) {
+  console.warn('[fireball fees] keeper requested but inactive: check successor addresses, executor key, and designated Fly machine');
+}
+if (FIREBALL_KEEPER_ENABLED) {
+  const run = () => fireballFeeKeeper.run().then(s => {
+    if (s.lastError) console.warn('[fireball fees] keeper error:', s.lastError);
+  });
+  setInterval(run, Number(process.env.FIREBALL_FEE_KEEPER_INTERVAL_MS || 5 * 60_000));
+  setTimeout(run, 60_000);
+}
+app.get('/api/fireball/fees', (_req, res) => {
+  res.json({ configured: FIREBALL_L4_CONFIGURED, publicActive: FIREBALL_L4_ACTIVE,
+    keeperRequested: FIREBALL_KEEPER_REQUESTED, keeperOnThisMachine: FIREBALL_KEEPER_ENABLED,
+    forwarder: FIREBALL_DEPLOY.parentForwarder, sink: FIREBALL_DEPLOY.l4?.fanoutSink,
+    state: fireballFeeKeeper.state });
+});
 
 app.get('/api/buyback', async (_req, res) => {
   if (!XGAS_BUYBACK) return res.json({ live: false });
@@ -443,7 +607,7 @@ app.get('/api/buyback', async (_req, res) => {
       xgasBurned: formatEther(burned), xgasSupply: formatEther(xgasSupply),
       usdgSpent: (Number(usdgSpent) / 1e6).toString(), ethSpent: formatEther(ethSpent), xMoneyRedeemed: formatEther(xMoneyRedeemed),
       pending: { l4Sink: formatEther(onL4), inOutbox: formatEther(inFlight), xMoney: formatEther(onRobinhood.xMoney), usdg: (Number(onRobinhood.usdg) / 1e6).toString(), eth: formatEther(onRobinhood.eth) },
-      keeper: { enabled: !!L3_EXECUTOR_KEY, address: L3_EXECUTOR_KEY ? privateKeyToAccount(L3_EXECUTOR_KEY).address : null, lastRun: buybackKeeper.lastRun, lastFlushTx: buybackKeeper.lastFlushTx, lastBurnTx: buybackKeeper.lastBurnTx, lastError: buybackKeeper.lastError },
+      keeper: { enabled: !!L3_EXECUTOR_KEY && EXECUTOR_WRITER_ENABLED, address: L3_EXECUTOR_KEY ? privateKeyToAccount(L3_EXECUTOR_KEY).address : null, lastRun: buybackKeeper.lastRun, lastFlushTx: buybackKeeper.lastBurnTx, lastError: buybackKeeper.lastError },
     });
   } catch (e) { res.status(500).json({ error: e.shortMessage || e.message }); }
 });
@@ -1317,6 +1481,12 @@ async function otcInfoBody() {
     rpcUrl: ROBINHOOD_PUBLIC_RPC,
     weth: ROBINHOOD_WETH,
     feeFanout: ROBINHOOD_FEE_FANOUT,
+    fireballOtc: {
+      active: FIREBALL_OTC_ACTIVE,
+      otc: FIREBALL_DEPLOY.robinhood?.robinhoodOtc || null,
+      arbitration: FIREBALL_DEPLOY.robinhood?.otcArbitration || null,
+      feeFanout: FIREBALL_DEPLOY.fanout,
+    },
     params: otcParams(imm?.values, imm?.source),
     state: OTC_DEPLOYED ? {
       wired: imm ? imm.wired : null,

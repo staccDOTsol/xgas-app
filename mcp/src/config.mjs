@@ -138,7 +138,8 @@ export const XSWAP_LEGACY = {
 const XSWAP_LEGACY_SET = new Set([...XSWAP_LEGACY.intents, ...XSWAP_LEGACY.asks].map((a) => a.toLowerCase()));
 export const isXswapLegacy = (a) => XSWAP_LEGACY_SET.has(String(a || '').toLowerCase());
 // New V2 contracts are independent of legacy deployment.json and XSWAP_* environment overrides.
-// Funding/claim stays disabled until runtime pins and solver V2 far-delivery are reviewed.
+// New funding and claims opened 2026-10-06: runtime pins verified, the V2 solver (staccpad xswap-solver-v2.mjs)
+// reviewed and funded, and the fork lifecycle (mcp/scripts/xswap-v2-e2e.mjs) run against the deployed bytecode.
 export const XSWAP_V2 = {
   collector: '0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e',
   collectorRuntimeHash: '0xb0eb9674d60fbfe03eb1f26c2453ee2446433812ff9e0690fd7db8c89032633b',
@@ -148,7 +149,7 @@ export const XSWAP_V2 = {
   asksRuntimeHash: '0x998aca274594b99b203562e5c0b9a46aa6f5794b3bfbbee762afdb125bf1f557',
   expectedOwner: '0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158',
   treasury: '0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8',
-  enabled: false,
+  enabled: true,
 };
 const xswapIntents = process.env.XSWAP_INTENTS || XSWAP_FILE.intents || XSWAP_V1.intents;
 const xswapAsks = process.env.XSWAP_ASKS || XSWAP_FILE.asks || XSWAP_V1.asks;

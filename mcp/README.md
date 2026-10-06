@@ -63,7 +63,7 @@ Environment overrides, all optional:
 | `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
 | `XSWAP_INTENTS` | `xswap.intents` from the deployment, else v1 `0xf8B4…9a35` (paused) | the X-Money-in escrow on the parent chain |
 | `XSWAP_ASKS` | `xswap.asks` from the deployment, else v1 `0x0a33…Cd13` (paused) | the X-Money-out escrow on the parent chain |
-| `XSWAP_ENABLED` | ignored for the known legacy escrows | A host flag cannot re-enable fee-free legacy funding or V2 orders. V2 needs a reviewed source change after solver delivery checks. |
+| `XSWAP_ENABLED` | ignored for the known legacy escrows | A host flag cannot re-enable fee-free legacy funding. V2 new orders are a source gate (`XSWAP_V2.enabled`), open since 0.6.3. |
 | `XSWAP_OWNER` | `xswap.owner` from the deployment | the owner new swaps require `owner()` to equal on both escrows |
 
 ## Chain 466302
@@ -121,7 +121,7 @@ its exits and Outbox claims keep working, and the deployment file keeps its addr
 
 ## XSwap: X Money in, anything out
 
-**V2 transition (October 2026):** The reviewed Robinhood V2 collector is `0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e`; its intents and asks escrows are `0xdf6398ff5a694a03d85a614812490143c4e5d238` and `0x2f507a18043002d8f5d6d3022efd6265be7a87fc`. The connector verifies their runtime hashes, owner, collector link and live terms before a V2 preparation. New V2 funding and claims remain source-gated off until the solver's V2 bid and far-chain delivery have been reviewed. The current 5D/a999 and retired f8/0a escrows remain readable; refund, cancel, settle, confirm and per-contract withdrawal can be prepared for existing orders. Legacy open, ask, bid and claim transactions, including approval to a legacy escrow through `submit_xswap`, are refused. `quote_xswap` now treats its entered X Money amount as the gross wallet debit cap and shows the 1 bp transfer burn, 10 bp site fee and 50 bp protocol fee. `prepare_xswap_action action=withdraw` accepts `contract` to pull credit from a specific known escrow.
+**V2 transition (October 2026):** The reviewed Robinhood V2 collector is `0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e`; its intents and asks escrows are `0xdf6398ff5a694a03d85a614812490143c4e5d238` and `0x2f507a18043002d8f5d6d3022efd6265be7a87fc`. The connector verifies their runtime hashes, owner, collector link and live terms before a V2 preparation. **New V2 orders are open since 2026-10-06**: `prepare_xswap_out` and `prepare_xswap_in` prepare V2 site-fee orders (10 bp of the winning solver ask, charged only at settlement), and `prepare_xswap_action` bids, claims, accepts and delivers on them. The solver network fills X Money → native ETH on Base today (10 X Money per order, 50 per UTC day); other routes wait for a solver to bid and refund after the deadline if none does. The gate is `XSWAP_V2.enabled` in `src/config.mjs`, opened after the V2 solver review and the fork lifecycle run (`npm run e2e:v2`). The current 5D/a999 and retired f8/0a escrows remain readable; refund, cancel, settle, confirm and per-contract withdrawal can be prepared for existing orders. Legacy open, ask, bid and claim transactions, including approval to a legacy escrow through `submit_xswap`, are refused. `quote_xswap` now treats its entered X Money amount as the gross wallet debit cap and shows the 1 bp transfer burn, 10 bp site fee and 50 bp protocol fee. `prepare_xswap_action action=withdraw` accepts `contract` to pull credit from a specific known escrow.
 
 `quote_xswap` and `prepare_xswap_out` escrow X Money against an order (chain, asset, amount, recipient) hashed the way every solver hashes it. Solvers bid the price down,
 the lowest ask wins, and whatever the bidding saves comes back to the payer as credit.
@@ -419,6 +419,11 @@ not instructions. The server instructions tell models the same.
 | `MCP_AUTH_TOKEN` | operator token for our own tooling; users use their X sign-in instead |
 
 ## Changelog
+
+**0.6.3**
+- XSwap V2 new orders OPEN: `prepare_xswap_out`, `prepare_xswap_in`, `quote_xswap` and the V2 bid/claim/accept/
+  delivered actions prepare against the reviewed V2 escrows; `submit_xswap` relays them. `xswap_terms` reports
+  `new_swaps_open` and `v2.new_orders_open` from the live runtime verification. Legacy escrows stay exit-only.
 
 **0.6.2**
 - Agent wallet: NGU curves someone else launched are no longer allowlisted. Buys on them need the owner

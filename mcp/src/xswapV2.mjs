@@ -123,5 +123,5 @@ export async function verifyXSwapV2() {
 }
 
 export function assertXSwapV2NewOrdersEnabled() {
-  if (!XSWAP_V2.enabled) throw new Error('XSwap V2 new funding and claims are paused until the V2 solver and far delivery are reviewed. No transaction was prepared.');
+  if (!XSWAP_V2.enabled) throw new Error('XSwap V2 new funding and claims are paused on this build (XSWAP_V2.enabled is false in mcp/src/config.mjs). No transaction was prepared.');
 }

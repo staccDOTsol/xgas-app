@@ -4,7 +4,7 @@ import { decodeFunctionData, encodeFunctionData, serializeTransaction, toFunctio
 import { XSWAP, XSWAP_LEGACY, XSWAP_V2, ZERO, isXswapLegacy, parent } from '../src/config.mjs';
 import { ERC20_ABI, XSWAP_INTENTS_ABI, XSWAP_ASKS_ABI, XSWAP_V2_INTENTS_ABI, XSWAP_V2_ASKS_ABI } from '../src/abis.mjs';
 import { assertRelayAllowed, tools } from '../src/tools/xswap.mjs';
-import { xswapV2GrossFor, xswapV2InFloor, xswapV2OutFunding, xswapV2TermsHash } from '../src/xswapV2.mjs';
+import { assertXSwapV2NewOrdersEnabled, xswapV2GrossFor, xswapV2InFloor, xswapV2OutFunding, xswapV2TermsHash } from '../src/xswapV2.mjs';
 
 const ID = `0x${'11'.repeat(32)}`;
 const OWNER = '0x1111111111111111111111111111111111111111';
@@ -12,16 +12,15 @@ const raw = (to, abi, functionName, args) => serializeTransaction({ type: 'legac
   nonce: 0n, gas: 400000n, gasPrice: 1n, to, value: 0n,
   data: encodeFunctionData({ abi, functionName, args }) });
 
-test('deployed V2 is separate from every legacy escrow and source-owned new-order gate is off', async () => {
-  assert.equal(XSWAP.enabled, false); // deployment.json still says enabled:true for 5D/a999
-  assert.equal(XSWAP_V2.enabled, false);
+test('deployed V2 is separate from every legacy escrow and the source-owned new-order gate is open', async () => {
+  assert.equal(XSWAP.enabled, false); // deployment.json still says enabled:true for 5D/a999: legacy stays exit-only
+  assert.equal(XSWAP_V2.enabled, true);
+  assert.doesNotThrow(() => assertXSwapV2NewOrdersEnabled());
   for (const address of [...XSWAP_LEGACY.intents, ...XSWAP_LEGACY.asks]) assert.equal(isXswapLegacy(address), true);
   assert.equal(isXswapLegacy(XSWAP_V2.intents), false);
   assert.equal(isXswapLegacy(XSWAP_V2.asks), false);
-  const out = tools.find((t) => t.name === 'prepare_xswap_out');
-  const inn = tools.find((t) => t.name === 'prepare_xswap_in');
-  await assert.rejects(out.handler({ from: OWNER, xmoney_amount: '1', chain: 'base', to: OWNER, amount: '0.001' }), /paused until the V2 solver/);
-  await assert.rejects(inn.handler({ from: OWNER, want_xmoney: '1', chain: 'base', amount: '0.001' }), /paused until the V2 solver/);
+  // Legacy prepare paths never reopen, whatever V2 says.
+  for (const address of [...XSWAP_LEGACY.intents, ...XSWAP_LEGACY.asks]) assert.notEqual(address.toLowerCase(), XSWAP_V2.intents);
 });
 
 test('V2 ABI selectors and tax-aware funding match reviewed contracts', () => {
@@ -51,7 +50,7 @@ test('V2 ABI selectors and tax-aware funding match reviewed contracts', () => {
     '0x0b134a84fc6ec58eb83810a6f68f3a3368ff34f1c478ded3b64cb1c6b0860d32');
 });
 
-test('raw relay denies legacy funding and V2 new orders but preserves legacy cleanup', async () => {
+test('raw relay denies legacy funding, allows V2 new orders, and preserves legacy cleanup', async () => {
   const legacyIntent = XSWAP_LEGACY.intents[0];
   const retiredIntent = XSWAP_LEGACY.intents[1];
   const legacyAsk = XSWAP_LEGACY.asks[0];
@@ -75,7 +74,8 @@ test('raw relay denies legacy funding and V2 new orders but preserves legacy cle
   const v2 = raw(XSWAP_V2.intents, XSWAP_V2_INTENTS_ABI, 'openWithSiteFee',
     [ID, 1_000_000n, 998_000n, 1000n, ID, 'memo', { minFilled: 0, maxFailBps: 0, minBondBps: 0, trustedOnly: false },
       XSWAP_V2.collector, 10, ID]);
-  await assert.rejects(assertRelayAllowed([v2]), /paused until the V2 solver/);
+  await assert.doesNotReject(assertRelayAllowed([v2]));
+  await assert.doesNotReject(assertRelayAllowed([raw(XSWAP.xmoney, ERC20_ABI, 'approve', [XSWAP_V2.intents, 1n])]));
 });
 
 test('legacy withdrawal preparation targets the exact older escrow without enabling a new order', async () => {

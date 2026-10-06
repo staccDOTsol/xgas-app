@@ -263,8 +263,9 @@ const BURN_NOTE = XSWAP.v1
 
 /** Why new swaps are off, or null when the configuration allows them (the live owner check still follows). */
 function pausedReason() {
+  if (XSWAP_V2.enabled) return null; // new orders go to the reviewed V2 escrows; the legacy pair is exit-only
   if (XSWAP.v1) {
-    return `XSwap is paused for new swaps. The escrow contracts this connector points at (intents ${XSWAP.intents}, asks ${XSWAP.asks}, Robinhood Chain 4663) have owner() = ${FORGE_DEFAULT_SENDER}, forge-std's default sender, which no one holds a key for: their deploy script read msg.sender before it started broadcasting. Only the owner can resolve a dispute, so on these contracts a disputed swap would stay frozen forever, escrow and bond both. Reviewed V2 contracts are deployed, but new orders remain paused until the V2 solver and far delivery are reviewed.`;
+    return `XSwap is paused for new swaps. The escrow contracts this connector points at (intents ${XSWAP.intents}, asks ${XSWAP.asks}, Robinhood Chain 4663) have owner() = ${FORGE_DEFAULT_SENDER}, forge-std's default sender, which no one holds a key for: their deploy script read msg.sender before it started broadcasting. Only the owner can resolve a dispute, so on these contracts a disputed swap would stay frozen forever, escrow and bond both. `;
   }
   if (isXswapLegacy(XSWAP.intents) || isXswapLegacy(XSWAP.asks)) {
     return `New XSwap funding and claims are paused on the fee-free legacy escrows ${XSWAP.intents} and ${XSWAP.asks}. Existing orders remain readable and may be refunded, cancelled, settled or withdrawn through their original contract.`;
@@ -482,22 +483,25 @@ export const tools = [
         ? [`Who resolves disputes (both contracts): ${whoRules(arb.out)}`]
         : [`Who resolves disputes, X Money out: ${whoRules(arb.out)}`, `Who resolves disputes, X Money in: ${whoRules(arb.in)}`];
       const nobody = arb.out.kind === 'nobody' || arb.in.kind === 'nobody';
-      const problems = paused ? [] : ownerProblems(arb);
+      const problems = paused || XSWAP_V2.enabled ? [] : ownerProblems(arb);
+      const v2Open = XSWAP_V2.enabled && Boolean(v2);
       return reply([
         paused ? `PAUSED. ${paused} ${stillWorks(arb)}`
           : problems.length ? `NOT OPEN: no verified owner can resolve disputes. ${problems.join(' ')} ${stillWorks(arb)}`
-            : 'New swaps are open on this connector.',
+            : v2Open ? `New swaps are open on this connector, on the reviewed V2 escrows (intents ${XSWAP_V2.intents}, asks ${XSWAP_V2.asks}). The legacy escrows below stay exit-only.`
+              : XSWAP_V2.enabled ? `NOT OPEN on this read: the V2 escrows could not be runtime-verified right now, so no new order is prepared. ${stillWorks(arb)}`
+                : 'New swaps are open on this connector.',
         line('X Money out (you pay X Money, an asset lands elsewhere)', t.out),
         line('X Money in (you hand over an asset, X Money lands here)', t.in),
         ...rules,
         ...(nobody ? [] : [ownerPowers(arb).out, ownerPowers(arb).in, PARAMS_IN_FLIGHT]),
         BURN_NOTE,
-        v2 ? `Reviewed V2 escrows are deployed and runtime verified (${XSWAP_V2.intents}, ${XSWAP_V2.asks}); site fee 10 bp. New V2 funding remains paused until solver bids and far delivery are reviewed.`
-          : 'V2 deployment could not be verified on this read; new V2 funding remains paused.',
+        v2 ? `Reviewed V2 escrows runtime verified (${XSWAP_V2.intents}, ${XSWAP_V2.asks}); site fee 10 bp of the winning solver ask, charged only at settlement. ${XSWAP_V2.enabled ? 'New V2 orders are open: prepare_xswap_out (X Money out, Base native ETH is the route the solver fills today) and prepare_xswap_in.' : 'New V2 funding remains paused.'}`
+          : 'V2 deployment could not be verified on this read; no new V2 order is prepared.',
         PERMISSIONLESS,
       ].join('\n'), {
         ...t,
-        new_swaps_open: !paused && !problems.length,
+        new_swaps_open: XSWAP_V2.enabled ? v2Open : !paused && !problems.length,
         paused_reason: paused || (problems.length ? problems.join(' ') : null),
         arbiter: { out: arb.out, in: arb.in },
         forge_default_sender: FORGE_DEFAULT_SENDER,
@@ -505,7 +509,7 @@ export const tools = [
         dispute_is_a_way_out: !nobody,
         intents: XSWAP.intents, asks: XSWAP.asks, xmoney: XSWAP.xmoney, chain_id: XSWAP.chainId, address_source: XSWAP.source,
         v2: { intents: XSWAP_V2.intents, asks: XSWAP_V2.asks, collector: XSWAP_V2.collector,
-          runtime_verified: Boolean(v2), new_orders_open: false, site_fee_bps: 10, terms: v2 },
+          runtime_verified: Boolean(v2), new_orders_open: v2Open, site_fee_bps: 10, terms: v2 },
       });
     },
   },
@@ -529,9 +533,10 @@ export const tools = [
       const gross = parseXMoney(args.xmoney_amount);
       const funding = xswapV2OutFunding(gross);
       const live = await verifyXSwapV2().catch(() => null);
-      const paused = 'V2 new orders are paused until the V2 solver and far delivery are reviewed.';
+      const paused = XSWAP_V2.enabled ? null : 'V2 new orders are paused until the V2 solver and far delivery are reviewed.';
       return reply([
-        `PAUSED: this is a read-only V2 calculation; prepare_xswap_out will refuse. ${paused}`,
+        paused ? `PAUSED: this is a read-only V2 calculation; prepare_xswap_out will refuse. ${paused}`
+          : 'V2 quote. prepare_xswap_out prepares this order against the reviewed V2 escrow; the solver network fills Base native ETH today, other routes wait for a solver to bid.',
         `Deliver ${o._label} on ${o._chain.slug}${o.to === ZERO ? '' : ` to ${o.to}`}.`,
         `Gross wallet debit cap ${fmtXMoney(gross)} X Money; estimated escrow receipt ${fmtXMoney(funding.expectedEscrowReceived)} after 1 bp transfer burn.`,
         `Maximum solver ceiling ${fmtXMoney(funding.escrowCeiling)} X Money. The escrow also reserves up to ${fmtXMoney(funding.siteFeeMax)} X Money for the 10 bp site fee.`,
