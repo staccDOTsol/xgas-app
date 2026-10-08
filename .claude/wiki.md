@@ -124,3 +124,7 @@ The L4 PoolManager adds (lpFee + 10bp)·n² to what an LP add owes, so exact max
 ## forge script cannot broadcast big deploys on the L4: replay its plan with node gas estimates
 forge prices L4 gas as plain EVM gas and misses the parent posting fee (10-15x on large initcode) → "intrinsic gas too low". Simulate with forge, then `node scripts/replay-forge-broadcast-l4.mjs <dry-run/run-latest.json> <record.json>` (checks every nonce and CREATE address against forge's plan). Guarded forge runner for nft-range: scripts/run-fleet-forge.mjs.
 **Why:** first fleet broadcast failed on PegFactory (forge 29M gas, node 425M).
+
+## Fleet generations on the L4 and why (2026-10-08)
+Live: drops 0x4D9d…50e9 (PumpDrop graduation fix), CLMM StaccpadFactoryL4 0x61EC…4603 + launchpad 0xbF9c…A79F + hook 0x0f59…c044, pawn 0xeab3…6340. Superseded ones are listed under `fleet.superseded`. The CLMM stack uses nft-range src/xgas/clmm/StaccpadRouterL4 + StaccpadFactoryL4 (toll-aware, ABI-identical copies) so Robinhood's StaccpadRouter bytecode and the RobinhoodCreate2 pins stay unchanged. Exact deployed nft-range source, including the uncommitted FeeFanoutSink refactor and the PumpDrop fix, is branch `xgas-l4-fleet-deployed` (8d63854); nft-range main does NOT carry the PumpDrop fix yet.
+**Why:** PumpDrop._graduate minted reserve ids at supply+1+k, colliding with ids sold back and re-bought, so any sell-back bricked graduation. That bug is in Robinhood's PumpDrop too.
