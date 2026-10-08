@@ -1,8 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { keccak256, txHashOf, parseUpstreams, classifyError, configFromEnv, DEFAULT_UPSTREAMS } from '../server.mjs';
+import { keccak256, txHashOf, parseUpstreams, classifyError, configFromEnv, DEFAULT_UPSTREAMS, splitLogFilter } from '../server.mjs';
 
 const kh = (s) => Buffer.from(keccak256(Buffer.from(s))).toString('hex');
+
+test('large eth_getLogs ranges are bounded, disjoint and retain filters', () => {
+  const filter = { address: '0xabc', topics: ['0xdef'], fromBlock: '0x64', toBlock: '0x16d' };
+  const split = splitLogFilter(filter, 100, 4);
+  assert.deepEqual(split.chunks.map((x) => [x.fromBlock, x.toBlock]), [
+    ['0x64', '0xc7'], ['0xc8', '0x12b'], ['0x12c', '0x16d'],
+  ]);
+  assert.ok(split.chunks.every((x) => x.address === filter.address && x.topics === filter.topics));
+  assert.equal(splitLogFilter({ ...filter, blockHash: '0x1234' }, 100, 4), null);
+  assert.equal(splitLogFilter({ ...filter, toBlock: 'latest' }, 100, 4), null);
+  assert.equal(splitLogFilter(filter, 100, 2).error.code, -32000);
+  assert.deepEqual(splitLogFilter({ ...filter, fromBlock: '0x384', toBlock: '0x3e8' }, 100, 4, 1000, 50)
+    .chunks.map((x) => [x.fromBlock, x.toBlock]), [['0x384', '0x3b6'], ['0x3b7', '0x3e8']],
+  'a short historical scan is divided before the strict-only trailing 50 blocks');
+});
 
 test('keccak256 matches the standard vectors', () => {
   assert.equal(kh(''), 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470');

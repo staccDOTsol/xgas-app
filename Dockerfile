@@ -23,6 +23,7 @@ COPY mcp/src ./mcp/src
 # ...and its package.json: the connector reports its own published version from it.
 COPY mcp/package.json ./mcp/package.json
 COPY src/contracts/l4-deployment.json ./src/contracts/l4-deployment.json
+COPY src/contracts/fireball-relaunch.json ./src/contracts/fireball-relaunch.json
 EXPOSE 3000
 ENV PORT=3000
 ENV NODE_ENV=production

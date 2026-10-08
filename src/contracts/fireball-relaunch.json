@@ -1,0 +1,20 @@
+{
+  "status": "live",
+  "active": true,
+  "parentChainId": 4663,
+  "l4ChainId": 466302,
+  "fanout": "0x0a87Da84277232720e0908CC7470e3A7f925748f",
+  "xMoney": "0xa924C725B64cC346f275269EFA4Bd0538cfBa97E",
+  "parentForwarder": "0x44a0438e85C3947C369B1B8A7D9991741040A7FF",
+  "l4": {
+    "fanoutSink": "0x4ca8826FBb7F69F55B858485313eAC56a1b4F458",
+    "escrow": "0xf8Dbd439A994ff913509e68085B2ED3deC94c26A",
+    "fomo": "0xDefE7c5e5B36B964894e931A83768083B040ad62",
+    "router": "0x82334088CB47E95eFaB8D65591157190Ac40e00A",
+    "nguLauncher": "0x9e9BC96c318996b4DC147069E1Ed17d828245e53"
+  },
+  "robinhood": {
+    "otcArbitration": null,
+    "robinhoodOtc": null
+  }
+}

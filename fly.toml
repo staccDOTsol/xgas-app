@@ -12,6 +12,8 @@ primary_region = "iad"
   XGAS_PARENT_RPC = "http://xgas-rpc.internal:8545"
   BUNDLER_URL = "https://xgas-bundler.fly.dev"
   PAYMASTER_START_BLOCK = "25"
+  FIREBALL_FEE_KEEPER_ENABLED = "true"
+  FIREBALL_FEE_KEEPER_MACHINE_ID = "8d966e6f727e78"
 
 [http_service]
   internal_port = 3000

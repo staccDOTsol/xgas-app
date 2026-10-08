@@ -1,0 +1,50 @@
+{
+  "status": "live",
+  "active": true,
+  "parentChainId": 4663,
+  "l4ChainId": 466302,
+  "xMoneyAssetRegistration": {
+    "fanout": "0x0a87Da84277232720e0908CC7470e3A7f925748f",
+    "token": "0xa924C725B64cC346f275269EFA4Bd0538cfBa97E",
+    "tx": "0x4217fe4064a4a6ef38bebcb377889a758181779d00d7f17c1664a96f78d5ebc6",
+    "block": 80068210
+  },
+  "parentForwarder": {
+    "address": "0x44a0438e85C3947C369B1B8A7D9991741040A7FF",
+    "tx": "0xae3fd0092aad84a27f33a24591aea97601e44b734140d6654e05b320b7dea8ae",
+    "block": 80068434
+  },
+  "l4": {
+    "fanoutSink": {
+      "address": "0x4ca8826FBb7F69F55B858485313eAC56a1b4F458",
+      "tx": "0x61b64528716ee686f020de1e5b553700abf3174c213cdc49cf036f64c43f85a5",
+      "block": 79
+    },
+    "escrow": {
+      "address": "0xf8Dbd439A994ff913509e68085B2ED3deC94c26A",
+      "tx": "0xa0facf0a9e58863381dea33304eead14c64f431f29f9c55130fc837c4a66ba15",
+      "block": 80
+    },
+    "fomo": {
+      "address": "0xDefE7c5e5B36B964894e931A83768083B040ad62",
+      "tx": "0xf88e7d849b54cbc57bf4189403384d8ae72d91d7595a11aaba9aa924965e6b16",
+      "block": 81
+    },
+    "router": {
+      "address": "0x82334088CB47E95eFaB8D65591157190Ac40e00A",
+      "tx": "0xe1a333738220ab5ae1caa570b5bca268e8a60fda2c7864df76424286bbc900e0",
+      "block": 82
+    },
+    "nguLauncher": {
+      "address": "0x9e9BC96c318996b4DC147069E1Ed17d828245e53",
+      "tx": "0x59af8ba6b3add55434920f94c6941761acce74886b8260d9ecf55006e3a91f37",
+      "block": 83
+    }
+  },
+  "legacy": {
+    "sink": "0xfeb38ce50e1F49438acAa39b2Da513d2F1DE548f",
+    "escrow": "0x842E6904e4eB64d5957CC2E9Eb640A9a8C006754",
+    "fomo": "0xa8d88800cf41a2c246fa363f4fa9ee14c1fef151",
+    "oldOrder0ActiveAtVerification": true
+  }
+}

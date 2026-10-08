@@ -200,7 +200,7 @@ contract NguToken is ERC20, ReentrancyGuard {
     // buy / sell
 
     /// @notice Mint `qty` whole tokens on the curve to `to`. Overpayment is refunded.
-    function buy(uint256 qty, address to) external payable nonReentrant returns (uint256 cost) {
+    function buy(uint256 qty, address to) public payable virtual nonReentrant returns (uint256 cost) {
         if (qty == 0 || qty > MAX_PER_TX) revert BadParams();
         if (minted + qty > maxSupply) revert SoldOut();
         if (to == address(0)) to = msg.sender;
@@ -235,7 +235,8 @@ contract NguToken is ERC20, ReentrancyGuard {
     /// @notice Burn `qty` whole tokens and redeem $xMoney from the reserve at
     ///         99.96% of min(floor, lastPrice) per token. Never touches the curve.
     function sell(uint256 qty, address payable to, uint256 minOut)
-        external
+        public
+        virtual
         nonReentrant
         returns (uint256 payout)
     {
@@ -269,12 +270,12 @@ contract NguToken is ERC20, ReentrancyGuard {
     }
 
     /// @notice Any $xMoney sent here raises the floor for every holder. No tokens minted.
-    function donate() external payable {
+    function donate() public payable virtual {
         reserve += msg.value;
         emit Tick(TICK_DONATE, msg.sender, 0, lastPrice, floor(), supply, reserve, minted);
     }
 
-    receive() external payable {
+    receive() external payable virtual {
         reserve += msg.value;
         emit Tick(TICK_DONATE, msg.sender, 0, lastPrice, floor(), supply, reserve, minted);
     }

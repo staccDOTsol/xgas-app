@@ -10,6 +10,72 @@ const CALL = { to: '0xCA038a032154d0091b019A9104b369F94FD5c75F', data: '0x7fa3a4
 const own = (m) => m.method === 'eth_chainId' || m.method === 'eth_blockNumber';
 const unknownBlock = { error: { code: 26, message: 'Unknown block' } };
 
+test('validator backlog eth_getLogs is chunked and merged with no gap or partial result', async (t) => {
+  let failAt = null;
+  const [p, f] = await setup(t, [['logs', { handler: (m) => {
+    if (m.method !== 'eth_getLogs' || m.params?.[0]?.address !== ADDR) return undefined;
+    const from = Number.parseInt(m.params[0].fromBlock, 16);
+    const to = Number.parseInt(m.params[0].toBlock, 16);
+    assert.ok(to - from + 1 <= 100, 'the upstream never receives an oversized range');
+    if (from === failAt) return { error: { code: 3, message: 'execution reverted' } };
+    return { result: [{ blockNumber: hex(from) }, { blockNumber: hex(to) }] };
+  } }]], { logChunkBlocks: 100, logChunkConcurrency: 2 });
+  const params = [{ fromBlock: hex(100), toBlock: hex(365), address: ADDR, topics: ['0x1234'] }];
+  const ok = await p.rpc('eth_getLogs', params);
+  assert.deepEqual(ok.result.map((l) => l.blockNumber), [hex(100), hex(199), hex(200), hex(299), hex(300), hex(365)]);
+  assert.equal(f.logs.calls('eth_getLogs'), 3);
+  failAt = 200;
+  const broken = await p.rpc('eth_getLogs', params);
+  assert.equal(broken.result, undefined, 'a failed chunk must never return an incomplete log array');
+  assert.equal(broken.error.code, 3);
+});
+
+test('validator near-head history and latest ranges use archive plus strict recent RPC', async (t) => {
+  const [p, f] = await setup(t, [
+    ['archive', { weight: 5, handler: (m, s) => {
+      if (m.method !== 'eth_getLogs') return undefined;
+      const range = m.params[0];
+      if (range.address !== ADDR) return undefined; // boot clamp probe remains inconclusive/clamping
+      const to = Number.parseInt(range.toBlock, 16);
+      if (to > s.head - 50) return { result: [] }; // an unsafe short answer from this upstream
+      return { result: [{ blockNumber: range.toBlock, source: 'archive' }] };
+    } }],
+    ['recent', { weight: 1, handler: (m, s) => {
+      if (m.method !== 'eth_getLogs') return undefined;
+      const range = m.params[0];
+      const from = Number.parseInt(range.fromBlock, 16);
+      const to = Number.parseInt(range.toBlock, 16);
+      if (to > s.head) return unknownBlock; // strict clamp probe
+      if (from < s.head - 49) return { error: { code: -32000, message: 'Archive requests require a personal token' } };
+      return { result: [{ blockNumber: range.fromBlock, source: 'recent' }] };
+    } }],
+  ], { strategy: 'priority', logChunkBlocks: 100, clampMarginBlocks: 50 });
+  f.archive.reset(); f.recent.reset();
+  const logs = await p.rpc('eth_getLogs', [{ fromBlock: hex(900), toBlock: 'latest', address: ADDR }]);
+  assert.deepEqual(logs.result, [
+    { blockNumber: hex(950), source: 'archive' },
+    { blockNumber: hex(951), source: 'recent' },
+  ]);
+  assert.deepEqual(f.archive.state.requests.filter((m) => m?.method === 'eth_getLogs').map((m) => m.params[0].toBlock), [hex(950)]);
+  assert.deepEqual(f.recent.state.requests.filter((m) => m?.method === 'eth_getLogs').map((m) => m.params[0].fromBlock), [hex(951)]);
+});
+
+test('dRPC serves recent validator logs through its observed head without publicnode', async (t) => {
+  const [p, f] = await setup(t, [
+    ['drpc', { weight: 5, handler: (m, s) => m.method === 'eth_getLogs'
+      ? (Number.parseInt(m.params[0].toBlock, 16) > s.head
+        ? { result: [] } : { result: [{ blockNumber: m.params[0].toBlock }] }) : undefined }],
+    ['publicnode', { weight: 1, handler: (m, s) => m.method === 'eth_getLogs'
+      ? (Number.parseInt(m.params[0].toBlock, 16) > s.head ? unknownBlock
+        : { error: { code: -32000, message: 'Archive requests require a personal token' } }) : undefined }],
+  ], { strategy: 'priority' });
+  f.drpc.reset(); f.publicnode.reset();
+  assert.deepEqual((await p.rpc('eth_getLogs', [{ fromBlock: hex(900), toBlock: hex(1000), address: ADDR }])).result,
+    [{ blockNumber: hex(950) }, { blockNumber: hex(1000) }]);
+  assert.equal(f.drpc.calls('eth_getLogs'), 2, 'historical and tip ranges both reach dRPC');
+  assert.equal(f.publicnode.calls('eth_getLogs'), 0);
+});
+
 async function setup(t, specs, opts) {
   const fakes = [];
   for (const [name, o = {}] of specs) {

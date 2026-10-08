@@ -149,6 +149,9 @@ export const DEFAULTS = {
   chainId: 4663,
   timeoutMs: 8_000,            // per attempt
   logsTimeoutMs: 20_000,       // per eth_getLogs attempt
+  logChunkBlocks: 50_000,      // Robinhood RPCs reject wider eth_getLogs ranges after a validator backlog
+  logChunkConcurrency: 4,     // keep a multi-million-block catch-up inside Nitro's 60s deadline
+  maxLogChunks: 512,          // bound work from an accidental or abusive whole-chain query
   // Whole request including failovers. Nitro's parent-chain client gives up after 60s (parent-chain.connection.timeout
   // default 1m) and does not retry a deadline error, so work past ~50s is wasted: answer with an error first.
   deadlineMs: 50_000,
@@ -164,6 +167,10 @@ export const DEFAULTS = {
   // Upstreams that answer eth_getLogs past their head with [] (or whose probe was inconclusive) only get a range whose
   // end is this far below their head (~5s at 10 blocks/s), and never as a last resort: a silent [] loses logs.
   clampMarginBlocks: 50,
+  // dRPC's own head is current, but its clamp probe returns [] past that head.
+  // Use its observed head as the bound so recent validator scans do not depend
+  // entirely on publicnode's archive-limited, rate-limited endpoint.
+  drpcClampMarginBlocks: 0,
   clampReprobeMs: 60_000,      // re-probe an upstream whose clamp probe was inconclusive (strict ones: every 10 min)
   recentBlocks: 32,            // a "pruned state" error for a block this close to the head means lag, not pruning
   nullRetryMax: 2,             // extra upstreams asked when a receipt/tx/block lookup comes back null
@@ -191,6 +198,9 @@ export function configFromEnv(env = process.env) {
     chainId: num(env.EXPECTED_CHAIN_ID, DEFAULTS.chainId),
     timeoutMs: num(env.TIMEOUT_MS, DEFAULTS.timeoutMs),
     logsTimeoutMs: num(env.LOGS_TIMEOUT_MS, DEFAULTS.logsTimeoutMs),
+    logChunkBlocks: num(env.LOG_CHUNK_BLOCKS, DEFAULTS.logChunkBlocks),
+    logChunkConcurrency: num(env.LOG_CHUNK_CONCURRENCY, DEFAULTS.logChunkConcurrency),
+    maxLogChunks: num(env.MAX_LOG_CHUNKS, DEFAULTS.maxLogChunks),
     deadlineMs: num(env.REQUEST_DEADLINE_MS, DEFAULTS.deadlineMs),
     headPollMs: num(env.HEAD_POLL_MS, DEFAULTS.headPollMs),
     headTimeoutMs: num(env.HEAD_TIMEOUT_MS, DEFAULTS.headTimeoutMs),
@@ -201,6 +211,7 @@ export function configFromEnv(env = process.env) {
     capTtlMs: num(env.CAP_TTL_MS, DEFAULTS.capTtlMs),
     capStrikes: num(env.CAP_STRIKES, DEFAULTS.capStrikes),
     clampMarginBlocks: num(env.CLAMP_MARGIN_BLOCKS, DEFAULTS.clampMarginBlocks),
+    drpcClampMarginBlocks: num(env.DRPC_CLAMP_MARGIN_BLOCKS, DEFAULTS.drpcClampMarginBlocks),
     clampReprobeMs: num(env.CLAMP_REPROBE_MS, DEFAULTS.clampReprobeMs),
     // names of upstreams known to answer eth_getLogs past their head with [] (probes of an LB can miss it)
     clampingUpstreams: String(env.CLAMPING_UPSTREAMS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
@@ -285,6 +296,31 @@ function blockRef(v) {
     if (v.blockNumber !== undefined) return blockRef(v.blockNumber);
   }
   return { tag: 'latest' };
+}
+
+// Each eth_getLogs subrequest is an inclusive, disjoint range. Keep the last
+// margin blocks separate: the archive-capable RPCs silently clamp near head,
+// while the strict public RPC only serves recent logs.
+export function splitLogFilter(filter, maxBlocks, maxChunks, head = null, margin = 0) {
+  if (!isObj(filter) || filter.blockHash || !Number.isSafeInteger(maxBlocks) || maxBlocks < 1) return null;
+  const from = blockRef(filter.fromBlock), to = blockRef(filter.toBlock);
+  if (!Number.isSafeInteger(from.num) || !Number.isSafeInteger(to.num) || from.num < 0 || to.num < from.num) return null;
+  const size = to.num - from.num + 1;
+  const cutoff = Number.isSafeInteger(head) && Number.isSafeInteger(margin) && margin > 0 && to.num <= head
+    ? Math.max(0, head - margin) : null;
+  const splitTip = cutoff !== null && from.num <= cutoff && to.num > cutoff;
+  if (size <= maxBlocks && !splitTip) return null;
+  const historicalEnd = splitTip ? cutoff : to.num;
+  const historicalCount = Math.ceil((historicalEnd - from.num + 1) / maxBlocks);
+  const count = historicalCount + (splitTip ? 1 : 0);
+  if (count > maxChunks) return { error: { code: -32000, message: `xgas-rpc: eth_getLogs needs ${count} chunks, limit ${maxChunks}` } };
+  const chunks = [];
+  for (let start = from.num; start <= historicalEnd; start += maxBlocks) {
+    chunks.push({ ...filter, fromBlock: '0x' + start.toString(16),
+      toBlock: '0x' + Math.min(historicalEnd, start + maxBlocks - 1).toString(16) });
+  }
+  if (splitTip) chunks.push({ ...filter, fromBlock: '0x' + (cutoff + 1).toString(16), toBlock: '0x' + to.num.toString(16) });
+  return { chunks };
 }
 const ageBucket = (age) => (!Number.isFinite(age) ? 'n?' : age <= 32 ? 'n0' : age <= 1024 ? 'n1' : age <= 65536 ? 'n2' : 'n3');
 const spanBucket = (span) => (!Number.isFinite(span) ? '' : span <= 1000 ? 's0' : span <= 10_000 ? 's1' : span <= 50_000 ? 's2' : 's3');
@@ -582,7 +618,7 @@ export function createProxy(userCfg = {}) {
   // An error sends Nitro back to retry; a short [] makes it walk back looking for a reorg, and the site's
   // /api/robinhood/stream cursor would skip those blocks for good.
   const logsUnsafe = (u, r) => r.method === 'eth_getLogs' && r.minBlock !== null && u.clampsLogs !== false
-    && (u.head === null || u.head < r.minBlock + cfg.clampMarginBlocks);
+    && (u.head === null || u.head < r.minBlock + (u.name === 'drpc' ? cfg.drpcClampMarginBlocks : cfg.clampMarginBlocks));
 
   function fits(u, r, now) {
     if (hasCap(u, r.capKey, now)) return false;
@@ -795,6 +831,42 @@ export function createProxy(userCfg = {}) {
     if (msg.method === 'eth_chainId') { gbump('local'); return { result: chainHex }; }
     if (msg.method === 'net_version') { gbump('local'); return { result: String(cfg.chainId) }; }
     if (SENDS.has(msg.method)) return sendRaw(msg, ctx);
+    // Freeze `latest` at one observed head so a long archive scan is bounded
+    // and its disjoint chunks describe a single consistent snapshot.
+    const filter = msg.params?.[0];
+    const fixedFilter = msg.method === 'eth_getLogs' && isObj(filter) && !filter.blockHash
+      && (filter.toBlock === undefined || filter.toBlock === 'latest') && Number.isSafeInteger(maxHead)
+      ? { ...filter, toBlock: '0x' + maxHead.toString(16) } : filter;
+    const logSplit = msg.method === 'eth_getLogs'
+      ? splitLogFilter(fixedFilter, cfg.logChunkBlocks, cfg.maxLogChunks, maxHead, cfg.clampMarginBlocks) : null;
+    if (logSplit?.error) { gbump('errors'); return { error: logSplit.error }; }
+    if (logSplit?.chunks) {
+      const deadline = Date.now() + cfg.deadlineMs;
+      const results = new Array(logSplit.chunks.length);
+      let next = 0, failed = null;
+      const run = async () => {
+        while (next < logSplit.chunks.length && !failed && !ctx?.aborted) {
+          const index = next++;
+          const chunk = { method: 'eth_getLogs', params: [logSplit.chunks[index]] };
+          const req = describe(chunk.method, chunk.params);
+          await ensureHeads([req]);
+          const { body } = await forwardOne(chunk, req, orderFor([req]), deadline, ctx);
+          if (body.error || !Array.isArray(body.result)) {
+            failed = body.error ?? { code: -32603, message: 'xgas-rpc: malformed eth_getLogs chunk response' };
+            break;
+          }
+          results[index] = body.result;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(cfg.logChunkConcurrency, logSplit.chunks.length) }, run));
+      if (failed) return { error: failed };
+      if (ctx?.aborted) return { error: { code: -32603, message: 'xgas-rpc: caller closed during eth_getLogs scan' } };
+      if (results.some((part) => !Array.isArray(part))) {
+        gbump('errors');
+        return { error: { code: -32603, message: 'xgas-rpc: eth_getLogs scan did not complete' } };
+      }
+      return { result: results.flat() };
+    }
     const deadline = Date.now() + cfg.deadlineMs;
     if (FILTER_USE.has(msg.method)) {
       const id = String(msg.params?.[0] ?? '').toLowerCase();
@@ -929,7 +1001,8 @@ export function createProxy(userCfg = {}) {
     const plain = [], special = [];
     arr.forEach((m, i) => {
       if (!isObj(m) || typeof m.method !== 'string') out[i] = { error: { code: -32600, message: 'invalid request' } };
-      else if (LOCAL.has(m.method) || SENDS.has(m.method) || FILTER_NEW.has(m.method) || FILTER_USE.has(m.method)) special.push(i);
+      else if (LOCAL.has(m.method) || SENDS.has(m.method) || FILTER_NEW.has(m.method) || FILTER_USE.has(m.method)
+        || (m.method === 'eth_getLogs' && splitLogFilter(m.params?.[0], cfg.logChunkBlocks, cfg.maxLogChunks))) special.push(i);
       else plain.push(i);
     });
     await Promise.all([
