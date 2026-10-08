@@ -174,6 +174,7 @@ app.get('/api/l4-info', (_req, res) => {
     l3ChainId: L3_CHAIN_ID, vault: DEPLOY.l3.xMoney, ready: Date.now() - l4Head.at < 60_000, head: l4Head.block,
     contracts: DEPLOY.l4, l3: DEPLOY.l3,
     fireball: { active: FIREBALL_L4_ACTIVE, contracts: FIREBALL_DEPLOY.l4, parentForwarder: FIREBALL_DEPLOY.parentForwarder },
+    fleet: DEPLOY.fleet || null,
     deployment: {
       createRollupTx: DEPLOY.createRollupTx, createdAt: DEPLOY.createdAt, deployedAtBlock: DEPLOY.deployedAtBlock, owner: DEPLOY.owner,
       batchPoster: DEPLOY.batchPoster, validator: DEPLOY.validator, validators: DEPLOY.validators || [DEPLOY.validator],

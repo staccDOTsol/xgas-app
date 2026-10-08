@@ -1,0 +1,209 @@
+{
+  "chainId": 466302,
+  "parentChainId": 4663,
+  "sink": "0x4ca8826FBb7F69F55B858485313eAC56a1b4F458",
+  "infra": {
+    "wrappedXMoney": {
+      "address": "0x652125e71c7f209e640c0069e4a5e77fafa99b4b",
+      "tx": "0x31f98aabc362e53c57dcff7247f747935d6843488cbfc0c961a2eedb6e6f9efb",
+      "block": 107,
+      "args": []
+    },
+    "multicall3": {
+      "address": "0x1877f55e01670539b3a93ad7004a45c25aed19d5",
+      "tx": "0xe9c62808aabe16b8064ff8b83a0f4249a142faa3b08890a738b92da8ec30c094",
+      "block": 108,
+      "args": []
+    },
+    "erc6551Registry": {
+      "address": "0x556b8c1943905d6e8354e4df853b9053a62a40d8",
+      "tx": "0x518fdd1cd035940ace77eea5e613d5d1b4a5bd80cf4657ac90679b330465717e",
+      "block": 109,
+      "args": []
+    },
+    "permit2": {
+      "address": "0x98b52b1a50fe263abe0f6ce19d47c6f65c42c23a",
+      "tx": "0x8bae9e2795c504364cd2d26e18c7edeb44bd351715f27f36ab46c6c2fd27c13b",
+      "block": 110,
+      "args": []
+    },
+    "poolManager": {
+      "address": "0xea2ce320b5cdbf14bc734feb60c78097e146f1b0",
+      "tx": "0x4e5dee7dc88e19d97535f96ddcc81a465bba9f1dcefea58dff8ef21f6efbbf33",
+      "block": 111,
+      "args": [
+        "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+      ]
+    },
+    "positionManager": {
+      "address": "0x398581b1dfef17373ce461fcc89b0fa7eabcdd70",
+      "tx": "0xa732c2d954797883c29dfecbb93f97d93e336a4237c3519a0c4697c454026cc3",
+      "block": 112,
+      "args": [
+        "0xea2ce320b5cdbf14bc734feb60c78097e146f1b0",
+        "0x98b52b1a50fe263abe0f6ce19d47c6f65c42c23a",
+        "300000",
+        "0x0000000000000000000000000000000000000000",
+        "0x652125e71c7f209e640c0069e4a5e77fafa99b4b"
+      ]
+    },
+    "fleetTreasury": {
+      "address": "0x141b102941659ecd24a5797c2863d5c5e170f4c5",
+      "tx": "0xfa1d7587941d3a6697487b12423dd1a3d4e4ff4f824093fd8697b1fd8f4d2b91",
+      "block": 113,
+      "args": [
+        "0x652125e71c7f209e640c0069e4a5e77fafa99b4b",
+        "0x4ca8826FBb7F69F55B858485313eAC56a1b4F458",
+        "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+      ]
+    },
+    "protocolFeeController": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+  },
+  "fleet": {
+    "PegFactory": {
+      "address": "0x9179650a9618001df20b1b091cce9ebfa3dc5029",
+      "tx": "0x78dd752da40fdb018db3d3b31056cf2828efb0b4b28c8a776ae906d9da951f18",
+      "block": 137,
+      "gasUsed": "362885297"
+    },
+    "StaccDropDeployer": {
+      "address": "0xa92dca715000bcd9fac9f0243fbc729fd1385f08",
+      "tx": "0x98126bb12bc3de800d7857ad65f63f2bd7cc57c1e003db44f74792708fe31029",
+      "block": 138,
+      "gasUsed": "132499563"
+    },
+    "PumpDropDeployer": {
+      "address": "0xa9565296b9673e3415b3fe7a9fb94ef13ff35b09",
+      "tx": "0xc32fa2ca0275329b77f87a701aa5fbdf124b73db6347a9da47f0b208049ad7fb",
+      "block": 139,
+      "gasUsed": "146683977"
+    },
+    "DropFactory": {
+      "address": "0xd01610be81ef870d0cd7fe6e161873b970ca2a81",
+      "tx": "0xbeb039395c8f29c6dd92e5f3cac68dd4fe423e4d691ce17c026213f43b55e6c7",
+      "block": 140,
+      "gasUsed": "34163633"
+    },
+    "AuctionHouse": {
+      "address": "0xa0d684723103cc5777960da368a81e35c23d308f",
+      "tx": "0xc4949fdeec5593198df890e4e332483699afc7c5343afa16ee232c6211aaf704",
+      "block": 141,
+      "gasUsed": "41789754"
+    },
+    "NguFactory": {
+      "address": "0x05a89b11ea80d7985fa9f90103b6afed87cd6334",
+      "tx": "0x9b87454919b85925beb469cf20981d80224f5f1d3469b114cd024221a2b5a44c",
+      "block": 142,
+      "gasUsed": "318037915"
+    },
+    "PegDropFactory": {
+      "address": "0x6b231c22519803e7587755cd45666896924fdd1a",
+      "tx": "0xdd759e4ae6657b2615a8b11cf38fc7ec612e6f197c6123b4cc294b61dd95fbd7",
+      "block": 143,
+      "gasUsed": "194108230"
+    },
+    "Scooper": {
+      "address": "0xd3e3dbf533409b88ad7e6a6db0c7774990c71c58",
+      "tx": "0xfe471cfba65903511beb77bbf2b6eb742470dec6e28f3267e023fb98c5e214b5",
+      "block": 144,
+      "gasUsed": "100612536"
+    },
+    "GachaHelper": {
+      "address": "0xa7b726eb1dd1117bb6f761c16403eb8161a490d9",
+      "tx": "0x042c7830fb052358cc3bef59e7457d6f54096879e9517ad3324c412000dc0baf",
+      "block": 123,
+      "gasUsed": "69637706"
+    },
+    "StaccpadHook": {
+      "address": "0x6d41475725eebfd090100d4be92c637d72540044",
+      "tx": "0x02e44ae4071c05969394e5e0c09e96a94b4597b58fc2ac5b67f82d969b7ea319",
+      "block": 124,
+      "gasUsed": "47548325"
+    },
+    "StaccpadFactory": {
+      "address": "0x9bb6ca5e567b6e8f26da9e1890991ab3ce53d690",
+      "tx": "0xe698640c08dbeaadc7e87089e26d6706be4b40045a5910f446050e91ab9b05d1",
+      "block": 125,
+      "gasUsed": "362210505"
+    },
+    "StaccpadLaunchpad": {
+      "address": "0x5b0370834ac5d7451e1c4ae835df49d6e7c566a2",
+      "tx": "0x653b249c6e7b20802cf9e8c5e83e94e6f4122dd23834048e2395b8e8958decac",
+      "block": 126,
+      "gasUsed": "278618730"
+    },
+    "StaccpadPawn": {
+      "address": "0x5cfdebb51b3bbe8c91e7ed2f63aee6793427e27e",
+      "tx": "0x19b6ec981469f036cfed47ec3a38cf5142f03ce129c76983e08f0584308c574f",
+      "block": 128,
+      "gasUsed": "150816902"
+    }
+  },
+  "calls": [
+    {
+      "name": "StaccpadFactory.setLaunchpad",
+      "address": "0x9bb6ca5e567b6e8f26da9e1890991ab3ce53d690",
+      "tx": "0x19366c7664ee9cc7a3ee11039a6befd8ac3d34c850ee7d2271530848d901c0ca",
+      "block": 127,
+      "gasUsed": "2265642"
+    }
+  ],
+  "superseded": [
+    {
+      "name": "PegFactory",
+      "address": "0x180dad10103289d93cb7e088c7cf0434bc53902c",
+      "tx": "0x2a2c8039db9d5c7e530fba9adffe10fb29da240b6a13bd1e07eb9e937be46831",
+      "block": 115,
+      "gasUsed": "380120226"
+    },
+    {
+      "name": "StaccDropDeployer",
+      "address": "0x3bb1f9ac3e049eec30caa01fece23446864988ac",
+      "tx": "0x19ec03cdda725d8a9e116cad14cdb04efe1fbf680c8e6c81e6c3984670917317",
+      "block": 116,
+      "gasUsed": "140723441"
+    },
+    {
+      "name": "PumpDropDeployer",
+      "address": "0x7269036c9a81c1313fc0251b1ceb6e79b75099d2",
+      "tx": "0xbfd5cc701ac64948f8a87395a8552dd119c152fa7c3c15f1e425cb94db49cb48",
+      "block": 117,
+      "gasUsed": "155817641"
+    },
+    {
+      "name": "DropFactory",
+      "address": "0xa81dda3e9ab7b99299b716105c01ae9a79b338b5",
+      "tx": "0xe6e43e3b4896ab11e5db03816d150af4059f50dffacc2803aa20c13c088352f7",
+      "block": 118,
+      "gasUsed": "36330107"
+    },
+    {
+      "name": "AuctionHouse",
+      "address": "0xb9428ebf2042161bb396ea41f29a9d19f477f38e",
+      "tx": "0xd2ee9bafd303f69a8494f4b700243a0211f69e4027a89534d235418a2449c6b7",
+      "block": 119,
+      "gasUsed": "44444572"
+    },
+    {
+      "name": "NguFactory",
+      "address": "0xa02e9fb6f5b381a7c85d72d1c137329751d79c99",
+      "tx": "0x0e81de11d07ace3f8a337ee28dc450ef3d6ffd796bbb5dbe9c66ea3506edafdf",
+      "block": 120,
+      "gasUsed": "337895989"
+    },
+    {
+      "name": "PegDropFactory",
+      "address": "0x9d7effad3443975ecc10c9edfa3b10c53f101f76",
+      "tx": "0xb335c85a20372f02e35385cefbc63a98591c862144a5ffd8a10c45094c9d2edd",
+      "block": 121,
+      "gasUsed": "206270134"
+    },
+    {
+      "name": "Scooper",
+      "address": "0x321b8aed171e65f8927d7c2843a4dcf29dcd2c5c",
+      "tx": "0x3a2ffc97e26a0cfc3495487c4bfdf0ae20edd6c099e4d08300120bee6eaa7e7f",
+      "block": 122,
+      "gasUsed": "106958178"
+    }
+  ]
+}

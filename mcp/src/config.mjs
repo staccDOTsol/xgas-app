@@ -50,6 +50,8 @@ export const clientFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? xgas 
 export const rpcFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? XGAS_RPC : PARENT_RPC);
 
 export const L3 = DEPLOY.l3;
+// The staccpad fleet on the L4 (NFT NGU, peg markets, drops, CLMM, pawn). Null on a deployment without it.
+export const FLEET = DEPLOY.fleet && DEPLOY.fleet.status === 'live' ? DEPLOY.fleet : null;
 // The L4 desk contracts come in generations. `l4.*` is the original 466302 set; `fireball` (when active) is the
 // current one, the same one the site trades on. New orders, keys and launches go to the current generation, and
 // the originals stay readable so existing positions can be released, cancelled and withdrawn.

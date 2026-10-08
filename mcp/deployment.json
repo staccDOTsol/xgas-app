@@ -144,5 +144,57 @@
       "nguLauncher": "0x9e9BC96c318996b4DC147069E1Ed17d828245e53"
     },
     "note": "Current generation of the L4 desk contracts (new rewards). When active, the site and the MCP post new orders, keys and launches here; the l4.* originals stay readable for existing positions."
+  },
+  "fleet": {
+    "status": "live",
+    "note": "staccpad fleet on the L4 (deployed 2026-10-08 from nft-range 002413d). Fees: XgasFleetTreasury -> L4 FanoutSink -> Fireball fanout on Robinhood. LP adds pay the PoolManager JIT toll; PegRouter sizes for it.",
+    "infra": {
+      "poolManager": "0xea2ce320b5cdbf14bc734feb60c78097e146f1b0",
+      "positionManager": "0x398581b1dfef17373ce461fcc89b0fa7eabcdd70",
+      "permit2": "0x98b52b1a50fe263abe0f6ce19d47c6f65c42c23a",
+      "wrappedXMoney": "0x652125e71c7f209e640c0069e4a5e77fafa99b4b",
+      "multicall3": "0x1877f55e01670539b3a93ad7004a45c25aed19d5",
+      "erc6551Registry": "0x556b8c1943905d6e8354e4df853b9053a62a40d8",
+      "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "treasury": "0x141b102941659ecd24a5797c2863d5c5e170f4c5",
+      "tollCollector": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+    },
+    "peg": {
+      "factory": "0x9179650a9618001df20b1b091cce9ebfa3dc5029",
+      "router": "0xB817FF5418346815d5fe90cc0D7453Be4EF27FD6",
+      "locker": "0x2a0Ef3968b4Eeb7Fb50D0b1FDFf8B99470964850",
+      "scooper": "0xd3e3dbf533409b88ad7e6a6db0c7774990c71c58",
+      "gachaHelper": "0xa7b726eb1dd1117bb6f761c16403eb8161a490d9",
+      "pegDropFactory": "0x6b231c22519803e7587755cd45666896924fdd1a"
+    },
+    "ngu": {
+      "factory": "0x05a89b11ea80d7985fa9f90103b6afed87cd6334",
+      "locker": "0xD69044C70d826581A2705aFbA9770Aa886e1e79C"
+    },
+    "drops": {
+      "factory": "0xd01610be81ef870d0cd7fe6e161873b970ca2a81",
+      "auctionHouse": "0xa0d684723103cc5777960da368a81e35c23d308f",
+      "staccDropDeployer": "0xa92dca715000bcd9fac9f0243fbc729fd1385f08",
+      "pumpDropDeployer": "0xa9565296b9673e3415b3fe7a9fb94ef13ff35b09"
+    },
+    "clmm": {
+      "hook": "0x6d41475725eebfd090100d4be92c637d72540044",
+      "factory": "0x9bb6ca5e567b6e8f26da9e1890991ab3ce53d690",
+      "router": "0xC7B85FebA85f488fb255B1418aeCbb47f5fA1ABB",
+      "launchpad": "0x5b0370834ac5d7451e1c4ae835df49d6e7c566a2"
+    },
+    "pawn": {
+      "desk": "0x5cfdebb51b3bbe8c91e7ed2f63aee6793427e27e"
+    },
+    "canaries": {
+      "nguCurveOnly": "0xD9cA1C9A5a46092deb9AC3317fcaAC97eFc9d7cB",
+      "nguWithLp": "0x3Bd4C20BA1D5cb19a0B83be91d30BcC655cfb43C"
+    },
+    "superseded": {
+      "note": "first peg stack, deployed before the PegRouter toll fix; its LP adds always fall back to refunds",
+      "pegFactory": "0x180DAd10103289d93Cb7E088C7cF0434bC53902C",
+      "nguFactory": "0xA02e9fb6f5b381A7C85D72D1c137329751D79C99",
+      "dropFactory": "0xA81DdA3e9AB7b99299B716105C01ae9a79B338b5"
+    }
   }
 }
