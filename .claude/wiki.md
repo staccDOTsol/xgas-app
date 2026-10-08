@@ -108,3 +108,7 @@ server.js runs autoExecuteClaimable every 20s: any tracked send with position < 
 ## L4 desk contracts come in generations; the MCP must follow the site's current one (2026-10-06)
 `l4.*` in l4-deployment.json is the original 466302 set (escrow 0x842E…6754, launcher 0x6067…f7F8). The Fireball generation (src/contracts/fireball-relaunch.json; escrow 0xf8Db…c26A, FOMO 0xDefE…ad62, router 0x8233…e00A, launcher 0x9e9B…5e53, fanout sink 0x4ca8…F458) is what the site trades on when `active`. The deployment file now carries it as `fireball`, and mcp/src/config.mjs overlays it onto `L4` (plus the host's live /api/l4-info), keeping `L4_ORIGINAL` for existing positions. Any future generation: add it to fireball-relaunch.json AND the deployment file's `fireball` block, or the connector and the site split again.
 **Why:** on 6 Oct the bot's two OTC bids landed on the original escrow and were invisible on the site's default desk.
+
+## L4 466302 has the canonical CREATE2 proxy (0x4e59…956C) since 2026-10-08, via the delayed inbox
+The RPC rejects the presigned Arachnid tx ("intrinsic gas too low": 100k gas is under Nitro's intrinsic cost once the parent data fee is added). Sending the same raw tx through Inbox.sendL2Message (kind 0x04, signed tx) on Robinhood landed it in about 10 s (RH tx 0x8727…b47e). Script: scripts/force-include-l4-create2.mjs. Use the same route for any other presigned keyless deploy.
+**Why:** the staccpad fleet's StaccpadHook needs a mined CREATE2 address, and HookMiner hardcodes this deployer.
