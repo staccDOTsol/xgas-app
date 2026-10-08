@@ -57,7 +57,23 @@
         "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
       ]
     },
-    "protocolFeeController": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+    "protocolFeeController": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "v4Quoter": {
+      "address": "0xa7e0ba724a94c1a0fccf47edbbf629ecfbb0840b",
+      "tx": "0xb1a410d93e3c0c03a68e0cf2911a518f5d685a5e62547bdc89b00ab110ac3cfb",
+      "block": 162,
+      "args": [
+        "0xea2ce320b5cdbf14bc734feb60c78097e146f1b0"
+      ]
+    },
+    "stateView": {
+      "address": "0x3aefdc393d49f09fb2d88ebfccdc5588f2a56075",
+      "tx": "0xb4f6443cf212bcac645b7b78bb94880f756ffb10a2b28a8eae0e2a89ba71e5d1",
+      "block": 163,
+      "args": [
+        "0xea2ce320b5cdbf14bc734feb60c78097e146f1b0"
+      ]
+    }
   },
   "fleet": {
     "PegFactory": {

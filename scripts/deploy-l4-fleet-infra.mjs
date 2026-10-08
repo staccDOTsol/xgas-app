@@ -46,6 +46,8 @@ const A = {
   permit2: art(`${NFT_RANGE}/lib/permit2/out/Permit2.sol/Permit2.json`, 'Permit2'),
   posm: art(`${NFT_RANGE}/lib/v4-periphery/foundry-out/PositionManager.sol/PositionManager.json`, 'PositionManager'),
   poolManager: art(`${root}/contracts/out/PoolManager.sol/PoolManager.json`, 'PoolManager'),
+  v4Quoter: art(`${NFT_RANGE}/lib/v4-periphery/foundry-out/V4Quoter.sol/V4Quoter.json`, 'V4Quoter'),
+  stateView: art(`${NFT_RANGE}/lib/v4-periphery/foundry-out/StateView.sol/StateView.json`, 'StateView'),
 };
 
 const state = fs.existsSync(outFile) ? JSON.parse(fs.readFileSync(outFile, 'utf8')) : { chainId: 466302, parentChainId: 4663, sink: SINK, infra: {} };
@@ -74,6 +76,9 @@ const permit2 = await deploy('permit2', A.permit2, []);
 const pm = await deploy('poolManager', A.poolManager, [owner]);
 const posm = await deploy('positionManager', A.posm, [pm, permit2, 300_000n, '0x0000000000000000000000000000000000000000', wxm]);
 const treasury = await deploy('fleetTreasury', A.treasury, [wxm, SINK, owner]);
+// Quotes that include the JIT toll: V4Quoter simulates against the real (tolled) PoolManager.
+const quoter = await deploy('v4Quoter', A.v4Quoter, [pm]);
+const stateView = await deploy('stateView', A.stateView, [pm]);
 
 // The toll collector: only this address can collectProtocolFees. The owner EOA for now; a keeper can
 // sweep accrued tolls to the sink later.
@@ -87,4 +92,4 @@ if (ctrl.toLowerCase() !== owner.toLowerCase()) {
 state.infra.protocolFeeController = owner;
 save();
 console.log('\nfleet infra recorded in', path.relative(root, outFile));
-console.log({ wxm, permit2, pm, posm, treasury });
+console.log({ wxm, permit2, pm, posm, treasury, quoter, stateView });

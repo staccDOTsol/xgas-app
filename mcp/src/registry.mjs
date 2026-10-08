@@ -6,6 +6,8 @@ import { tools as bridgeTools } from './tools/bridge.mjs';
 import { tools as otcTools } from './tools/otc.mjs';
 import { tools as nguTools } from './tools/ngu.mjs';
 import { tools as fleetNguTools } from './tools/fleetNgu.mjs';
+import { tools as fleetDropTools } from './tools/fleetDrops.mjs';
+import { tools as fleetPegTools } from './tools/fleetPeg.mjs';
 import { tools as rampTools } from './tools/ramps.mjs';
 import { tools as walletTools } from './tools/wallet.mjs';
 import { tools as xswapTools } from './tools/xswap.mjs';
@@ -24,7 +26,7 @@ const guard = (t) => (isWriteTool(t.name)
   ? { ...t, handler: async (args) => { await assertChains(t.name); return t.handler(args); } }
   : t);
 
-export const ALL_TOOLS = [...chainTools, ...bridgeTools, ...otcTools, ...nguTools, ...fleetNguTools, ...rampTools, ...xswapTools, ...walletTools].map(guard);
+export const ALL_TOOLS = [...chainTools, ...bridgeTools, ...otcTools, ...nguTools, ...fleetNguTools, ...fleetDropTools, ...fleetPegTools, ...rampTools, ...xswapTools, ...walletTools].map(guard);
 
 const seen = new Set();
 const dupes = ALL_TOOLS.map((t) => t.name).filter((n) => (seen.has(n) ? true : (seen.add(n), false)));

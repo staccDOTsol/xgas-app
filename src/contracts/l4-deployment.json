@@ -157,7 +157,9 @@
       "erc6551Registry": "0x556b8c1943905d6e8354e4df853b9053a62a40d8",
       "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
       "treasury": "0x141b102941659ecd24a5797c2863d5c5e170f4c5",
-      "tollCollector": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158"
+      "tollCollector": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+      "v4Quoter": "0xa7e0ba724a94c1a0fccf47edbbf629ecfbb0840b",
+      "stateView": "0x3aefdc393d49f09fb2d88ebfccdc5588f2a56075"
     },
     "peg": {
       "factory": "0x9179650a9618001df20b1b091cce9ebfa3dc5029",
