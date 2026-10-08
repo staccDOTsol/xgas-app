@@ -174,29 +174,38 @@
       "locker": "0xD69044C70d826581A2705aFbA9770Aa886e1e79C"
     },
     "drops": {
-      "factory": "0xd01610be81ef870d0cd7fe6e161873b970ca2a81",
-      "auctionHouse": "0xa0d684723103cc5777960da368a81e35c23d308f",
-      "staccDropDeployer": "0xa92dca715000bcd9fac9f0243fbc729fd1385f08",
-      "pumpDropDeployer": "0xa9565296b9673e3415b3fe7a9fb94ef13ff35b09"
+      "factory": "0x4D9d485Ca7E9965ab1Ef29c438A7813Cb6FF50e9",
+      "auctionHouse": "0xfB68C633b64de0eF2EeD74082d28cA12a8D0E70F",
+      "staccDropDeployer": "0x7f7880800264abaF4572596e4191c618d1896BAB",
+      "pumpDropDeployer": "0x23596E0F2Fb316c0B8e6105FF74aD77e6F598b81"
     },
     "clmm": {
-      "hook": "0x6d41475725eebfd090100d4be92c637d72540044",
-      "factory": "0x9bb6ca5e567b6e8f26da9e1890991ab3ce53d690",
-      "router": "0xC7B85FebA85f488fb255B1418aeCbb47f5fA1ABB",
-      "launchpad": "0x5b0370834ac5d7451e1c4ae835df49d6e7c566a2"
+      "hook": "0x0f59fD250f111Adf461B177E2230B26662B6c044",
+      "factory": "0x61EC700580e9A192c9e7eEa30E07df5325114603",
+      "router": "0x0a33e61EF4B75a1fF03aa18BC9615E5f9AA99029",
+      "launchpad": "0xbF9c5314a4b705D968b19da24f286c70Fa13A79F",
+      "note": "StaccpadFactoryL4 / StaccpadRouterL4 (toll-aware copies); ABI-identical to StaccpadFactory/StaccpadRouter"
     },
     "pawn": {
-      "desk": "0x5cfdebb51b3bbe8c91e7ed2f63aee6793427e27e"
+      "desk": "0xeab3227b7EFc936b282E698F2411daA8B4B36340"
     },
     "canaries": {
       "nguCurveOnly": "0xD9cA1C9A5a46092deb9AC3317fcaAC97eFc9d7cB",
       "nguWithLp": "0x3Bd4C20BA1D5cb19a0B83be91d30BcC655cfb43C"
     },
     "superseded": {
-      "note": "first peg stack, deployed before the PegRouter toll fix; its LP adds always fall back to refunds",
+      "note": "earlier generations: the first peg stack predates the PegRouter toll fix; the first drops stack has the PumpDrop sell-then-graduate bug; the first CLMM stack (stock StaccpadRouter) reverts every LP add under the toll",
       "pegFactory": "0x180DAd10103289d93Cb7E088C7cF0434bC53902C",
       "nguFactory": "0xA02e9fb6f5b381A7C85D72D1c137329751D79C99",
-      "dropFactory": "0xA81DdA3e9AB7b99299B716105C01ae9a79B338b5"
+      "dropFactory": "0xA81DdA3e9AB7b99299B716105C01ae9a79B338b5",
+      "dropFactory_v2_pumpBug": "0xd01610be81ef870d0cd7fe6e161873b970ca2a81",
+      "clmm_v1": {
+        "hook": "0x6d41475725eebfd090100d4be92c637d72540044",
+        "factory": "0x9bb6ca5e567b6e8f26da9e1890991ab3ce53d690",
+        "router": "0xC7B85FebA85f488fb255B1418aeCbb47f5fA1ABB",
+        "launchpad": "0x5b0370834ac5d7451e1c4ae835df49d6e7c566a2"
+      },
+      "pawn_v1": "0x5cfdebb51b3bbe8c91e7ed2f63aee6793427e27e"
     }
   }
 }
