@@ -184,7 +184,8 @@
       "factory": "0x61EC700580e9A192c9e7eEa30E07df5325114603",
       "router": "0x0a33e61EF4B75a1fF03aa18BC9615E5f9AA99029",
       "launchpad": "0xbF9c5314a4b705D968b19da24f286c70Fa13A79F",
-      "note": "StaccpadFactoryL4 / StaccpadRouterL4 (toll-aware copies); ABI-identical to StaccpadFactory/StaccpadRouter"
+      "note": "StaccpadFactoryL4 / StaccpadRouterL4 (toll-aware copies); ABI-identical to StaccpadFactory/StaccpadRouter",
+      "fromBlock": 171
     },
     "pawn": {
       "desk": "0xeab3227b7EFc936b282E698F2411daA8B4B36340"
