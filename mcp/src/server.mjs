@@ -40,6 +40,8 @@ Which tool fits which intent:
   - USD to or from a person, not a protocol: the P2P OTC desk, or \`ramp_quote\` for a whole route.
   - launch or trade a token on a bonding curve: the NGU tools.
   - launch, mint or redeem an NFT collection on a bonding curve (the staccpad fleet's NFT NGU on xGas): the *_nft_ngu tools, then \`submit_fleet\`. Each NFT redeems against its collection's vault; quote the live worst case from \`get_nft_ngu\`, never a remembered one.
+  - launch or mint an NFT drop on xGas (a PumpDrop curve that graduates into a locked pool, or a staged StaccDrop): \`list_drops\`, \`get_drop\`, \`launch_pump_drop\` / \`launch_drop\`, \`prepare_pump_buy\` / \`prepare_pump_sell\` / \`prepare_drop_mint\`, then \`submit_fleet\`.
+  - buy or sell an NFT against a pool, or open a market for a collection (staccpad peg markets on xGas): \`list_peg_markets\`, \`get_peg_market\`, \`prepare_peg_buy_floor\`, \`prepare_peg_sell\`, \`create_peg_market\`. Quotes include the xGas PoolManager's JIT toll.
 
 How every write tool behaves: it PREPARES an unsigned transaction and an approval screen, and it signs nothing. The person's own wallet signs, or, if they opted in, a Privy wallet that this host signs for. That wallet is custodial, and nobody reaches it without being signed in as them or holding a connector token they minted. Show them the approval screen before asking for a signature; the fees, the counterparty and the irreversible steps are already written on it.
 
