@@ -112,3 +112,15 @@ server.js runs autoExecuteClaimable every 20s: any tracked send with position < 
 ## L4 466302 has the canonical CREATE2 proxy (0x4e59…956C) since 2026-10-08, via the delayed inbox
 The RPC rejects the presigned Arachnid tx ("intrinsic gas too low": 100k gas is under Nitro's intrinsic cost once the parent data fee is added). Sending the same raw tx through Inbox.sendL2Message (kind 0x04, signed tx) on Robinhood landed it in about 10 s (RH tx 0x8727…b47e). Script: scripts/force-include-l4-create2.mjs. Use the same route for any other presigned keyless deploy.
 **Why:** the staccpad fleet's StaccpadHook needs a mined CREATE2 address, and HookMiner hardcodes this deployer.
+
+## staccpad fleet runs on the L4 (2026-10-08); addresses live in l4-deployment.json `fleet`
+Infra (PoolManager 0xEA2c…f1B0 = the JitToll fork, PositionManager, Permit2, WrappedXMoney, Multicall3, ERC-6551 registry, V4Quoter, StateView, XgasFleetTreasury) plus nft-range's peg/NGU/drops/CLMM/pawn, all owned by 0x26E8…5158. Fees: XgasFleetTreasury unwraps WXM and forwards to the Fireball FanoutSink. Records: contracts/relaunch/fleet-466302-deployed.json. Site tabs /nft /drops /markets and MCP fleet tools read only the `fleet` block (served by /api/l4-info).
+**Why:** one manifest for site, server and MCP, same rule as desk generations.
+
+## Landmine: anything that adds v4 liquidity on the L4 must leave room for the JIT toll
+The L4 PoolManager adds (lpFee + 10bp)·n² to what an LP add owes, so exact max amounts revert in PositionManager (MaximumAmountExceeded). nft-range PegRouter reads `refsThisTx` and sizes for it (002413d); NguLocker swallows the revert and refunds, so a missing fix looks like "LP slice 0", not a failure. The first peg stack (PegFactory 0x180D…902C, NguFactory 0xA02e…9C99) predates the fix and is superseded.
+**Why:** NGU-with-LP canary minted no position; trace showed MaximumAmountExceeded(1e14, 1.004e14).
+
+## forge script cannot broadcast big deploys on the L4: replay its plan with node gas estimates
+forge prices L4 gas as plain EVM gas and misses the parent posting fee (10-15x on large initcode) → "intrinsic gas too low". Simulate with forge, then `node scripts/replay-forge-broadcast-l4.mjs <dry-run/run-latest.json> <record.json>` (checks every nonce and CREATE address against forge's plan). Guarded forge runner for nft-range: scripts/run-fleet-forge.mjs.
+**Why:** first fleet broadcast failed on PegFactory (forge 29M gas, node 425M).
