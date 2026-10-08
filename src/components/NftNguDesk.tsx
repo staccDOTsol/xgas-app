@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { sendL4Tx } from '../contracts/gas';
 import { L4GasPanel } from './L4GasPanel';
 import { Disclosure } from './Disclosure';
 import { UserWallet } from '../types';
+import { tool, sendPrepared, plain } from './fleet/connector';
 import { Rocket, TrendingUp, TrendingDown, RefreshCw, AlertTriangle, Wallet, Info, Image as ImageIcon } from 'lucide-react';
 
 // NFT NGU: the staccpad fleet's bonding-curve NFT collections, live on the xGas L4.
@@ -24,31 +24,6 @@ interface Collection {
   lp_bps: number;
   fees: string;
   holder?: { redeemable_ids: string[]; companion_ids: string[] };
-}
-
-interface PreparedTx { label: string; chainId: number; to: string; data: string; value: string }
-
-// Stranger-written names arrive wrapped in «» for models; the page shows them plain.
-const plain = (s: string) => String(s ?? '').replace(/[«»]/g, '').replace(/\*\*/g, '');
-
-async function tool<T = any>(name: string, args: Record<string, unknown>): Promise<{ summary: string; data: T }> {
-  const r = await fetch(`/api/connector/${name}`, {
-    method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || `${name} failed (${r.status})`);
-  return j;
-}
-
-async function sendPrepared(data: { transactions?: PreparedTx[] }) {
-  const txs = data?.transactions || [];
-  if (!txs.length) throw new Error('Nothing to sign.');
-  let last = '';
-  for (const t of txs) {
-    const r = await sendL4Tx({ to: t.to, data: t.data, valueWei: BigInt(t.value || '0'), waitForConfirmation: true });
-    last = (r as any)?.hash || last;
-  }
-  return last;
 }
 
 function CollectionCard({ c, wallet, onTrade }: { c: Collection; wallet: UserWallet; onTrade: () => void }) {
