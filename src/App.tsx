@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { OrbitXMoneyOtc } from './components/OrbitXMoneyOtc';
 import { NguLaunchpad } from './components/NguLaunchpad';
+import { NftNguDesk } from './components/NftNguDesk';
 import { McpConnector } from './components/McpConnector';
 import { RobinhoodOtc, rememberRobinhoodReturn, restoreRobinhoodReturn } from './components/RobinhoodOtc';
 import { Hero } from './components/Hero';
@@ -23,19 +24,20 @@ function setWalletDisconnectedFlag(on: boolean) {
 // The retired chain. A wallet still on it gets told why, not just that it is on the wrong network.
 const LEGACY_L4_CHAIN_ID = CONTRACT_ADDRESSES.ORBIT_L4_LEGACY_CHAIN_ID;
 
-type AppTab = 'mcp' | 'otc' | 'ngu' | 'robinhood';
+type AppTab = 'mcp' | 'otc' | 'ngu' | 'nft' | 'robinhood';
 // /robinhood (and anything under it) is the X Money dollars <-> ETH desk on Robinhood Chain. The Express catch-all
 // serves index.html for it, so the path alone decides the tab on load and on back/forward.
 const isRobinhoodPath = () => typeof window !== 'undefined' && /^\/robinhood(\/|$)/i.test(window.location.pathname);
 // Every tab is a real URL, so a link (or a bot's instructions) can land someone on the right screen:
-// /mcp, /ngu, /robinhood, and /otc (the desk writes its own sub-paths such as /fomo3d or /order/:id).
-const TAB_PATHS: Record<AppTab, string> = { otc: '/otc', mcp: '/connector', ngu: '/ngu', robinhood: '/robinhood' };
+// /mcp, /ngu, /nft, /robinhood, and /otc (the desk writes its own sub-paths such as /fomo3d or /order/:id).
+const TAB_PATHS: Record<AppTab, string> = { otc: '/otc', mcp: '/connector', ngu: '/ngu', nft: '/nft', robinhood: '/robinhood' };
 const tabFromPath = (): AppTab => {
   if (typeof window === 'undefined') return 'otc';
   if (isRobinhoodPath()) return 'robinhood';
   const first = window.location.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
   if (first === 'mcp' || first === 'connector') return 'mcp';
   if (first === 'ngu' || first === 'launchpad') return 'ngu';
+  if (first === 'nft' || first === 'nfts' || first === 'staccpad') return 'nft';
   return 'otc';
 };
 
@@ -476,6 +478,10 @@ export default function App() {
             className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'ngu' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
             NGU launchpad
           </button>
+          <button onClick={() => setTab('nft')}
+            className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'nft' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
+            NFT NGU
+          </button>
           <button onClick={() => setTab('robinhood')}
             className={`px-4 py-2 rounded-xl text-xs font-black font-mono uppercase tracking-wide cursor-pointer transition-colors ${tab === 'robinhood' ? 'bg-emerald-500 text-slate-950' : 'bg-[#121624] border border-[#1e2538] text-slate-400 hover:text-white'}`}>
             Robinhood desk
@@ -491,6 +497,8 @@ export default function App() {
             onConnectWallet={handleConnectWallet}
             xHandle={xUser?.handle ?? null}
           />
+        ) : tab === 'nft' ? (
+          <NftNguDesk wallet={wallet} onConnectWallet={handleConnectWallet} />
         ) : (
           <NguLaunchpad wallet={wallet} onConnectWallet={handleConnectWallet} />
         )}

@@ -4,8 +4,20 @@
     {
       "name": "anyquote",
       "runtimeExecutable": "/bin/sh",
-      "runtimeArgs": ["-c", "cd /Users/stacc/tape/anyquote/scaffolds/anyquote && exec npx next dev --turbopack --port 3400"],
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/stacc/tape/anyquote/scaffolds/anyquote && exec npx next dev --turbopack --port 3400"
+      ],
       "port": 3400
+    },
+    {
+      "name": "xgas-site",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/stacc/xgas-app && XGAS_DATA_DIR_DEV=/private/tmp/claude-502/-Users-stacc-xgas-app/a0e7fa54-0b30-4186-863b-20dac1222b29/scratchpad/xgas-data PORT=3411 exec node server.js"
+      ],
+      "port": 3411
     }
   ]
 }
