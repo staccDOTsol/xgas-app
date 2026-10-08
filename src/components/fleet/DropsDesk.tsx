@@ -6,7 +6,7 @@ import { card, inset, inputCls, btnPrimary, btnGhost, Stat, Field, Msg, useActio
 import { Rocket, RefreshCw, Wallet, Sparkles, TrendingUp, TrendingDown } from 'lucide-react';
 
 // Drops on xGas from the staccpad fleet: PumpDrop curves (graduate into a locked pool) and staged StaccDrops.
-interface Drop { kind: 'pump' | 'drop'; collection: string; name: string; symbol: string; [k: string]: any }
+interface Drop { kind: 'pump' | 'drop' | 'clmm'; collection: string; name: string; symbol: string; [k: string]: any }
 
 function PumpCard({ d, wallet, onTrade }: { d: Drop; wallet: UserWallet; onTrade: () => void }) {
   const [qty, setQty] = useState('1');
@@ -64,7 +64,7 @@ function PumpCard({ d, wallet, onTrade }: { d: Drop; wallet: UserWallet; onTrade
           </div>
         </div>
       )}
-      <div className="text-[10px] text-slate-500 leading-snug">{d.how_it_works}</div>
+      <div className="text-[10px] text-slate-500 leading-snug">{d.graduated ? 'Graduated: the curve is closed and this collection now trades in NFT markets.' : d.how_it_works}</div>
       <Msg err={a.err} ok={a.ok} />
     </div>
   );
@@ -97,20 +97,49 @@ function StaccDropCard({ d, wallet, onTrade }: { d: Drop; wallet: UserWallet; on
   );
 }
 
+function ClmmCard({ d, wallet, onTrade }: { d: Drop; wallet: UserWallet; onTrade: () => void }) {
+  const [qty, setQty] = useState('1');
+  const a = useAction();
+  return (
+    <div className={card}>
+      <div className="min-w-0"><div className="font-black text-white truncate">{plain(d.name)}</div><div className="text-xs font-mono text-slate-400">{plain(d.symbol)} · liquidity launch · {d.collection.slice(0, 6)}…{d.collection.slice(-4)}</div></div>
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="price" value={d.mint_price_xmoney} />
+        <Stat label="minted" value={`${d.minted}/${d.max_supply}`} />
+        <Stat label="to lp" value={`${(d.lp_proceeds_bps / 100).toFixed(0)}%`} cls="text-cyan-300" />
+      </div>
+      {!d.sold_out && (
+        <div className="flex gap-1.5">
+          <input value={qty} onChange={(e) => setQty(e.target.value)} inputMode="numeric" aria-label="NFTs to mint" className={inputCls} />
+          <button className={btnPrimary} disabled={a.busy || !wallet.connected} onClick={() => a.run(async () => {
+            const r = await tool('prepare_clmm_mint', { collection: d.collection, qty: Math.floor(Number(qty)) });
+            if (!r.data?.transactions) throw new Error(plain(r.summary));
+            await sendPrepared(r.data); onTrade(); return `Minted ${qty}.`;
+          })}>{a.busy ? '…' : 'Mint'}</button>
+        </div>
+      )}
+      <div className="text-[10px] text-slate-500 leading-snug">{d.how_it_works}</div>
+      <Msg err={a.err} ok={a.ok} />
+    </div>
+  );
+}
+
 function LaunchPump({ wallet, onLaunched }: { wallet: UserWallet; onLaunched: () => void }) {
-  const [kind, setKind] = useState<'pump' | 'drop'>('pump');
+  const [kind, setKind] = useState<'pump' | 'drop' | 'clmm'>('pump');
   const [f, setF] = useState({ name: '', symbol: '', base_uri: '', supply: '100', base: '0.001', final: '0.01', price: '0.005' });
   const [preview, setPreview] = useState<string | null>(null);
   const a = useAction();
   const set = (k: keyof typeof f) => (v: string) => setF((x) => ({ ...x, [k]: v }));
-  const args = () => kind === 'pump'
-    ? ['launch_pump_drop', { name: f.name, symbol: f.symbol, base_uri: f.base_uri, supply: Number(f.supply), base_price_xmoney: f.base, final_price_xmoney: f.final }] as const
-    : ['launch_drop', { name: f.name, symbol: f.symbol, base_uri: f.base_uri, max_supply: Number(f.supply), price_xmoney: f.price }] as const;
+  const args = (): readonly [string, Record<string, unknown>] => kind === 'pump'
+    ? ['launch_pump_drop', { name: f.name, symbol: f.symbol, base_uri: f.base_uri, supply: Number(f.supply), base_price_xmoney: f.base, final_price_xmoney: f.final }]
+    : kind === 'clmm'
+      ? ['launch_clmm_collection', { name: f.name, symbol: f.symbol, base_uri: f.base_uri, max_supply: Number(f.supply), mint_price_xmoney: f.price, lp_proceeds_bps: 5000, companions_per_mint: 1 }]
+      : ['launch_drop', { name: f.name, symbol: f.symbol, base_uri: f.base_uri, max_supply: Number(f.supply), price_xmoney: f.price }];
   return (
     <div className={card}>
       <div className="font-black text-white flex items-center gap-2"><Rocket className="w-4 h-4 text-emerald-400" /> Launch a drop</div>
       <div className="flex gap-1.5">
-        {(['pump', 'drop'] as const).map((k) => <button key={k} onClick={() => setKind(k)} className={kind === k ? btnPrimary : btnGhost}>{k === 'pump' ? 'Pump curve' : 'Fixed price'}</button>)}
+        {(['pump', 'drop', 'clmm'] as const).map((k) => <button key={k} onClick={() => setKind(k)} className={kind === k ? btnPrimary : btnGhost}>{k === 'pump' ? 'Pump curve' : k === 'clmm' ? 'Liquidity launch' : 'Fixed price'}</button>)}
       </div>
       <div className="grid grid-cols-2 gap-2">
         <Field label="name" value={f.name} onChange={set('name')} />
@@ -128,7 +157,9 @@ function LaunchPump({ wallet, onLaunched }: { wallet: UserWallet; onLaunched: ()
           const [n, x] = args();
           const r = await tool(n, x);
           const hash = await sendPrepared(r.data);
-          const found = hash ? await tool('find_drop_launch', { tx_hash: hash }) : null;
+          const found = kind === 'clmm'
+            ? await tool('list_clmm_collections', { limit: 1 }).then((x) => ({ data: { collection: x.data?.collections?.[0]?.collection } })).catch(() => null)
+            : hash ? await tool('find_drop_launch', { tx_hash: hash }) : null;
           onLaunched();
           return `Live: ${found?.data?.collection || hash}`;
         })}>{a.busy ? 'Launching…' : wallet.connected ? 'Launch' : 'Connect a wallet to launch'}</button>
@@ -145,7 +176,11 @@ export function DropsDesk({ wallet, onConnectWallet }: { wallet: UserWallet; onC
   const [loading, setLoading] = useState(false);
   const load = useCallback(async () => {
     setLoading(true); setErr(null);
-    try { const r = await tool('list_drops', { limit: 50 }); setDrops((r.data?.drops || []).filter((d: any) => !d.error)); }
+    try {
+      const [r, c] = await Promise.all([tool('list_drops', { limit: 50 }), tool('list_clmm_collections', { limit: 50 }).catch(() => null)]);
+      const clmm = (c?.data?.collections || []).filter((d: any) => !d.error).map((d: any) => ({ ...d, kind: 'clmm' }));
+      setDrops([...clmm, ...(r.data?.drops || []).filter((d: any) => !d.error)]);
+    }
     catch (e: any) { setErr(e?.message || 'Could not load drops'); } finally { setLoading(false); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -154,7 +189,7 @@ export function DropsDesk({ wallet, onConnectWallet }: { wallet: UserWallet; onC
       <div className={`${card} !flex-row flex-wrap items-center justify-between`}>
         <div className="min-w-0">
           <div className="font-black text-white text-xl flex items-center gap-2"><Sparkles className="w-5 h-5 text-fuchsia-400" /> Drops</div>
-          <div className="text-xs text-slate-400 mt-1">Pump curves you can sell back into until they sell out and graduate into a locked pool, and classic fixed-price drops. From the staccpad fleet, on xGas.</div>
+          <div className="text-xs text-slate-400 mt-1">Pump curves you can sell back into until they graduate into a locked pool, fixed-price drops, and liquidity launches that lock part of every mint into the collection's own market. From the staccpad fleet, on xGas.</div>
         </div>
         <div className="flex gap-2">
           <button onClick={load} className={`${btnGhost} flex items-center gap-1`}><RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh</button>
@@ -166,7 +201,9 @@ export function DropsDesk({ wallet, onConnectWallet }: { wallet: UserWallet; onC
           <Msg err={err} />
           {drops && !drops.length && !err && <div className="text-sm text-slate-400">No drops yet. Launch the first one.</div>}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            {(drops || []).map((d) => d.kind === 'pump' ? <PumpCard key={d.collection} d={d} wallet={wallet} onTrade={load} /> : <StaccDropCard key={d.collection} d={d} wallet={wallet} onTrade={load} />)}
+            {(drops || []).map((d) => d.kind === 'pump' ? <PumpCard key={d.collection} d={d} wallet={wallet} onTrade={load} />
+              : d.kind === 'clmm' ? <ClmmCard key={d.collection} d={d} wallet={wallet} onTrade={load} />
+              : <StaccDropCard key={d.collection} d={d} wallet={wallet} onTrade={load} />)}
           </div>
         </div>
         <div className="flex flex-col gap-3">
