@@ -1,6 +1,6 @@
 // Reviewed XSwap V2 identity and tax-aware base-unit arithmetic. This module never signs or sends.
 import { encodeAbiParameters, keccak256, parseAbi } from 'viem';
-import { L3, PARENT_CHAIN_ID, XSWAP_V2, parent } from './config.mjs';
+import { L3, PARENT_CHAIN_ID, XSWAP_V2, parent, validXswapOwner } from './config.mjs';
 import { XSWAP_V2_INTENTS_ABI, XSWAP_V2_ASKS_ABI } from './abis.mjs';
 
 export const XSWAP_V2_SITE_BPS = 10n;
@@ -104,12 +104,14 @@ export async function verifyXSwapV2() {
     }),
   ]);
   // The Promise order above is collector, XMoney/sink, then nine OUT getters and nine IN getters.
+  // The escrow owner is not pinned here: it is the arbiter, and it is meant to move off the exposed deploy key.
+  // Both escrows must name the same usable owner; whether that owner may arbitrate new swaps is acceptNewSwaps()'s call.
   if (!same(collectorOwner, '0x3CacEA9579D61e6BE8C4c75C0537564761A6f8ea')
     || !same(collectorExecutor, '0x93CD9A6535326935798da987cdCc6cFf4CA4FB54')
     || !same(linkedIntents, XSWAP_V2.intents) || !same(linkedAsks, XSWAP_V2.asks)
     || !same(collectorXm, L3.xMoney) || !same(sink, XSWAP_V2_SINK) || configured !== true
     || BigInt(burnBps) !== XSWAP_V2_BURN_BPS || !same(sinkToken, SITE_TOKEN)
-    || !same(outOwner, XSWAP_V2.expectedOwner) || !same(inOwner, XSWAP_V2.expectedOwner)
+    || !validXswapOwner(outOwner) || !same(outOwner, inOwner)
     || !same(outXm, L3.xMoney) || !same(inXm, L3.xMoney)
     || !same(outCollector, XSWAP_V2.collector) || !same(inCollector, XSWAP_V2.collector)
     || !same(outTreasury, XSWAP_V2.treasury) || !same(inTreasury, XSWAP_V2.treasury)
@@ -118,10 +120,126 @@ export async function verifyXSwapV2() {
     || !same(inHash, xswapV2TermsHash(inFee, inBond, inWindow, inBidding, inTreasury))) {
     throw new Error('XSwap V2 owner, fee, collector or terms no longer match the reviewed deployment.');
   }
-  return { out: { window: Number(outWindow), bidding: Number(outBidding), bondBps: Number(outBond), feeBps: Number(outFee), termsHash: outHash },
+  return { owner: outOwner,
+    out: { window: Number(outWindow), bidding: Number(outBidding), bondBps: Number(outBond), feeBps: Number(outFee), termsHash: outHash },
     in: { window: Number(inWindow), bidding: Number(inBidding), bondBps: Number(inBond), feeBps: Number(inFee), termsHash: inHash } };
 }
 
 export function assertXSwapV2NewOrdersEnabled() {
   if (!XSWAP_V2.enabled) throw new Error('XSwap V2 new funding and claims are paused on this build (XSWAP_V2.enabled is false in mcp/src/config.mjs). No transaction was prepared.');
+}
+
+// ───────────────────────────── the new-swap gate (one source of truth) ─────────────────────────────
+//
+// owner() of the V2 escrows alone runs resolve(): it decides every dispute, and a ruling for the solver releases the
+// payer's escrow. While that owner is a key treated as exposed, new swaps stay closed on this connector: no open,
+// ask, bid, claim, accept or delivered is prepared or relayed. Refund, cancel, settle, confirm, dispute and withdraw
+// of swaps that already exist keep working. INSTRUCTIONS, xswap_terms, quote_xswap, every prepare path and
+// submit_xswap all read this gate.
+
+const OWNER_ONLY_ABI = parseAbi(['function owner() view returns (address)']);
+const GATE_TTL_MS = 30_000; // a successful read; owner() moves rarely, and the gate fails closed in between
+const GATE_RETRY_MS = 5_000; // a failed read is retried soon, and the gate stays closed until then
+// Opt-in pause list: XSWAP_V2.exposedOwners in source (empty) plus XSWAP_V2_EXPOSED on the host, a comma list of
+// "0xaddr" or "0xaddr:YYYY-MM-DD". Read on every decision so an operator can pause or unpause with a secret change.
+const exposedList = () => [
+  ...XSWAP_V2.exposedOwners,
+  ...String(process.env.XSWAP_V2_EXPOSED ?? '').split(',').map((x) => x.trim()).filter(Boolean)
+    .map((x) => { const [address, since = 'host setting'] = x.split(':'); return { address, since }; }),
+];
+
+/** XSWAP_V2_OWNER on the host: when set, new swaps only reopen once owner() is exactly this address. */
+export function xswapV2PinnedOwner() {
+  // Unset on the host: the escrows' deployed owner is the expected one (same as before the gate existed).
+  const v = String(process.env.XSWAP_V2_OWNER ?? '').trim() || XSWAP_V2.deployedOwner;
+  return v && validXswapOwner(v) ? v : null;
+}
+
+/** Is this owner on the exposed list? Returns its entry ({ address, since }) or null. */
+export const exposedOwner = (a) => (a ? exposedList().find((e) => e.address.toLowerCase() === String(a).toLowerCase()) || null : null);
+
+/**
+ * Pure decision from the two live owner() reads. Open only when the source switch is on, both escrows answered,
+ * they name the same owner, that owner can sign (not zero, not forge's keyless default sender), it is not an
+ * exposed key, and, if the host pins one with XSWAP_V2_OWNER, it is that address.
+ */
+export function evaluateXSwapV2Gate({ intentsOwner, asksOwner, enabled = XSWAP_V2.enabled, pinned = xswapV2PinnedOwner(), readError = null }) {
+  const base = { intents_owner: intentsOwner ?? null, asks_owner: asksOwner ?? null, pinned_owner: pinned, exposed: null };
+  const closed = (code, reason, extra = {}) => ({ open: false, code, reason, ...base, ...extra });
+  if (!enabled) {
+    return closed('switched_off', 'XSwap V2 new swaps are switched off on this build (XSWAP_V2.enabled is false in mcp/src/config.mjs).');
+  }
+  if (readError || !intentsOwner || !asksOwner) {
+    return closed('owner_unreadable', `owner() of the V2 escrows could not be read just now${readError ? ` (${readError})` : ''}, so this connector cannot say who would rule on a dispute. New swaps stay closed until it can.`);
+  }
+  if (!same(intentsOwner, asksOwner)) {
+    return closed('owners_differ', `The V2 escrows name different owners (intents ${intentsOwner}, asks ${asksOwner}). This connector only opens new swaps when one owner arbitrates both directions.`);
+  }
+  const owner = intentsOwner;
+  if (!validXswapOwner(owner)) {
+    return closed('owner_unusable', `owner() of the V2 escrows is ${owner}, which nobody can sign for (zero, or forge's keyless default sender), so a dispute could never be resolved.`, { owner });
+  }
+  const hit = exposedOwner(owner);
+  if (hit) {
+    return closed('owner_exposed',
+      `owner() of the V2 escrows (intents ${XSWAP_V2.intents}, asks ${XSWAP_V2.asks}) is ${owner}, a key treated as exposed since ${hit.since}. `
+      + 'The owner alone resolves disputes: whoever holds that key could rule for a solver that never delivered, which pays that solver out of the payer\'s escrow, '
+      + 'or for a seller that never sent the asset, which pays that seller the buyer\'s payment and bond. New swaps reopen on this connector once ownership moves to the key this host pins in XSWAP_V2_OWNER.',
+      { owner, exposed: { address: hit.address, since: hit.since } });
+  }
+  // Fail closed: the exposed key can move ownership anywhere in one call, so a
+  // changed owner proves nothing until the operator pins the new one.
+  if (!pinned) {
+    return closed('owner_unpinned', `owner() of the V2 escrows is ${owner}, but this host has not pinned XSWAP_V2_OWNER, so it cannot tell a rotation from a takeover. New swaps stay closed until the operator pins the expected owner.`, { owner });
+  }
+  if (!same(owner, pinned)) {
+    return closed('owner_not_pinned', `owner() of the V2 escrows is ${owner}, but this host pins XSWAP_V2_OWNER=${pinned}. New swaps stay closed until they match.`, { owner });
+  }
+  return { open: true, code: 'open', reason: null, ...base, owner };
+}
+
+let gateCache = { at: 0, ok: false, value: null, promise: null };
+
+/** Read owner() on both V2 escrows and decide. Cached briefly; `fresh` skips the cache (write paths use it). */
+export async function xswapV2Gate({ fresh = false } = {}) {
+  const age = Date.now() - gateCache.at;
+  if (!fresh && gateCache.value && age < (gateCache.ok ? GATE_TTL_MS : GATE_RETRY_MS)) return gateCache.value;
+  if (!fresh && gateCache.promise) return gateCache.promise;
+  const run = (async () => {
+    let intentsOwner = null, asksOwner = null, readError = null;
+    try {
+      [intentsOwner, asksOwner] = await Promise.all([XSWAP_V2.intents, XSWAP_V2.asks]
+        .map((address) => parent.readContract({ address, abi: OWNER_ONLY_ABI, functionName: 'owner' })));
+    } catch (e) {
+      readError = e.shortMessage || e.message || String(e);
+    }
+    const value = { ...evaluateXSwapV2Gate({ intentsOwner, asksOwner, readError }), checked_at: new Date().toISOString() };
+    gateCache = { at: Date.now(), ok: !readError, value, promise: null };
+    return value;
+  })();
+  if (!fresh) gateCache.promise = run;
+  return run;
+}
+
+/** The last decision, without a network call. Before the first read it is closed: nothing has been checked yet. */
+export function xswapV2GateSnapshot() {
+  return gateCache.value || { open: false, code: 'not_checked', reason: 'This connector has not read owner() of the V2 escrows yet; xswap_terms reads it live.' };
+}
+
+/** Test hook: forget the cached decision. */
+export function resetXSwapV2Gate() { gateCache = { at: 0, ok: false, value: null, promise: null }; }
+
+/** May a new swap (open, ask, bid, claim, accept, delivered) be prepared or relayed right now? */
+export async function acceptNewSwaps({ fresh = false } = {}) {
+  return xswapV2Gate({ fresh });
+}
+
+/** Throws a refusal with the reason unless acceptNewSwaps() is open. Reads owner() fresh. */
+export async function assertAcceptNewSwaps(what, { nothing = 'Nothing was prepared.' } = {}) {
+  const g = await acceptNewSwaps({ fresh: true });
+  if (!g.open) {
+    throw new Error(`${what} refused: XSwap is paused for new swaps on this connector. ${g.reason} `
+      + `Refund, cancel, settle and withdraw of swaps that already exist still work (prepare_xswap_action). ${nothing}`);
+  }
+  return g;
 }

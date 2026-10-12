@@ -1,7 +1,10 @@
 import { decodeFunctionData, encodeAbiParameters, encodeFunctionData, isAddress, keccak256, parseUnits, formatUnits, parseAbi, parseTransaction, toFunctionSelector } from 'viem';
-import { L3, XSWAP, XSWAP_LEGACY, XSWAP_V2, PARENT_CHAIN_ID, parent, ZERO, FORGE_DEFAULT_SENDER, isXswapV1, isXswapLegacy, validXswapOwner } from '../config.mjs';
+import { L3, XSWAP, XSWAP_LEGACY, XSWAP_V2, PARENT_CHAIN_ID, parent, ZERO, FORGE_DEFAULT_SENDER, isXswapV1, validXswapOwner } from '../config.mjs';
 import { ERC20_ABI, XSWAP_INTENTS_ABI, XSWAP_ASKS_ABI, XSWAP_V2_INTENTS_ABI, XSWAP_V2_ASKS_ABI } from '../abis.mjs';
-import { assertXSwapV2NewOrdersEnabled, verifyXSwapV2, xswapV2GrossFor, xswapV2OutFunding, xswapV2InFloor } from '../xswapV2.mjs';
+import {
+  acceptNewSwaps, assertAcceptNewSwaps, exposedOwner, verifyXSwapV2, xswapV2GrossFor, xswapV2OutFunding, xswapV2InFloor,
+  XSWAP_V2_BURN_BPS, XSWAP_V2_PROTOCOL_BPS, XSWAP_V2_SINK, XSWAP_V2_SITE_BPS,
+} from '../xswapV2.mjs';
 import { fmtXMoney, parseXMoney } from '../money.mjs';
 import { prepared, renderApproval, reply } from '../approval.mjs';
 import { submitBatch, submitRaw } from '../idempotency.mjs';
@@ -60,8 +63,7 @@ const VENUES = [
 ];
 const venueOf = (contract) => VENUES.find((v) => v.contract.toLowerCase() === String(contract).toLowerCase()) || null;
 
-const readI = (fn, args = []) => parent.readContract({ address: XSWAP.intents, abi: XSWAP_INTENTS_ABI, functionName: fn, args });
-const readA = (fn, args = []) => parent.readContract({ address: XSWAP.asks, abi: XSWAP_ASKS_ABI, functionName: fn, args });
+const isV2Contract = (c) => [XSWAP_V2.intents, XSWAP_V2.asks].some((a) => a.toLowerCase() === String(c || '').toLowerCase());
 
 /** The hash every solver recomputes: chain, kind, token, amount, recipient. Lockstep with the site and the solver. */
 function wantHash(o) {
@@ -224,9 +226,15 @@ async function arbiter() {
 }
 
 const pendingNote = (o) => (o.pending_owner ? ` A handover to ${o.pending_owner} is pending; it takes effect only when that address calls acceptOwnership().` : '');
-const expected = (o) => (XSWAP.expectedOwner && o.owner
+// The legacy escrows are checked against the deployment file's owner. The V2 owner is not pinned (it is meant to move
+// off the deploy key); what matters there is whether it is a key treated as exposed.
+const expected = (o) => (!isV2Contract(o.contract) && XSWAP.expectedOwner && o.owner
   ? (o.owner.toLowerCase() === XSWAP.expectedOwner.toLowerCase() ? ' It matches the owner this connector is configured to expect.' : ` This connector is configured to expect ${XSWAP.expectedOwner} instead, so treat this as unverified.`)
   : '');
+const exposedNote = (o) => {
+  const hit = exposedOwner(o.owner);
+  return hit ? ` This key is treated as EXPOSED since ${hit.since}: someone other than its owner may hold it, so its rulings cannot be trusted.` : '';
+};
 
 /** Who resolves disputes on one escrow, in words. */
 function whoRules(o) {
@@ -238,62 +246,57 @@ function whoRules(o) {
     case 'safe':
       return `The Safe ${o.owner}: ${o.threshold} of its ${o.signers.length} signers (${o.signers.join(', ')}) must sign each ruling.${expected(o)}${pendingNote(o)}`;
     case 'eoa':
-      return `The single key ${o.owner}. Whoever holds it decides every dispute on this contract alone.${expected(o)}${pendingNote(o)}`;
+      return `The single key ${o.owner}${o.delegated ? ' (an EIP-7702 delegated account: still one key)' : ''}. Whoever holds it decides every dispute on this contract alone.${exposedNote(o)}${expected(o)}${pendingNote(o)}`;
     case 'contract':
-      return `The contract ${o.owner}, which does not answer like a Safe, so nobody can say who, if anyone, can make it rule. The deploy script refuses an owner like this, and so does this connector for new swaps.${expected(o)}${pendingNote(o)}`;
+      return isV2Contract(o.contract)
+        ? `The contract ${o.owner}, which does not answer like a Safe (it may be a timelock or another multisig): whoever can make that contract call resolve() decides every dispute here.${pendingNote(o)}`
+        : `The contract ${o.owner}, which does not answer like a Safe, so nobody can say who, if anyone, can make it rule. The deploy script refuses an owner like this, and so does this connector for new swaps.${expected(o)}${pendingNote(o)}`;
     default:
       return `Unknown: owner() could not be read from ${o.contract} just now.`;
   }
 }
 
-const HANDOVER = {
-  two: 'transferOwnership, which only names a pending owner: it takes over when it calls acceptOwnership(), so a handover to an address nobody signs for never happens. renounceOwnership() is disabled and always reverts.',
-  one: 'transferOwnership, which takes effect at once, and renounceOwnership (renouncing, or handing over to an address nobody signs for, would leave disputes unresolvable for good).',
+const HANDOVER_V2 = 'transferOwnership, which takes effect at once (plain Ownable, no acceptOwnership step), and renounceOwnership, which would leave every future dispute unresolvable for good.';
+/** What the V2 owner can and cannot do, read from XSwapIntentsV2 / XSwapAsksV2 (aggregator contracts-xswap-fee). */
+const V2_OWNER_POWERS = {
+  out: `On the V2 intents contract (X Money out) the owner can: resolve(id, forUser) on a disputed intent, and only a disputed one (for the user, the whole escrow and the solver's bond are credited to the user; for the solver, it settles as if never disputed, the solver is paid and the user's record gains a lost dispute); setParams: challenge window 10 min to 7 days, solver bond 25% to 200% of the escrow, protocol fee up to 2%, and the treasury the fee goes to (bidding is fixed at 2 minutes); ${HANDOVER_V2} It cannot move any other swap's money, withdraw anyone's credit, pause or upgrade the contract.`,
+  in: `On the V2 asks contract (X Money in) the owner can: resolve(id, forBuyer) on a disputed ask, and only a disputed one (for the buyer, their payment and bond are credited back; for the seller, it settles and the buyer's bond goes to the seller); setParams: challenge window 10 min to 7 days, bidding 30 s to 1 day, buyer bond 10% to 200%, protocol fee up to 2%, and the treasury; ${HANDOVER_V2} It cannot move any other swap's money, withdraw anyone's credit, pause or upgrade the contract.`,
 };
-const ownerPowers = (arb) => ({
-  out: `On the intents contract (X Money out) the owner can: resolve(id, forUser) on a disputed intent, and only a disputed one (for the user, the escrow and the solver's bond go to the user; for the solver, it settles as if never disputed); setParams: challenge window 10 min to 7 days, solver bond 25% to 200% of the escrow, protocol fee up to 2%, and the treasury the fee goes to; ${HANDOVER[arb.out.two_step ? 'two' : 'one']} It cannot move any other swap's money, withdraw anyone's credit, pause or upgrade the contract.`,
-  in: `On the asks contract (X Money in) the owner can: resolve(id, forBuyer) on a disputed ask, and only a disputed one (for the buyer, their payment and bond go back; for the seller, it settles and the buyer's bond goes to the seller); setParams: challenge window 10 min to 7 days, bidding 30 s to 1 day, buyer bond 10% to 200%, protocol fee up to 2%, and the treasury; ${HANDOVER[arb.in.two_step ? 'two' : 'one']} It cannot move any other swap's money, withdraw anyone's credit, pause or upgrade the contract.`,
-});
-const PARAMS_IN_FLIGHT = 'Parameter changes reach swaps already in flight: the fee is computed at settlement from the rate at that moment, and the challenge window is read whenever a dispute or a settle is checked. A bond is fixed when its bid lands.';
-const BURN_NOTE = XSWAP.v1
-  ? 'xMoney burns 0.01% of every transfer. These v1 contracts book the amount sent, not the amount that arrives, so they can owe slightly more than they hold and the last withdrawal can come up short.'
-  : 'xMoney burns 0.01% of every transfer, on the way into the escrow and again on the way out. The escrow books what actually arrives.';
+const V2_PARAMS_IN_FLIGHT = 'Parameter changes do not reach swaps already open: each V2 order freezes its protocol fee, bond rate, challenge window and treasury when it is opened, and a site-fee order also signs the terms hash, so an order prepared under old terms reverts (TermsChanged) instead of landing under new ones.';
 
-// ───────────────────────────── the pause ─────────────────────────────
-
-/** Why new swaps are off, or null when the configuration allows them (the live owner check still follows). */
-function pausedReason() {
-  if (XSWAP_V2.enabled) return null; // new orders go to the reviewed V2 escrows; the legacy pair is exit-only
-  if (XSWAP.v1) {
-    return `XSwap is paused for new swaps. The escrow contracts this connector points at (intents ${XSWAP.intents}, asks ${XSWAP.asks}, Robinhood Chain 4663) have owner() = ${FORGE_DEFAULT_SENDER}, forge-std's default sender, which no one holds a key for: their deploy script read msg.sender before it started broadcasting. Only the owner can resolve a dispute, so on these contracts a disputed swap would stay frozen forever, escrow and bond both. `;
-  }
-  if (isXswapLegacy(XSWAP.intents) || isXswapLegacy(XSWAP.asks)) {
-    return `New XSwap funding and claims are paused on the fee-free legacy escrows ${XSWAP.intents} and ${XSWAP.asks}. Existing orders remain readable and may be refunded, cancelled, settled or withdrawn through their original contract.`;
-  }
-  if (!XSWAP.addressesOk) return `XSwap is paused: the configured escrow addresses (intents ${XSWAP.intents}, asks ${XSWAP.asks}) are not both valid addresses.`;
-  if (!XSWAP.flag) {
-    return `XSwap is switched off on this host: XSWAP_ENABLED is not set, and the deployment file's xswap block does not say "enabled": true. Contracts: intents ${XSWAP.intents}, asks ${XSWAP.asks} (from the ${XSWAP.source}).`;
-  }
-  if (!validXswapOwner(XSWAP.expectedOwner)) {
-    const why = XSWAP.expectedOwner
-      ? `the configured expected owner ${XSWAP.expectedOwner} (XSWAP_OWNER or xswap.owner) is not an address anyone can sign for`
-      : 'no expected owner is configured (XSWAP_OWNER, or "owner" in the deployment file\'s xswap block)';
-    return `XSwap is switched off on this host: ${why}. New swaps only open once owner() on both escrows can be checked against the owner the deployment says it set.`;
-  }
-  return 'New XSwap orders must use the reviewed V2 site-fee path. This legacy ABI cannot prepare one.';
+/** The V2 escrows' live terms, read from the contracts. */
+async function v2Terms() {
+  const fns = ['window', 'bidding', 'bondBps', 'feeBps', 'treasury'];
+  const [o, i] = await Promise.all([[XSWAP_V2.intents, XSWAP_V2_INTENTS_ABI], [XSWAP_V2.asks, XSWAP_V2_ASKS_ABI]]
+    .map(([address, abi]) => Promise.all(fns.map((functionName) => parent.readContract({ address, abi, functionName })))));
+  const shape = ([w, b, bond, fee, treasury]) => ({ window_s: Number(w), bidding_s: Number(b), bond_bps: Number(bond), fee_bps: Number(fee), treasury });
+  return { out: shape(o), in: shape(i) };
 }
+
+/** Who rules on the V2 escrows right now (owner() read live, cached a minute like the legacy arbiter). */
+let v2ArbiterCache = { at: 0, value: null };
+async function v2Arbiter() {
+  if (v2ArbiterCache.value && Date.now() - v2ArbiterCache.at < 60_000) return v2ArbiterCache.value;
+  const [out, inn] = await Promise.all([ownerOf(XSWAP_V2.intents), ownerOf(XSWAP_V2.asks)]);
+  const value = { out, in: inn };
+  if (out.kind !== 'unknown' && inn.kind !== 'unknown') v2ArbiterCache = { at: Date.now(), value };
+  return value;
+}
+
 /**
  * What still works while new swaps are off. Dispute is only a way out when someone can rule on it: on a contract whose
- * owner is nobody (v1), it freezes the escrow and the bond forever, so it is not listed as an exit there.
+ * owner is nobody (v1), it freezes the escrow and the bond forever, so it is not listed as an exit there. Where the
+ * owner is an exposed key, a dispute still prepares, but whoever holds that key rules on it.
  */
 export function stillWorks(arb) {
   const nobody = XSWAP.v1 || arb?.out?.kind === 'nobody' || arb?.in?.kind === 'nobody';
-  return nobody
-    ? 'Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, withdraw). Dispute is NOT a way out on these contracts: nobody can rule on it, so it freezes the escrow and the bond forever, and the disputing side never gets its X Money back. Its only effect is that the other side is never paid either.'
-    : 'Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, dispute inside the window, withdraw).';
+  const exposed = [arb?.out?.owner, arb?.in?.owner].map(exposedOwner).find(Boolean);
+  if (nobody) return 'Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, withdraw). Dispute is NOT a way out on these contracts: nobody can rule on it, so it freezes the escrow and the bond forever, and the disputing side never gets its X Money back. Its only effect is that the other side is never paid either.';
+  if (exposed) return `Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, withdraw). A dispute inside the window still prepares, but it is ruled on by ${exposed.address}, a key treated as exposed since ${exposed.since}.`;
+  return 'Still available: xswap_terms, xswap_status, list_my_xswaps, xswap_reputation, quote_xswap, and the ways out of a swap that already exists (refund after its deadline, cancel, settle, confirm, dispute inside the window, withdraw).';
 }
 
-/** Steps that start a swap or move one closer to a dispute: they need a switched-on XSwap with a real owner. */
+/** Steps that start a swap or move one closer to a dispute: they need acceptNewSwaps() open (and a V2 escrow). */
 const GATED_ACTIONS = new Set(['bid', 'claim', 'accept', 'delivered']);
 const selectorsOf = (abi, names) => abi.filter((x) => x.type === 'function' && names.includes(x.name)).map((f) => toFunctionSelector(f));
 const LEGACY_FUNDING_SELECTORS = new Set([
@@ -309,8 +312,8 @@ const KEYLESS_DISPUTE_SELECTORS = new Set([
 ]);
 
 /**
- * What is wrong with the live owners, if anything: nobody can sign, unreadable, a contract that is not a Safe, no
- * expected owner configured, or not the owner configured. Only a Safe or a key that matches the configured owner passes.
+ * What is wrong with the live owners of the legacy escrows, if anything: nobody can sign, unreadable, a contract that
+ * is not a Safe, no expected owner configured, or not the owner configured. Only a Safe or a key that matches passes.
  */
 export function ownerProblems(arb) {
   const problems = [];
@@ -331,6 +334,7 @@ export async function assertRelayAllowed(raws) {
   const configured = new Set([XSWAP.intents, XSWAP.asks].map((a) => a.toLowerCase()));
   const legacy = new Set([...XSWAP_LEGACY.intents, ...XSWAP_LEGACY.asks].map((a) => a.toLowerCase()));
   const v2 = new Set([XSWAP_V2.intents, XSWAP_V2.asks].map((a) => a.toLowerCase()));
+  const sent = { nothing: 'Nothing was sent.' };
   for (const raw of raws) {
     let tx;
     try { tx = parseTransaction(raw); } catch { continue; } // not a transaction: the RPC rejects it
@@ -345,10 +349,7 @@ export async function assertRelayAllowed(raws) {
         if (decoded.functionName === 'approve') spender = String(decoded.args[0]).toLowerCase();
       } catch { /* malformed calldata is left for RPC to reject */ }
       if (legacy.has(spender)) throw new Error('submit_xswap refused: approval to a legacy XSwap escrow would enable fee-free funding. Nothing was sent.');
-      if (v2.has(spender)) {
-        assertXSwapV2NewOrdersEnabled();
-        await verifyXSwapV2();
-      }
+      if (v2.has(spender)) await gatedV2('submit_xswap (approval to a V2 escrow)', sent);
     }
     if (legacy.has(to) && LEGACY_FUNDING_SELECTORS.has(sel)) {
       throw new Error(`submit_xswap refused: ${to} is a legacy XSwap escrow. New funding, bids and claims there are disabled. Nothing was sent.`);
@@ -356,30 +357,30 @@ export async function assertRelayAllowed(raws) {
     if (isXswapV1(to) && KEYLESS_DISPUTE_SELECTORS.has(sel)) {
       throw new Error(`submit_xswap refused: a dispute on keyless-owner legacy escrow ${to} cannot be resolved. Nothing was sent.`);
     }
-    if (v2.has(to) && V2_FUNDING_SELECTORS.has(sel)) {
-      assertXSwapV2NewOrdersEnabled();
-      await verifyXSwapV2();
-    }
+    if (v2.has(to) && V2_FUNDING_SELECTORS.has(sel)) await gatedV2('submit_xswap', sent);
     if (configured.has(to) && !legacy.has(to) && !v2.has(to) && LEGACY_FUNDING_SELECTORS.has(sel)) {
       throw new Error('submit_xswap refused: new funding on an unreviewed XSwap escrow is disabled. Nothing was sent.');
     }
   }
 }
 
-async function terms() {
-  const [iw, ib, ibond, ifee, aw, ab, abond, afee] = await Promise.all([
-    readI('window'), readI('bidding'), readI('bondBps'), readI('feeBps'),
-    readA('window'), readA('bidding'), readA('bondBps'), readA('feeBps'),
-  ]);
-  return {
-    out: { window_s: Number(iw), bidding_s: Number(ib), bond_bps: Number(ibond), fee_bps: Number(ifee) },
-    in: { window_s: Number(aw), bidding_s: Number(ab), bond_bps: Number(abond), fee_bps: Number(afee) },
-  };
+const arbiterNote = (owner) => `Disputes on this order are ruled on by the escrow owner ${owner} alone (xswap_terms says what it can and cannot do).`;
+
+/**
+ * Every new-swap path: acceptNewSwaps() must be open (owner() read fresh), the V2 deployment must verify, and both
+ * reads must name the same owner, so an ownership change between them cannot slip a swap past the gate.
+ */
+async function gatedV2(what, { nothing = 'Nothing was prepared.' } = {}) {
+  const gate = await assertAcceptNewSwaps(what, { nothing });
+  const verified = await verifyXSwapV2();
+  if (String(verified.owner).toLowerCase() !== String(gate.owner).toLowerCase()) {
+    throw new Error(`${what} refused: owner() of the V2 escrows changed while this was being checked (${gate.owner}, then ${verified.owner}). ${nothing} Try again.`);
+  }
+  return verified;
 }
 
 async function prepareV2Out(args) {
-  assertXSwapV2NewOrdersEnabled();
-  const verified = await verifyXSwapV2();
+  const verified = await gatedV2('prepare_xswap_out');
   if (!isAddress(args.from)) throw new Error('`from` must be an address.');
   const order = orderFrom(args);
   const gross = parseXMoney(args.xmoney_amount);
@@ -413,7 +414,7 @@ async function prepareV2Out(args) {
     net: `${order._label} on ${order._chain.slug}; unused escrow becomes withdrawal credit`,
     timeline: [`bidding ${secs(verified.out.bidding)}`, `challenge window ${secs(verified.out.window)}`, `deadline ${new Date(Number(deadline) * 1000).toISOString()}`],
     irreversible: 'Only confirm delivery after the far-chain asset actually arrives.',
-    notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'This connector does not verify far-chain delivery.'], steps,
+    notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'This connector does not verify far-chain delivery.', arbiterNote(verified.owner)], steps,
   });
   return reply(renderApproval(p), { ...p, version: 2, contract: XSWAP_V2.intents, intent_id: id,
     order: JSON.parse(memoOf(order)), want_hash: wantHash(order), deadline: Number(deadline),
@@ -423,8 +424,7 @@ async function prepareV2Out(args) {
 }
 
 async function prepareV2In(args) {
-  assertXSwapV2NewOrdersEnabled();
-  const verified = await verifyXSwapV2();
+  const verified = await gatedV2('prepare_xswap_in');
   if (!isAddress(args.from)) throw new Error('`from` must be an address.');
   const order = orderFrom({ ...args, to: ZERO }, { recipientOptional: true });
   const net = parseXMoney(args.want_xmoney);
@@ -443,7 +443,7 @@ async function prepareV2In(args) {
     net: `at least ${fmtXMoney(net)} X Money after both fees and the outbound X Money burn`,
     timeline: [`bidding ${secs(verified.in.bidding)}`, `challenge window ${secs(verified.in.window)}`, `deadline ${new Date(Number(deadline) * 1000).toISOString()}`],
     irreversible: 'Sending the far-chain asset is outside this escrow and cannot be undone from here.',
-    notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'Posting the ask moves no X Money. The buyer funds escrow before delivery.'],
+    notes: [PERMISSIONLESS, NOT_A_BRIDGE, 'Posting the ask moves no X Money. The buyer funds escrow before delivery.', arbiterNote(verified.owner)],
     steps: [{ label: `Post the V2 ask with ${fmtXMoney(net)} X Money net wallet floor`, chainId: PARENT_CHAIN_ID,
       to: XSWAP_V2.asks, value: 0n,
       data: encodeFunctionData({ abi: XSWAP_V2_ASKS_ABI, functionName: 'askWithSiteFee', args: [id, net,
@@ -472,44 +472,54 @@ export const tools = [
   },
   {
     name: 'xswap_terms',
-    description: 'The escrow\'s own terms on both directions, read from the contracts: bidding time, challenge window, bond and protocol fee, who can resolve a dispute (owner() read live) and what that owner can and cannot do, and whether new swaps are open on this connector.',
+    description: 'The V2 escrows\' own terms on both directions, read from the contracts: bidding time, challenge window, bond, the protocol, site and burn fees, who resolves a dispute (owner() read live, and whether it is a key treated as exposed), what that owner can and cannot do, and whether new swaps are open on this connector right now.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
-      const [t, arb, v2] = await Promise.all([terms(), arbiter(), verifyXSwapV2().catch(() => null)]);
-      const line = (d, t2) => `${d}: bidding ${secs(t2.bidding_s)}, challenge window ${secs(t2.window_s)}, bond ${Number(t2.bond_bps) / 100}% of the escrow, protocol fee ${Number(t2.fee_bps) / 100}% of what the solver charges.`;
-      const paused = pausedReason();
+      const [t, arb, gate, v2, legacyArb] = await Promise.all([
+        v2Terms(), v2Arbiter(), acceptNewSwaps(), verifyXSwapV2().catch(() => null), arbiter().catch(() => null),
+      ]);
+      const pct = (bps) => `${Number(bps) / 100}%`;
       const sameOwner = arb.out.owner && arb.in.owner && arb.out.owner.toLowerCase() === arb.in.owner.toLowerCase();
       const rules = sameOwner
-        ? [`Who resolves disputes (both contracts): ${whoRules(arb.out)}`]
+        ? [`Who resolves disputes (both V2 contracts): ${whoRules(arb.out)}`]
         : [`Who resolves disputes, X Money out: ${whoRules(arb.out)}`, `Who resolves disputes, X Money in: ${whoRules(arb.in)}`];
       const nobody = arb.out.kind === 'nobody' || arb.in.kind === 'nobody';
-      const problems = paused || XSWAP_V2.enabled ? [] : ownerProblems(arb);
-      const v2Open = XSWAP_V2.enabled && Boolean(v2);
+      const open = gate.open && Boolean(v2);
+      const status = !gate.open ? `PAUSED. ${gate.reason} ${stillWorks(arb)}`
+        : !v2 ? `NOT OPEN on this read: the V2 escrows could not be runtime-verified right now, so no new order is prepared. ${stillWorks(arb)}`
+          : `OPEN. New swaps are open on this connector, on the V2 escrows (intents ${XSWAP_V2.intents}, asks ${XSWAP_V2.asks}): prepare_xswap_out (X Money out; Base native ETH is the route the solver fills today) and prepare_xswap_in. The legacy escrows stay exit-only.`;
+      const legacyOwner = legacyArb?.out?.owner || null;
+      const legacyLine = `Legacy escrows (exit-only: refund, cancel, settle, confirm, withdraw): intents ${XSWAP_LEGACY.intents.join(', ')}; asks ${XSWAP_LEGACY.asks.join(', ')}. `
+        + (legacyArb ? `Disputes already open on ${XSWAP.intents} / ${XSWAP.asks}: ${legacyOwner && arb.out.owner && legacyOwner.toLowerCase() === arb.out.owner.toLowerCase() ? 'the same owner as V2.' : whoRules(legacyArb.out)}` : 'Their owner() could not be read on this call.');
       return reply([
-        paused ? `PAUSED. ${paused} ${stillWorks(arb)}`
-          : problems.length ? `NOT OPEN: no verified owner can resolve disputes. ${problems.join(' ')} ${stillWorks(arb)}`
-            : v2Open ? `New swaps are open on this connector, on the reviewed V2 escrows (intents ${XSWAP_V2.intents}, asks ${XSWAP_V2.asks}). The legacy escrows below stay exit-only.`
-              : XSWAP_V2.enabled ? `NOT OPEN on this read: the V2 escrows could not be runtime-verified right now, so no new order is prepared. ${stillWorks(arb)}`
-                : 'New swaps are open on this connector.',
-        line('X Money out (you pay X Money, an asset lands elsewhere)', t.out),
-        line('X Money in (you hand over an asset, X Money lands here)', t.in),
+        status,
+        `X Money out (you pay X Money, an asset lands elsewhere): bidding ${secs(t.out.bidding_s)}, challenge window ${secs(t.out.window_s)}, solver bond ${pct(t.out.bond_bps)} of the escrow ceiling, protocol fee ${pct(t.out.fee_bps)} of the winning solver ask.`,
+        `X Money in (you hand over an asset, X Money lands here): bidding ${secs(t.in.bidding_s)}, challenge window ${secs(t.in.window_s)}, buyer bond ${pct(t.in.bond_bps)} of the payment, protocol fee ${pct(t.in.fee_bps)} of the winning payment.`,
+        `Fees on a V2 swap, charged only at settlement: the protocol fee above, frozen per order and credited to the treasury ${t.out.treasury}; a site fee of ${pct(XSWAP_V2_SITE_BPS)} of the same amount, credited to the XSwapFeeCollector ${XSWAP_V2.collector}, which redeems it to USDG and sends it to the AGGREGATOR buy-and-burn sink ${XSWAP_V2_SINK}; and X Money's own ${pct(XSWAP_V2_BURN_BPS)} burn on every transfer into and out of the escrow (deposit, bond, withdrawal). The escrows book what actually arrives.`,
         ...rules,
-        ...(nobody ? [] : [ownerPowers(arb).out, ownerPowers(arb).in, PARAMS_IN_FLIGHT]),
-        BURN_NOTE,
-        v2 ? `Reviewed V2 escrows runtime verified (${XSWAP_V2.intents}, ${XSWAP_V2.asks}); site fee 10 bp of the winning solver ask, charged only at settlement. ${XSWAP_V2.enabled ? 'New V2 orders are open: prepare_xswap_out (X Money out, Base native ETH is the route the solver fills today) and prepare_xswap_in.' : 'New V2 funding remains paused.'}`
+        ...(nobody ? [] : [V2_OWNER_POWERS.out, V2_OWNER_POWERS.in, V2_PARAMS_IN_FLIGHT]),
+        v2 ? 'V2 runtime verified on this read: bytecode hashes, collector link, X Money, treasury and terms hash.'
           : 'V2 deployment could not be verified on this read; no new V2 order is prepared.',
+        legacyLine,
         PERMISSIONLESS,
       ].join('\n'), {
-        ...t,
-        new_swaps_open: XSWAP_V2.enabled ? v2Open : !paused && !problems.length,
-        paused_reason: paused || (problems.length ? problems.join(' ') : null),
+        out: t.out, in: t.in,
+        new_swaps_open: open,
+        paused_reason: open ? null : (gate.reason || 'The V2 escrows could not be runtime-verified on this read.'),
+        gate: { open: gate.open, code: gate.code, owner: gate.owner ?? null, exposed: gate.exposed ?? null, pinned_owner: gate.pinned_owner ?? null, checked_at: gate.checked_at ?? null },
         arbiter: { out: arb.out, in: arb.in },
-        forge_default_sender: FORGE_DEFAULT_SENDER,
-        expected_owner: XSWAP.expectedOwner,
+        fees: {
+          protocol_bps: { out: t.out.fee_bps, in: t.in.fee_bps }, protocol_treasury: t.out.treasury,
+          site_fee_bps: Number(XSWAP_V2_SITE_BPS), site_fee_collector: XSWAP_V2.collector, site_fee_sink: XSWAP_V2_SINK,
+          xmoney_transfer_burn_bps: Number(XSWAP_V2_BURN_BPS), reviewed_protocol_bps: Number(XSWAP_V2_PROTOCOL_BPS),
+        },
         dispute_is_a_way_out: !nobody,
-        intents: XSWAP.intents, asks: XSWAP.asks, xmoney: XSWAP.xmoney, chain_id: XSWAP.chainId, address_source: XSWAP.source,
+        intents: XSWAP_V2.intents, asks: XSWAP_V2.asks, xmoney: L3.xMoney, chain_id: PARENT_CHAIN_ID,
         v2: { intents: XSWAP_V2.intents, asks: XSWAP_V2.asks, collector: XSWAP_V2.collector,
-          runtime_verified: Boolean(v2), new_orders_open: v2Open, site_fee_bps: 10, terms: v2 },
+          runtime_verified: Boolean(v2), new_orders_open: open, site_fee_bps: Number(XSWAP_V2_SITE_BPS), terms: v2 },
+        legacy: { intents: XSWAP_LEGACY.intents, asks: XSWAP_LEGACY.asks, exit_only: true, arbiter: legacyArb,
+          configured: { intents: XSWAP.intents, asks: XSWAP.asks, source: XSWAP.source, expected_owner: XSWAP.expectedOwner } },
+        forge_default_sender: FORGE_DEFAULT_SENDER,
       });
     },
   },
@@ -532,11 +542,11 @@ export const tools = [
       const o = orderFrom(args, { recipientOptional: true });
       const gross = parseXMoney(args.xmoney_amount);
       const funding = xswapV2OutFunding(gross);
-      const live = await verifyXSwapV2().catch(() => null);
-      const paused = XSWAP_V2.enabled ? null : 'V2 new orders are paused until the V2 solver and far delivery are reviewed.';
+      const [live, gate] = await Promise.all([verifyXSwapV2().catch(() => null), acceptNewSwaps()]);
+      const paused = gate.open ? null : gate.reason;
       return reply([
         paused ? `PAUSED: this is a read-only V2 calculation; prepare_xswap_out will refuse. ${paused}`
-          : 'V2 quote. prepare_xswap_out prepares this order against the reviewed V2 escrow; the solver network fills Base native ETH today, other routes wait for a solver to bid.',
+          : `V2 quote. prepare_xswap_out prepares this order against the reviewed V2 escrow; the solver network fills Base native ETH today, other routes wait for a solver to bid. Disputes are ruled on by the escrow owner ${gate.owner}.`,
         `Deliver ${o._label} on ${o._chain.slug}${o.to === ZERO ? '' : ` to ${o.to}`}.`,
         `Gross wallet debit cap ${fmtXMoney(gross)} X Money; estimated escrow receipt ${fmtXMoney(funding.expectedEscrowReceived)} after 1 bp transfer burn.`,
         `Maximum solver ceiling ${fmtXMoney(funding.escrowCeiling)} X Money. The escrow also reserves up to ${fmtXMoney(funding.siteFeeMax)} X Money for the 10 bp site fee.`,
@@ -547,12 +557,13 @@ export const tools = [
       ].join('\n'), { version: 2, order: memoOf(o), want_hash: wantHash(o), gross_wallet_debit_wei: gross,
         expected_escrow_received_wei: funding.expectedEscrowReceived, escrow_ceiling_wei: funding.escrowCeiling,
         site_fee_max_wei: funding.siteFeeMax, protocol_fee_max_wei: funding.protocolFeeMax,
-        terms: live?.out ?? null, paused_reason: paused });
+        terms: live?.out ?? null, new_swaps_open: gate.open && Boolean(live), paused_reason: paused,
+        arbiter: gate.owner ?? null });
     },
   },
   {
     name: 'prepare_xswap_out',
-    description: 'X Money in, an asset out on any EVM chain. Returns unsigned transactions (approve, if needed, then open) plus the approval screen. Signs nothing.',
+    description: 'X Money in, an asset out on any EVM chain. Returns unsigned transactions (approve, if needed, then open) plus the approval screen. Refuses while XSwap is paused for new swaps (xswap_terms says why: the V2 escrows\' owner, who alone resolves disputes, is a key treated as exposed). Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -574,7 +585,7 @@ export const tools = [
   },
   {
     name: 'prepare_xswap_in',
-    description: 'The other direction: you hand over an asset on any EVM chain, X Money lands here. Posts an ask: a price, not an escrow. Buyers bid and their X Money is held before you send anything. Signs nothing.',
+    description: 'The other direction: you hand over an asset on any EVM chain, X Money lands here. Posts an ask: a price, not an escrow. Buyers bid and their X Money is held before you send anything. Refuses while XSwap is paused for new swaps (xswap_terms says why). Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -661,25 +672,30 @@ export const tools = [
   },
   {
     name: 'xswap_reputation',
-    description: 'What an address has actually done on the escrow: jobs filled and failed, intents opened, disputes raised and lost. Nobody grants this; it is only ever the sum of finished swaps. Read-only.',
+    description: 'What an address has actually done on an XSwap intents escrow, from the contract\'s own record: intents filled as a solver, solver claims the arbiter ruled against (disputes lost as a solver), intents opened, disputes raised, and disputes lost as a payer. Nobody grants this; it is only ever the sum of finished swaps. Read-only.',
     inputSchema: { type: 'object', properties: { address: addr, contract: { ...addr, description: 'Optional known intents escrow; defaults to the deployed V2 intents.' } }, required: ['address'], additionalProperties: false },
     async handler({ address, contract }) {
       if (!isAddress(address)) throw new Error(`Not an address: ${address}`);
       const venue = venueOf(contract || XSWAP_V2.intents);
       if (!venue || venue.side !== 'out') throw new Error('Reputation is read from a known XSwap intents escrow.');
+      // rep.failed counts only claims the owner ruled against in resolve(id, forUser = true). A solver that won a bid
+      // and never claimed is not counted anywhere: the payer refunds after the deadline and the bond goes back.
       const [filled, failed, opened, disputed, disputesLost, volume, since] = await parent.readContract({
         address: venue.contract, abi: venue.abi, functionName: 'rep', args: [address],
       });
-      const taken = filled + failed;
+      const judged = filled + failed;
       const rep = {
-        address, contract: venue.contract, version: venue.version, filled: Number(filled), failed: Number(failed), opened: Number(opened),
-        disputed: Number(disputed), disputes_lost: Number(disputesLost),
+        address, contract: venue.contract, version: venue.version, filled: Number(filled),
+        solver_disputes_lost: Number(failed), opened: Number(opened),
+        disputed: Number(disputed), payer_disputes_lost: Number(disputesLost),
         volume_xmoney: fmtXMoney(volume), first_seen: since === 0n ? null : new Date(Number(since) * 1000).toISOString(),
-        fail_bps: taken === 0n ? null : Number((failed * BPS) / taken),
+        // The same ratio the contract's own Policy.maxFailBps check uses: lost disputes over (filled + lost disputes).
+        solver_disputes_lost_bps: judged === 0n ? null : Number((failed * BPS) / judged),
+        what_counts: 'solver_disputes_lost is rep.failed: claims the escrow owner ruled against in a dispute. Bids that were never delivered (refunded after the deadline) are not recorded on chain, so they are not in this number.',
       };
-      const text = taken === 0n
-        ? `${address} is new here: no jobs taken as a solver${opened > 0n ? `, ${opened} intent${opened > 1n ? 's' : ''} paid for` : ''}. New is not the same as bad, and the bond covers you either way.`
-        : `${address}: ${rep.filled} filled, ${rep.failed} failed (${(rep.fail_bps / 100).toFixed(1)}%), ${rep.volume_xmoney} X Money settled, first seen ${rep.first_seen}.`;
+      const text = judged === 0n
+        ? `${address} is new here as a solver: nothing filled and no dispute lost${opened > 0n ? `, ${opened} intent${opened > 1n ? 's' : ''} paid for` : ''}. New is not the same as bad, and the bond covers you either way.`
+        : `${address}: ${rep.filled} filled as a solver, ${rep.solver_disputes_lost} dispute${rep.solver_disputes_lost === 1 ? '' : 's'} lost as a solver (${(rep.solver_disputes_lost_bps / 100).toFixed(1)}% of filled plus lost), ${rep.volume_xmoney} X Money settled, first seen ${rep.first_seen}. Bids it won and never delivered are not recorded on chain and are not counted.`;
       return reply(text, rep);
     },
   },
@@ -717,8 +733,7 @@ export const tools = [
       if (!s) throw new Error(`No swap with id ${id}.`);
       if (GATED_ACTIONS.has(action)) {
         if (s.version !== 2) throw new Error(`New bids, claims and delivery advances are paused on legacy escrow ${s.contract}. Existing refunds, cancellations, settlements and withdrawals remain available.`);
-        assertXSwapV2NewOrdersEnabled();
-        await verifyXSwapV2();
+        await gatedV2(`prepare_xswap_action ${action}`);
       }
       const out = s.side === 'out';
       const to = s.contract;

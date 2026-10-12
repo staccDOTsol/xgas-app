@@ -128,3 +128,16 @@ forge prices L4 gas as plain EVM gas and misses the parent posting fee (10-15x o
 ## Fleet generations on the L4 and why (2026-10-08)
 Live: drops 0x4D9d…50e9 (PumpDrop graduation fix), CLMM StaccpadFactoryL4 0x61EC…4603 + launchpad 0xbF9c…A79F + hook 0x0f59…c044, pawn 0xeab3…6340. Superseded ones are listed under `fleet.superseded`. The CLMM stack uses nft-range src/xgas/clmm/StaccpadRouterL4 + StaccpadFactoryL4 (toll-aware, ABI-identical copies) so Robinhood's StaccpadRouter bytecode and the RobinhoodCreate2 pins stay unchanged. Exact deployed nft-range source, including the uncommitted FeeFanoutSink refactor and the PumpDrop fix, is branch `xgas-l4-fleet-deployed` (8d63854); nft-range main does NOT carry the PumpDrop fix yet.
 **Why:** PumpDrop._graduate minted reserve ids at supply+1+k, colliding with ids sold back and re-bought, so any sell-back bricked graduation. That bug is in Robinhood's PumpDrop too.
+
+## XSwap V2 new swaps are PAUSED by a live owner() gate while 0x26E8…5158 owns the escrows (deployed 2026-10-12)
+**SUPERSEDED — see "XSwap stays OPEN on 0x26E8; pausing is the owner's call (2026-10-12)"**
+mcp/src/xswapV2.mjs `xswapV2Gate` reads owner() of both V2 escrows; it stays closed while owner is in `XSWAP_V2.exposedOwners` (0x26E8, pasted into a chat 2026-10-03 per staccpad-ai wiki), and after a rotation stays closed until the host sets XSWAP_V2_OWNER to the new owner. Instructions, xswap_terms and every prepare path read the same gate. Before 2026-10-12 live instructions said "paused" (stale legacy XSWAP.enabled) while xswap_terms/prepare said "open": agents could open swaps whose disputes an exposed key rules on. Shipped from main's UNCOMMITTED mcp/ working tree (fly v49+): deploying committed main HEAD 802fdda re-opens XSwap. Commit mcp/ before any other deploy.
+**Why:** the dispute arbiter can pay a non-delivering solver out of the payer's escrow; reopen only by moving ownership, not by flipping a flag.
+
+## Tool output must name public RPCs; the host reads Robinhood through xgas-rpc.internal
+mcp/src/config.mjs keeps PARENT_RPC/XGAS_RPC (read path, may be private) separate from PARENT_PUBLIC_RPC/XGAS_PUBLIC_RPC (what chain info, submit results and errors show; override with XGAS_PARENT_PUBLIC_RPC / XGAS_PUBLIC_RPC). `scrubRpc` strips private URLs from tool error text. Test: mcp/scripts/public-rpc.test.mjs.
+**Why:** get_chain_info handed clients http://xgas-rpc.internal:8545, unreachable outside Fly and an internal name leak.
+
+## XSwap stays OPEN on 0x26E8; pausing is the owner's call (2026-10-12)
+The owner reversed the exposed-key pause the same day ("why are u pausing feats"): `XSWAP_V2.exposedOwners` is empty and the gate pins the deployed owner 0x26E8 by default, so instructions, xswap_terms and prepare all say open (fly v50). The pause still exists as an opt-in host secret: XSWAP_V2_EXPOSED="0xaddr[:date],…". If owner() moves off 0x26E8, new swaps close until XSWAP_V2_OWNER names the new owner. Still shipped from main's UNCOMMITTED mcp/ tree: commit before any other deploy.
+**Why:** never pause or remove a live feature without the owner's say-so; raise the risk and let them decide.

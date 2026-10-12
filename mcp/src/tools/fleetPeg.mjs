@@ -182,6 +182,8 @@ export const tools = [
       const [name, symbol] = await Promise.all([xgas.readContract({ address: collection, abi: ERC721, functionName: 'name' }).catch(() => 'NFT'), xgas.readContract({ address: collection, abi: ERC721, functionName: 'symbol' }).catch(() => 'NFT')]);
       const priceWei = parseXMoney(price_per_nft_xmoney);
       if (priceWei <= 0n) throw new Error('price_per_nft_xmoney must be > 0.');
+      // PegFactory.createMarket deploys a new vault (and claim token) on every call; nothing stops a second market.
+      const existing = await pf('vaultsOf', [getAddress(collection)]).catch(() => []);
       // PegFactory takes sqrt(quote per claim) * 2^96 and inverts it itself when the quote sorts first (native does).
       const sqrtX96 = isqrt((priceWei << 192n) / 10n ** 18n);
       const spacing = { 500: 10, 3000: 60, 10000: 200 }[fee_pips];
@@ -195,7 +197,8 @@ export const tools = [
         asset: 'none (gas only)', amount: `a vault of v${symbol} claims and a native pool at ${price_per_nft_xmoney} $xMoney per NFT, ${fee_pips / 10000}% fee`,
         counterparty: `staccpad PegFactory ${F().factory}`, fees: [{ label: 'Launch fee', amount: 'none', note: 'factory-default platform fee, snipe premium and transfer tax apply to the vault' }],
         net: 'A market anyone can deposit into, buy from and sell into once it has liquidity', timeline: ['One transaction on xGas'],
-        irreversible: 'One market per (collection, quote, fee). The starting price is set once; trades move it after that.', notes: ['Empty until someone adds liquidity or deposits NFTs.'],
+        irreversible: 'Every call opens a new vault and pool, even when the collection already has a market; each vault has its own claim token and liquidity. The starting price is set once; trades move it after that.',
+        notes: ['Empty until someone adds liquidity or deposits NFTs.', ...(existing.length ? [`${untrusted(symbol, 24)} already has ${existing.length} peg market(s) on xGas (${existing.join(', ')}); this would add another, splitting liquidity. get_peg_market shows them.`] : [])],
       });
       return reply(renderApproval(p), p);
     },

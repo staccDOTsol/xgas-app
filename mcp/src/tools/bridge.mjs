@@ -106,9 +106,11 @@ const EST_REDEEM_GAS = 21_200n;
  *   early_depositor: the vault mints `net` to the helper; the helper -> inbox transfer pays the 1 bp xMoney tax
  *     (the new inbox is not yet a bridge-system address), so the deposit D = net - net/1e4. The helper's retryable
  *     pays l2CallValue = D - gasLimit*maxFeePerGas and refunds the unused gas to the recipient (never aliased).
- *   vault: D = net (inbox is bridge-system, untaxed); l2CallValue = D - l3GasLimit*l3MaxFeePerGas, unused gas refunded
- *     to the recipient, or to its alias when the recipient has code on the parent chain.
- * guaranteed = l2CallValue; about = D - ~21.2k * current L3 base fee.
+ *   vault (the deployed XMoney.enterRollup, public/source/XMoney.sol:95-114): the vault mints net + l3GasLimit *
+ *     l3MaxFeePerGas into the inbox and opens the ticket with l2CallValue = net. The gas prepay is minted ON TOP of
+ *     the deposit with no USDG behind it (unbackedGasMint); the unused part is refunded to the recipient, or to its
+ *     alias when the recipient has code on the parent chain. A deposit never reverts for being small on this path.
+ * guaranteed = l2CallValue; about = l2CallValue + the refunded part of the prepay, at ~21.2k gas * the L3 base fee.
  */
 async function enterQuote(usdgWei, route) {
   const r = route || await vaultRoute();
@@ -125,11 +127,59 @@ async function enterQuote(usdgWei, route) {
   const inboxTax = early ? (m.net * BURN_BPS) / BPS : 0n;
   const l3Deposit = m.net - inboxTax;
   const gasPrepay = gasLimit != null && maxFeePerGas != null ? gasLimit * maxFeePerGas : null;
-  const tooSmall = gasPrepay != null && l3Deposit <= gasPrepay;
-  const guaranteed = gasPrepay != null && !tooSmall ? l3Deposit - gasPrepay : null;
   const redeemFee = l3BaseFee != null ? EST_REDEEM_GAS * l3BaseFee : null;
-  const about = !tooSmall && redeemFee != null && l3Deposit > redeemFee ? l3Deposit - redeemFee : null;
-  return { ...m, path: r.path, early, inboxTax, l3Deposit, gasLimit, maxFeePerGas, gasPrepay, tooSmall, guaranteed, l3BaseFee, redeemFee, about, route: r };
+  let tooSmall = false, guaranteed = null, about = null, unbackedGasMint = 0n;
+  if (early) {
+    tooSmall = gasPrepay != null && l3Deposit <= gasPrepay;
+    guaranteed = gasPrepay != null && !tooSmall ? l3Deposit - gasPrepay : null;
+    about = !tooSmall && redeemFee != null && l3Deposit > redeemFee ? l3Deposit - redeemFee : null;
+  } else {
+    guaranteed = l3Deposit;
+    unbackedGasMint = gasPrepay;
+    about = gasPrepay != null && redeemFee != null && gasPrepay > redeemFee ? l3Deposit + gasPrepay - redeemFee : null;
+  }
+  const rs = rsEffect(m, { early, inboxTax, unbackedGasMint });
+  return { ...m, path: r.path, early, inboxTax, l3Deposit, gasLimit, maxFeePerGas, gasPrepay, tooSmall, guaranteed, l3BaseFee, redeemFee, about, unbackedGasMint, rs, route: r };
+}
+
+const WAD = 10n ** 18n;
+/** r/s as USDG per xMoney, 18 decimals: the vault's USDG reserve over circulating xMoney (getReserveNAV). */
+const rsWad = (reserve, circulating) => (circulating === 0n ? WAD : (reserve * SCALE_FACTOR * WAD) / circulating);
+const fmtRs = (w) => {
+  const neg = w < 0n; const a = neg ? -w : w;
+  return `${neg ? '-' : ''}${a / WAD}.${(a % WAD).toString().padStart(18, '0').slice(0, 12)}`;
+};
+
+/**
+ * What this deposit does to r/s. The reserve grows by the net USDG; circulating grows by the net xMoney, the bridge
+ * buffer and, on the vault route, the unbacked gas prepay (the burn half minted to 0x…dEaD does not count, and on
+ * the EarlyDepositor route the inbox transfer tax is burned). Break-even on the vault route: the dead-burn half of
+ * the 1 bp entry burn equals the gas prepay, which is a deposit minting about prepay * 20,000 xMoney.
+ */
+function rsEffect(m, { early, inboxTax, unbackedGasMint }) {
+  if (unbackedGasMint == null) return null;
+  const dReserve = m.netUsdgToReserve;
+  const dCirc = m.net + m.bufferToBridge + unbackedGasMint - (early ? inboxTax : 0n);
+  const before = rsWad(m.usdgReserve, m.circulating);
+  const after = rsWad(m.usdgReserve + dReserve, m.circulating + dCirc);
+  const cmp = dReserve * m.circulating - m.usdgReserve * dCirc; // > 0 raises, < 0 lowers (exact, before rounding)
+  return {
+    before_wad: before, after_wad: after, change_wad: after - before,
+    before: fmtRs(before), after: fmtRs(after), change: fmtRs(after - before),
+    direction: cmp > 0n ? 'raises' : cmp < 0n ? 'lowers' : 'unchanged',
+    circulating_added_wei: dCirc, reserve_added_raw: dReserve,
+    break_even_minted_wei: early || unbackedGasMint === 0n ? null : unbackedGasMint * 2n * BPS,
+  };
+}
+
+/** The unbacked gas mint on the vault route, in words. Null on the EarlyDepositor route (its prepay comes out of the deposit). */
+function unbackedLine(q) {
+  if (q.early || !q.unbackedGasMint) return null;
+  const rs = q.rs;
+  return `Unbacked gas mint: besides your ${fmtXMoney(q.net)} xMoney, the vault mints ${fmtXMoney(q.unbackedGasMint)} xMoney (${q.gasLimit} gas at ${q.maxFeePerGas} wei) `
+    + 'with no USDG behind it to prepay the L4 delivery gas; the unused part is refunded to the recipient. It counts as circulating supply'
+    + (rs ? `, so this deposit ${rs.direction} r/s (${rs.before} to ${rs.after} USDG per xMoney). Deposits that mint less than about ${fmtXMoney(rs.break_even_minted_wei)} xMoney lower r/s, larger ones raise it slightly.` : '.')
+    + ' The vault owner (the 24 h timelock) sets that gas limit and fee, and the deployed vault puts no upper bound on them.';
 }
 
 /** One line on what lands, for quotes and approval screens. */
@@ -147,11 +197,17 @@ function creditFees(q) {
     { label: 'xMoney entry burn', amount: `${fmtXMoney(q.entryBurn)} xMoney`, note: `0.01%: ${fmtXMoney(q.burnToDead)} to 0x…dEaD, ${fmtXMoney(q.bufferToBridge)} minted to the vault's bridge as solvency buffer` },
   ];
   if (q.early) fees.push({ label: 'xMoney transfer tax into the inbox', amount: `${fmtXMoney(q.inboxTax)} xMoney`, note: '0.01%, burned: until the vault switch the new inbox is not a tax-exempt bridge address' });
-  fees.push({
-    label: 'L3 gas for the auto-redeem',
-    amount: q.redeemFee != null ? `about ${fmtXMoney(q.redeemFee)} xMoney` : 'a few millionths of an xMoney',
-    note: q.gasPrepay != null ? `${fmtXMoney(q.gasPrepay)} is prepaid (${q.gasLimit} gas at ${q.maxFeePerGas} wei) and the unused part is refunded` : 'prepaid out of the deposit, unused part refunded',
-  });
+  fees.push(q.early
+    ? {
+      label: 'L3 gas for the auto-redeem',
+      amount: q.redeemFee != null ? `about ${fmtXMoney(q.redeemFee)} xMoney` : 'a few millionths of an xMoney',
+      note: q.gasPrepay != null ? `${fmtXMoney(q.gasPrepay)} is prepaid out of the deposit (${q.gasLimit} gas at ${q.maxFeePerGas} wei) and the unused part is refunded` : 'prepaid out of the deposit, unused part refunded',
+    }
+    : {
+      label: 'L4 delivery gas (unbacked mint)',
+      amount: q.gasPrepay != null ? `${fmtXMoney(q.gasPrepay)} xMoney minted on top of your deposit, no USDG behind it` : 'the vault\'s gas prepay, minted on top of your deposit with no USDG behind it',
+      note: `not taken from your deposit; minted with nothing behind it, it pulls r/s down for every holder${q.rs ? `, and net of the entry burn this deposit ${q.rs.direction} r/s` : ''}. ${q.redeemFee != null ? `About ${fmtXMoney(q.redeemFee)} of it is used and the rest is refunded to the recipient.` : 'The unused part is refunded to the recipient.'}`,
+    });
   return fees;
 }
 
@@ -355,7 +411,7 @@ const enterTimeline = (early) => [
 export const tools = [
   {
     name: 'quote_enter',
-    description: 'Quote USDG → $xMoney on xGas: which route deposits take right now (EarlyDepositor until the vault switch, vault.enterRollup after), the USDG rake, the entry burn, the pre-switch inbox transfer tax, the L3 gas, and the $xMoney that lands as native gas. Read-only, nothing is signed.',
+    description: 'Quote USDG → $xMoney on xGas: which route deposits take right now (EarlyDepositor until the vault switch, vault.enterRollup after), the USDG rake, the entry burn, the pre-switch inbox transfer tax, the L4 gas (on the vault route an unbacked mint on top of the deposit, and what it does to r/s), and the $xMoney that lands as native gas. Read-only, nothing is signed.',
     inputSchema: { type: 'object', properties: { usdg_amount: amount('USDG to bridge in, e.g. "250" or "250.50".') }, required: ['usdg_amount'], additionalProperties: false },
     async handler({ usdg_amount }) {
       const q = await enterQuote(parseUsdg(usdg_amount));
@@ -374,14 +430,21 @@ export const tools = [
           l3_gas_prepay: q.gasPrepay != null ? fmtXMoney(q.gasPrepay) : null,
           guaranteed_credit: q.guaranteed != null ? fmtXMoney(q.guaranteed) : null,
           estimated_credit: q.about != null ? fmtXMoney(q.about) : null,
+          unbacked_gas_mint: q.early ? null : (q.unbackedGasMint != null ? fmtXMoney(q.unbackedGasMint) : null),
         },
         vault_state: { usdg_reserve: fmtUsdg(q.usdgReserve), circulating_xmoney: fmtXMoney(q.circulating) },
+        r_over_s: q.rs ? {
+          before: q.rs.before, after: q.rs.after, change: q.rs.change, direction: q.rs.direction,
+          break_even_minted_xmoney: q.rs.break_even_minted_wei != null ? fmtXMoney(q.rs.break_even_minted_wei) : null,
+          unit: 'USDG per circulating xMoney (getReserveNAV)',
+        } : null,
+        unbacked_gas_mint_note: unbackedLine(q),
         eta: '~1 minute to land on xGas',
         vault_route: route,
         deposits_paused: DEPOSITS_PAUSED,
         smart_account_warning: ALIAS_WARNING,
         raw: {
-          net_minted_wei: q.net, l3_deposit_wei: q.l3Deposit, guaranteed_wei: q.guaranteed, estimated_wei: q.about,
+          net_minted_wei: q.net, l3_deposit_wei: q.l3Deposit, guaranteed_wei: q.guaranteed, estimated_wei: q.about, unbacked_gas_mint_wei: q.early ? null : q.unbackedGasMint,
           gross_wei: q.gross, usdg_rake_raw: q.usdgRake,
         },
       };
@@ -389,7 +452,8 @@ export const tools = [
         `Pay ${fmtUsdg(q.usdgWei)} USDG → receive ${creditLine(q)}, ~1 minute. Route: ${via}.\n`
           + `Fees: ${fmtUsdg(q.usdgRake)} USDG to the Fanout, ${fmtXMoney(q.entryBurn)} xMoney entry burn`
           + (q.early ? `, ${fmtXMoney(q.inboxTax)} xMoney transfer tax into the inbox (until the vault switch)` : '')
-          + `, and the L3 gas for the auto-redeem${q.redeemFee != null ? ` (about ${fmtXMoney(q.redeemFee)})` : ''}.\n`
+          + (q.early ? `, and the L3 gas for the auto-redeem${q.redeemFee != null ? ` (about ${fmtXMoney(q.redeemFee)})` : ''}.\n` : '.\n')
+          + (unbackedLine(q) ? `${unbackedLine(q)}\n` : '')
           + 'You arrive holding gas; there is no faucet step.'
           + (q.path == null ? `\nNot open right now: ${route.note}` : q.early ? `\n${route.note}` : '')
           + (DEPOSITS_PAUSED ? `\n${DEPOSITS_PAUSED_MSG}` : '')
@@ -506,6 +570,7 @@ export const tools = [
             : 'Allowance is already sufficient; one signature.',
           ...(early ? [route.note, 'EarlyDepositor sends the minted $xMoney to the xGas inbox; until the vault switch that transfer pays the 0.01% xMoney tax, shown in the fees.'] : []),
           `The $xMoney is credited to ${recipient} on xGas ${XGAS_CHAIN_ID}: ${early ? 'EarlyDepositor' : 'enterRollup'} names it as the ticket destination, so the deposit itself is not aliased.`,
+          ...(unbackedLine(q) ? [unbackedLine(q)] : []),
           ...(fromKind === 'eip7702' ? [`${from} is an EIP-7702 delegated account. ${ALIAS_WARNING}`] : []),
           ...(early && rKind === 'eip7702'
             ? [`${recipient} is an EIP-7702 delegated account. EarlyDepositor opens the ticket with unaliased refund addresses, so the gas refund also goes to ${recipient}, which the same key controls on xGas.`]

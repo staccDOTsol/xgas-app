@@ -4,8 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer, VERSION } from './server.mjs';
 import { ALL_TOOLS } from './registry.mjs';
+import { xswapV2Gate } from './xswapV2.mjs';
 
 export { ALL_TOOLS };
+
+// The instructions a client gets at initialize describe the XSwap new-swap gate; give its first owner() read a few
+// seconds to land so they say what the gate says. A slow or failed read leaves them at "paused" (fail closed).
+await Promise.race([xswapV2Gate().catch(() => null), new Promise((r) => { setTimeout(r, 4000).unref?.(); })]);
 
 const { server } = createServer();
 

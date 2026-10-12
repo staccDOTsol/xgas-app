@@ -29,6 +29,16 @@ async function launches() {
   return logs.map((l) => ({ collection: l.args.collection, creator: l.args.creator, vault: l.args.vault, poolId: l.args.poolId })).reverse();
 }
 
+/**
+ * What StaccpadCollection._mintDrop actually does with a mint (nft-range src/launchpad/StaccpadCollection.sol):
+ * lpProceedsBps of the payment and the companions are offered to one full-range position locked by the router; a
+ * full-range add only takes both sides in the pool's current ratio, and the router hands back what it could not
+ * place to the collection contract. The rest of the payment goes, as WXM, to the fleet treasury.
+ */
+const mintSplit = (lpBps, companions) => `Each mint offers ${(lpBps / 100).toFixed(0)}% of its payment plus ${companions} companion NFT(s) per mint to one full-range position in this collection's own CLMM market (quoted in WXM), locked forever. `
+  + 'A full-range add only takes both sides in the pool\'s current ratio: unplaced $xMoney goes back to the collection contract, where its owner can withdraw it, and unplaced companion claims stay in the collection contract. '
+  + `The other ${((10000 - lpBps) / 100).toFixed(0)}% is sent as WXM to the fleet treasury (XgasFleetTreasury), which forwards it to the xGas FanoutSink when anyone calls flush().`;
+
 async function collectionState(a) {
   const fns = ['name', 'symbol', 'owner', 'maxSupply', 'mintPrice', 'buyerMinted', 'companionMinted', 'lpProceedsBps', 'lpCompanionPerMint', 'vault', 'marketBound', 'lockedPositionId'];
   const v = await Promise.all(fns.map((f) => col(a, f)));
@@ -39,7 +49,7 @@ async function collectionState(a) {
     remaining: Number(s.maxSupply - s.buyerMinted), sold_out: s.buyerMinted >= s.maxSupply, companions_in_pool: Number(s.companionMinted),
     lp_proceeds_bps: Number(s.lpProceedsBps), companions_per_mint: Number(s.lpCompanionPerMint), vault: s.vault, market_bound: s.marketBound,
     locked_position: s.lockedPositionId.toString(),
-    how_it_works: `${(Number(s.lpProceedsBps) / 100).toFixed(0)}% of every mint plus ${s.lpCompanionPerMint} companion NFT(s) per mint are locked forever as liquidity in this collection's own CLMM market (quoted in wrapped xMoney); the rest goes to the xGas FanoutSink.`,
+    how_it_works: mintSplit(Number(s.lpProceedsBps), Number(s.lpCompanionPerMint)),
   };
 }
 
@@ -53,6 +63,25 @@ async function poolState(id) {
     ltv_pct: (p.terms.ltvBps / 100).toFixed(2), liquidation_at_pct: (p.terms.liqBps / 100).toFixed(2), liquidator_bounty_pct: (p.terms.bountyBps / 100).toFixed(2),
     raw: { key: p.key },
   };
+}
+
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+const CURVE_ABI = [{ type: 'function', name: 'quoteSell', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'isCompanion', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'bool' }] }];
+
+/** StaccpadPawn.createPool's own checks (nft-range src/pawn/StaccpadPawn.sol:154-157), in words. Empty when they pass. */
+export function pawnTermsProblems(t) {
+  const out = [];
+  const u16 = (k) => Number.isInteger(t[k]) && t[k] >= 0 && t[k] <= 65535;
+  for (const k of ['ltvBps', 'liqBps', 'bountyBps', 'baseRateBps', 'slope1Bps', 'kinkBps', 'slope2Bps']) if (!u16(k)) out.push(`${k} must be an integer from 0 to 65535`);
+  if (out.length) return out;
+  if (t.ltvBps === 0) out.push('ltv_bps must be more than 0');
+  if (t.ltvBps > t.liqBps) out.push(`ltv_bps (${t.ltvBps}) must be at most liq_bps (${t.liqBps})`);
+  if (t.liqBps > 10000) out.push(`liq_bps (${t.liqBps}) must be at most 10000`);
+  if (t.bountyBps > 1000) out.push(`bounty_bps (${t.bountyBps}) must be at most 1000`);
+  if (t.kinkBps > 10000) out.push(`kink_bps (${t.kinkBps}) must be at most 10000`);
+  if (t.baseRateBps + t.slope1Bps + t.slope2Bps > 50000) out.push(`base_rate_bps + slope1_bps + slope2_bps (${t.baseRateBps + t.slope1Bps + t.slope2Bps}) must be at most 50000`);
+  return out;
 }
 
 const wrapSteps = (owner, amount, spender, label) => [
@@ -89,7 +118,7 @@ export const tools = [
 
   {
     name: 'launch_clmm_collection',
-    description: 'Prepare an unsigned CLMM-launchpad launch on xGas: a new ERC-721 at a fixed mint price whose proceeds (20-100%) and companion NFTs are locked forever as liquidity in its own wrapped-xMoney market. Signs nothing.',
+    description: 'Prepare an unsigned CLMM-launchpad launch on xGas: a new ERC-721 at a fixed mint price; each mint offers 20-100% of its payment and its companion NFTs to a full-range position locked forever in the collection\'s own wrapped-xMoney market (whatever the range cannot place returns to the collection contract). Signs nothing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -119,9 +148,9 @@ export const tools = [
         action: `Launch ${a.symbol} on the CLMM launchpad`, chainId: XGAS_CHAIN_ID, to: C().launchpad,
         data: encodeFunctionData({ abi: CLMM_LAUNCHPAD_ABI, functionName: 'launch', args: [p0] }), value: 0n,
         asset: 'none (gas only)', amount: `${a.max_supply} NFTs at ${a.mint_price_xmoney} $xMoney`, counterparty: `staccpad CLMM launchpad ${C().launchpad}`,
-        fees: [{ label: 'Launch fee', amount: 'none', note: `${((a.lp_proceeds_bps ?? 5000) / 100).toFixed(0)}% of each mint is locked as liquidity, the rest goes to the xGas FanoutSink` }],
+        fees: [{ label: 'Launch fee', amount: 'none', note: mintSplit(a.lp_proceeds_bps ?? 5000, a.companions_per_mint ?? 1) }],
         net: 'A new collection you own, with its market opened at the mint price', timeline: ['One transaction on xGas'],
-        irreversible: 'Locked liquidity can never be withdrawn by anyone. Mint price and LP split are fixed at launch.', notes: ['Liquidity adds pay the xGas PoolManager JIT toll; the router sizes for it.'],
+        irreversible: 'Locked liquidity can never be withdrawn by anyone. Mint price and LP split are fixed at launch.', notes: ['Liquidity adds pay the xGas PoolManager JIT toll; the router sizes for it.', 'As the collection\'s owner you can withdraw the unplaced $xMoney the router returns to the collection contract (withdraw(to)); unplaced companion claims have no way out of it.'],
       });
       return reply(renderApproval(p), p);
     },
@@ -146,7 +175,8 @@ export const tools = [
         asset: `native $xMoney → ${s.symbol} NFTs`, amount: `${qty} at ${s.mint_price_xmoney}${deposit_qty ? ` + ${deposit_qty} × ${s.mint_price_xmoney} quote for your LP` : ''} = ${fmtXMoney(value)} $xMoney`,
         counterparty: `${s.name} at ${s.collection}`, fees: [{ label: 'Included', amount: s.how_it_works }],
         net: `${qty - deposit_qty} NFT(s)${deposit_qty ? ` and an LP position holding ${deposit_qty}` : ''}`, timeline: ['One transaction on xGas'],
-        irreversible: 'Primary mints are final; the locked share of your payment stays in the pool forever.', notes: [],
+        irreversible: 'Primary mints are final; the locked share of your payment stays in the pool forever.',
+        notes: deposit_qty ? ['Your LP deposit is a full-range add, which only takes both sides in the pool\'s current ratio. The collection contract makes that add, so whatever it cannot place (unplaced $xMoney, unplaced claims) is refunded to the collection contract, not to you: the collection\'s owner can withdraw the $xMoney part.'] : [],
       });
       return reply(renderApproval(p), p);
     },
@@ -171,9 +201,15 @@ export const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        collection: addr, ltv_bps: { type: 'integer', minimum: 1, maximum: 9000, description: 'Default 5000.' }, liq_bps: { type: 'integer', minimum: 1, maximum: 10000, description: 'Default 8000.' },
-        bounty_bps: { type: 'integer', minimum: 0, maximum: 1000, description: 'Default 500.' }, base_rate_bps: { type: 'integer', minimum: 0, maximum: 20000, description: 'Default 500.' },
-        slope1_bps: { type: 'integer', minimum: 0, maximum: 20000, description: 'Default 1000.' }, kink_bps: { type: 'integer', minimum: 0, maximum: 10000, description: 'Default 8000.' }, slope2_bps: { type: 'integer', minimum: 0, maximum: 20000, description: 'Default 5000.' },
+        collection: addr,
+        ltv_bps: { type: 'integer', minimum: 1, maximum: 10000, description: 'Advance as a share of the live floor. 1 to liq_bps. Default 5000.' },
+        liq_bps: { type: 'integer', minimum: 1, maximum: 10000, description: 'Liquidatable once debt reaches this share of the floor. ltv_bps to 10000. Default 8000.' },
+        bounty_bps: { type: 'integer', minimum: 0, maximum: 1000, description: 'Liquidator\'s cut of the sale proceeds, at most 1000. Default 500.' },
+        base_rate_bps: { type: 'integer', minimum: 0, maximum: 50000, description: 'Per-year rate at 0% utilisation. base + slope1 + slope2 must be at most 50000. Default 500.' },
+        slope1_bps: { type: 'integer', minimum: 0, maximum: 50000, description: 'Per-year rate added up to the kink. Default 1000.' },
+        kink_bps: { type: 'integer', minimum: 0, maximum: 10000, description: 'Utilisation where slope2 starts. Default 8000.' },
+        slope2_bps: { type: 'integer', minimum: 0, maximum: 50000, description: 'Per-year rate added from the kink to 100%. Default 5000.' },
+        curve: { ...addr, description: 'Optional NGU redeem curve that also backs the floor. The contract only accepts the collection itself, and only on a market quoted in the pawn desk\'s wrapped native token (WXM). Omit for a CLMM-only pool.' },
       },
       required: ['collection'], additionalProperties: false,
     },
@@ -183,13 +219,31 @@ export const tools = [
       if (!s.market_bound) throw new Error('That collection has no bound CLMM market yet.');
       const key = await col(s.collection, 'poolKey');
       const t = { ltvBps: a.ltv_bps ?? 5000, liqBps: a.liq_bps ?? 8000, bountyBps: a.bounty_bps ?? 500, baseRateBps: a.base_rate_bps ?? 500, slope1Bps: a.slope1_bps ?? 1000, kinkBps: a.kink_bps ?? 8000, slope2Bps: a.slope2_bps ?? 5000 };
-      if (t.ltvBps > t.liqBps) throw new Error('ltv_bps must be ≤ liq_bps.');
+      const bad = pawnTermsProblems(t);
+      if (bad.length) throw new Error(`createPool would revert (BadTerms): ${bad.join('; ')}. Nothing prepared.`);
+      let curve = ZERO_ADDR;
+      if (a.curve) {
+        if (!isAddress(a.curve)) throw new Error(`curve is not an address: ${a.curve}`);
+        if (getAddress(a.curve) !== getAddress(s.collection)) throw new Error(`createPool would revert (BadCurve): the curve must be the collection itself (${s.collection}), not ${a.curve}. Nothing prepared.`);
+        // The market's quote is the key's non-vault currency, as StaccpadPawn._quoteOf reads it.
+        const quote = getAddress(key.currency0) === getAddress(s.vault) ? key.currency1 : key.currency0;
+        const weth = await pawn('weth');
+        if (getAddress(quote) !== getAddress(weth)) throw new Error(`createPool would revert (CurveNeedsWeth): a curve pool needs a market quoted in ${weth}, the pawn desk's wrapped native token; this market is quoted in ${quote}. Nothing prepared.`);
+        // createPool does not check the interface, but floorOf calls isCompanion/quoteSell on every pawn and liquidation:
+        // a "curve" that does not answer them would make the pool revert on every pawn.
+        const answers = await Promise.all([
+          xgas.readContract({ address: s.collection, abi: CURVE_ABI, functionName: 'quoteSell', args: [1n] }).then(() => true, () => false),
+          xgas.readContract({ address: s.collection, abi: CURVE_ABI, functionName: 'isCompanion', args: [1n] }).then(() => true, () => false),
+        ]);
+        if (!answers.every(Boolean)) throw new Error(`${s.collection} does not answer the NGU curve interface (quoteSell, isCompanion), so a pool naming it as its curve would revert on every pawn. Omit curve. Nothing prepared.`);
+        curve = getAddress(a.curve);
+      }
       const p = prepared({
         action: `Open a pawn pool for ${s.symbol}`, chainId: XGAS_CHAIN_ID, to: PAWN(),
-        data: encodeFunctionData({ abi: PAWN_ABI, functionName: 'createPool', args: [key, '0x0000000000000000000000000000000000000000', t] }), value: 0n,
-        asset: 'none (gas only)', amount: `LTV ${t.ltvBps / 100}%, liquidation at ${t.liqBps / 100}%`, counterparty: `staccpad pawn desk ${PAWN()}`,
-        fees: [{ label: 'Fee', amount: 'none' }], net: 'An empty lending pool; lenders fund it with prepare_pawn_lend', timeline: ['One transaction on xGas'],
-        irreversible: 'Terms are fixed for the pool\'s life.', notes: [],
+        data: encodeFunctionData({ abi: PAWN_ABI, functionName: 'createPool', args: [key, curve, t] }), value: 0n,
+        asset: 'none (gas only)', amount: `LTV ${t.ltvBps / 100}%, liquidation at ${t.liqBps / 100}%, bounty ${t.bountyBps / 100}%, rate ${t.baseRateBps / 100}% + ${t.slope1Bps / 100}% to a ${t.kinkBps / 100}% kink + ${t.slope2Bps / 100}% above it`, counterparty: `staccpad pawn desk ${PAWN()}`,
+        fees: [{ label: 'Fee', amount: 'none', note: 'all interest goes to lenders; there is no protocol cut' }], net: 'An empty lending pool; lenders fund it with prepare_pawn_lend', timeline: ['One transaction on xGas'],
+        irreversible: 'Terms are fixed for the pool\'s life.', notes: curve === ZERO_ADDR ? [] : [`The floor is the better of the CLMM sale and the collection's own redeem curve (${curve}) for ids that are not companions.`],
       });
       return reply(renderApproval(p), p);
     },
@@ -235,7 +289,8 @@ export const tools = [
         action: `Pawn #${token_id} in pool ${pool_id}`, steps, asset: 'NFT → WXM (wrapped xMoney) loan', amount: `about ${fmtXMoney(advance)} WXM against a floor of ${fmtXMoney(floor)}`,
         counterparty: `pawn pool ${pool_id}`, fees: [{ label: 'Interest', amount: `${p0.borrow_apr_pct}% APR, floating with utilisation` }],
         net: `${fmtXMoney(advance)} WXM and a ticket NFT that redeems your NFT`, timeline: steps.map((s) => s.label),
-        irreversible: `If the debt reaches ${p0.liquidation_at_pct}% of the floor, anyone can liquidate: your NFT is sold and you keep nothing beyond the advance.`, notes: ['WXM unwraps 1:1 to $xMoney via WrappedXMoney.withdraw.'],
+        irreversible: `If the debt reaches ${p0.liquidation_at_pct}% of the floor, anyone can liquidate: your NFT is sold into the venue that quoted the floor, the liquidator takes a ${p0.liquidator_bounty_pct}% bounty from the proceeds, the pool takes back the debt, and any surplus goes to whoever holds the ticket at that moment. If the proceeds after the bounty do not cover the debt, the lenders absorb the shortfall.`,
+        notes: ['WXM unwraps 1:1 to $xMoney via WrappedXMoney.withdraw.', 'The ticket is an NFT: whoever holds it can redeem the NFT and receives any liquidation surplus.'],
       });
       return reply(renderApproval(p), { ...p, quote: { floor_xmoney: fmtXMoney(floor), advance_xmoney: fmtXMoney(advance) } });
     },

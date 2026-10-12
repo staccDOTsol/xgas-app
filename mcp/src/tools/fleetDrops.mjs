@@ -55,15 +55,46 @@ async function dropState(a) {
 
 const stateOf = (l) => (l.kind === 'pump' ? pumpState(l.address) : dropState(l.address));
 
-async function ownedIds(a, holder, maxId) {
-  const ids = Array.from({ length: Math.min(maxId, 3000) }, (_, i) => BigInt(i + 1));
-  const out = [];
-  for (let i = 0; i < ids.length; i += 60) {
-    const chunk = ids.slice(i, i + 60);
-    const owners = await Promise.all(chunk.map((id) => pump(a, 'ownerOf', [id]).catch(() => null)));
-    owners.forEach((o, j) => { if (o && o.toLowerCase() === holder.toLowerCase()) out.push(chunk[j].toString()); });
+const TRANSFER = PUMP_DROP_ABI.find((x) => x.type === 'event' && x.name === 'Transfer');
+const SCAN_CAP = 20_000; // ownerOf calls the fallback scan will make before it says it stopped
+
+/**
+ * Every id `holder` owns on a PumpDrop. PumpDrop mints curve ids from nextId and never reuses one, so after
+ * sell-backs ids run past supply, and graduation mints the reserve batch after the last curve id: the highest id
+ * ever minted is nextId - 1, read on chain. The holder's ids come from Transfer logs to it, each re-checked with
+ * ownerOf, and the count is checked against balanceOf. If the logs cannot be read, every id from 1 to nextId - 1
+ * is checked with ownerOf instead. A result that is not complete says so (complete: false); nothing is cut silently.
+ */
+async function ownedIds(a, holder) {
+  const [nextId, balance] = await Promise.all([pump(a, 'nextId'), pump(a, 'balanceOf', [holder])]);
+  const maxId = Number(nextId) - 1;
+  const same = (o) => o && o.toLowerCase() === holder.toLowerCase();
+  let ids = null, method = 'transfer_logs', note = null;
+  try {
+    const logs = await xgas.getLogs({ address: a, event: TRANSFER, args: { to: holder }, fromBlock: BigInt(FLEET?.drops?.fromBlock ?? 0), toBlock: 'latest' });
+    const candidates = [...new Set(logs.map((l) => l.args.tokenId))];
+    const owners = await Promise.all(candidates.map((id) => pump(a, 'ownerOf', [id]).catch(() => null)));
+    ids = candidates.filter((_, i) => same(owners[i]));
+  } catch (e) {
+    method = 'owner_of_scan';
+    note = `Transfer logs could not be read (${e.shortMessage || e.message}); scanned ownerOf instead.`;
   }
-  return out;
+  let scanned = null;
+  if (ids === null) {
+    ids = [];
+    const last = Math.min(maxId, SCAN_CAP);
+    for (let i = 1; i <= last && BigInt(ids.length) < balance; i += 60) {
+      const chunk = Array.from({ length: Math.min(60, last - i + 1) }, (_, k) => BigInt(i + k));
+      const owners = await Promise.all(chunk.map((id) => pump(a, 'ownerOf', [id]).catch(() => null)));
+      owners.forEach((o, j) => { if (same(o)) ids.push(chunk[j]); });
+      scanned = Number(chunk[chunk.length - 1]);
+    }
+    if (BigInt(ids.length) < balance && maxId > SCAN_CAP) note = `${note} Stopped at id ${SCAN_CAP} of ${maxId}.`;
+  }
+  ids.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+  const complete = BigInt(ids.length) === balance;
+  if (!complete && !note) note = `Found ${ids.length} id(s) but balanceOf says ${balance}.`;
+  return { ids: ids.map(String), balance: Number(balance), highest_id_minted: maxId, method, complete, ...(scanned != null && { scanned_to_id: scanned }), ...(note && { note }) };
 }
 
 export const tools = [
@@ -92,11 +123,14 @@ export const tools = [
     async handler({ collection, holder }) {
       const l = await launchOf(collection);
       const s = await stateOf(l);
-      if (l.kind === 'pump' && holder && isAddress(holder)) s.holder = { address: holder, ids: await ownedIds(l.address, holder, s.minted + s.reserve_supply_at_graduation + 50) };
+      if (l.kind === 'pump' && holder && isAddress(holder)) s.holder = { address: holder, ...(await ownedIds(l.address, holder)) };
       const head = l.kind === 'pump'
         ? `${s.name} (${s.symbol}), PumpDrop. ${s.graduated ? 'Graduated.' : `${s.minted}/${s.supply} minted (${s.progress_pct}%), next ${s.next_price_xmoney} $xMoney, reserve ${s.reserve_xmoney}.`}\n${s.how_it_works}`
         : `${s.name} (${s.symbol}), StaccDrop. ${s.minted}/${s.max_supply} minted.\n${s.stages.map((x) => `  stage ${x.stage}: ${x.status}, ${x.price_xmoney} $xMoney, ${x.remaining} left`).join('\n')}`;
-      return reply(head + (s.holder ? `\n${holder} holds ${s.holder.ids.length}: ${s.holder.ids.slice(0, 30).join(', ')}` : ''), s);
+      const holds = s.holder
+        ? `\n${holder} holds ${s.holder.balance}${s.holder.complete ? '' : ` (${s.holder.ids.length} found: ${s.holder.note})`}: ${s.holder.ids.slice(0, 30).join(', ')}${s.holder.ids.length > 30 ? `, and ${s.holder.ids.length - 30} more (all in holder.ids)` : ''}`
+        : '';
+      return reply(head + holds, s);
     },
   },
 
@@ -114,6 +148,7 @@ export const tools = [
       const s = await pumpState(l.address);
       if (s.graduated) return reply(`${s.symbol} has graduated; the curve is closed. Trade it on its peg market.`, { ...s, blocked: 'graduated' });
       if (qty > s.remaining) return reply(`Only ${s.remaining} left on the curve.`, { ...s, blocked: 'not_enough_left' });
+      if (s.starts_at !== 'now' && Date.parse(s.starts_at) > Date.now()) return reply(`${s.symbol} opens at ${s.starts_at}; a buy before then reverts (NotStarted). Nothing prepared.`, { ...s, blocked: 'not_started' });
       const [cost, fees, total] = await pump(l.address, 'quoteBuy', [qty]);
       const maxTotal = total + (total * BigInt(buffer_bps)) / BPS;
       const graduates = qty === s.remaining;
@@ -222,7 +257,7 @@ export const tools = [
         base_uri: { type: 'string', maxLength: 256 }, contract_uri: { type: 'string', maxLength: 256 },
         max_supply: { type: 'integer', minimum: 1, maximum: 1000000 }, price_xmoney: { type: 'string' },
         per_wallet: { type: 'integer', minimum: 0, maximum: 65535 }, start_unix: { type: 'integer', minimum: 0 }, end_unix: { type: 'integer', minimum: 0 },
-        protocol_bps: { type: 'integer', minimum: 0, maximum: 10000, description: 'Share of proceeds to the xGas FanoutSink. Default 1000 (10%).' },
+        protocol_bps: { type: 'integer', minimum: 0, maximum: 5000, description: 'Share of proceeds to the xGas FanoutSink (as WXM through the fleet treasury), at most 5000: StaccDrop reverts above it. Default 1000 (10%).' },
         royalty_bps: { type: 'integer', minimum: 0, maximum: 1000 },
       },
       required: ['name', 'symbol', 'max_supply', 'price_xmoney'], additionalProperties: false,
@@ -230,16 +265,20 @@ export const tools = [
     async handler(a) {
       if (!factory()) throw new Error(NOT_LIVE);
       const price = parseXMoney(a.price_xmoney);
+      const fanoutBps = a.protocol_bps ?? 1000;
+      if (!Number.isInteger(fanoutBps) || fanoutBps < 0 || fanoutBps > 5000) throw new Error(`protocol_bps must be 0 to 5000: StaccDrop reverts (BadBps) above 5000. Got ${a.protocol_bps}. Nothing prepared.`);
+      if ((a.royalty_bps ?? 500) > 1000) throw new Error('royalty_bps must be at most 1000: StaccDrop reverts (BadBps) above it. Nothing prepared.');
+      if (price >= 2n ** 96n) throw new Error('price_xmoney does not fit the stage price (uint96). Nothing prepared.');
       const now = Math.floor(Date.now() / 1000);
-      const init = { name: a.name, symbol: a.symbol, baseURI: a.base_uri ?? '', contractURI: a.contract_uri ?? '', maxSupply: a.max_supply, payout: ZERO, fanoutBps: a.protocol_bps ?? 1000, royaltyBps: BigInt(a.royalty_bps ?? 500), royaltyReceiver: ZERO };
+      const init = { name: a.name, symbol: a.symbol, baseURI: a.base_uri ?? '', contractURI: a.contract_uri ?? '', maxSupply: a.max_supply, payout: ZERO, fanoutBps, royaltyBps: BigInt(a.royalty_bps ?? 500), royaltyReceiver: ZERO };
       const stage = { startPrice: price, endPrice: price, decay: 0, start: a.start_unix || now, end: a.end_unix ?? 0, supply: 0, perWallet: a.per_wallet ?? 0, allowlistRoot: `0x${'0'.repeat(64)}`, minted: 0, live: true };
       const p = prepared({
         action: `Launch StaccDrop ${a.symbol}`, chainId: XGAS_CHAIN_ID, to: factory(),
         data: encodeFunctionData({ abi: DROP_FACTORY_ABI, functionName: 'launchDrop', args: [init, [stage]] }), value: 0n,
         asset: 'none (gas only)', amount: `${a.max_supply} NFTs at ${a.price_xmoney} $xMoney`,
         counterparty: `staccpad DropFactory ${factory()}`,
-        fees: [{ label: 'Launch fee', amount: 'none', note: `${((a.protocol_bps ?? 1000) / 100).toFixed(2)}% of mint proceeds to the xGas FanoutSink, the rest to you` }],
-        net: 'A new collection you own, minting immediately', timeline: ['One transaction on xGas'],
+        fees: [{ label: 'Launch fee', amount: 'none', note: `${(fanoutBps / 100).toFixed(2)}% of mint proceeds to the xGas FanoutSink, the rest to you` }],
+        net: `A new collection you own, minting ${stage.start > now ? `from ${new Date(stage.start * 1000).toISOString()}` : 'immediately'}`, timeline: ['One transaction on xGas'],
         irreversible: 'The collection is yours to manage (stages, metadata, supply cuts); minted NFTs are final.', notes: [],
       });
       return reply(renderApproval(p), p);
@@ -257,6 +296,10 @@ export const tools = [
       const st = s.stages[stage];
       if (!st) throw new Error(`No stage ${stage}; this drop has ${s.stages.length}.`);
       if (st.status !== 'live') return reply(`Stage ${stage} is ${st.status}. Nothing prepared.`, { ...s, blocked: st.status });
+      if (qty > st.remaining) return reply(`Stage ${stage} has ${st.remaining} left; minting ${qty} reverts (SoldOut). Nothing prepared.`, { ...s, blocked: 'not_enough_left' });
+      const cfg = await drop(l.address, 'stages', [BigInt(stage)]);
+      const allowlistRoot = Array.isArray(cfg) ? cfg[7] : cfg.allowlistRoot;
+      if (allowlistRoot && !/^0x0{64}$/i.test(allowlistRoot)) return reply(`Stage ${stage} is allowlist-only; this tool prepares public mints with no Merkle proof, which the stage would reject (NotOnAllowlist). Nothing prepared.`, { ...s, blocked: 'allowlist_stage' });
       const cost = await drop(l.address, 'quote', [BigInt(stage), qty]);
       const p = prepared({
         action: `Mint ${qty} ${s.symbol} (stage ${stage})`, chainId: XGAS_CHAIN_ID, to: l.address,

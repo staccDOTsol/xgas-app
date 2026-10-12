@@ -61,10 +61,11 @@ Environment overrides, all optional:
 | `XGAS_NGU_LAUNCHER` | unset | the NguLauncher address, until it is in the deployment file |
 | `XGAS_DEPOSITS_PAUSED` | unset (deposits open, through EarlyDepositor or the vault) | set to `1` to make `prepare_enter` and `submit_enter` refuse |
 | `XGAS_MCP_DATA` | `/data` or `~/.xgas-mcp` | where idempotency keys and ramp state live |
-| `XSWAP_INTENTS` | `xswap.intents` from the deployment, else v1 `0xf8B4…9a35` (paused) | the X-Money-in escrow on the parent chain |
-| `XSWAP_ASKS` | `xswap.asks` from the deployment, else v1 `0x0a33…Cd13` (paused) | the X-Money-out escrow on the parent chain |
-| `XSWAP_ENABLED` | ignored for the known legacy escrows | A host flag cannot re-enable fee-free legacy funding. V2 new orders are a source gate (`XSWAP_V2.enabled`), open since 0.6.3. |
-| `XSWAP_OWNER` | `xswap.owner` from the deployment | the owner new swaps require `owner()` to equal on both escrows |
+| `XSWAP_INTENTS` | `xswap.intents` from the deployment (legacy `0x5D78…B53d`), else v1 `0xf8B4…9a35` | the legacy intents escrow, exit-only: refunds, settles and withdrawals of existing swaps |
+| `XSWAP_ASKS` | `xswap.asks` from the deployment (legacy `0xa999…c8a3`), else v1 `0x0a33…Cd13` | the legacy asks escrow, exit-only |
+| `XSWAP_ENABLED` | ignored for the known legacy escrows | a host flag cannot re-enable fee-free legacy funding. New swaps only ever go to the V2 escrows pinned in `src/config.mjs`, behind the gate described under "XSwap" |
+| `XSWAP_OWNER` | `xswap.owner` from the deployment | the owner the legacy escrows are checked against in `xswap_terms` |
+| `XSWAP_V2_OWNER` | unset | required pin for the V2 new-swap gate: new swaps open only while `owner()` of both V2 escrows is exactly this address. Unset keeps new swaps closed, since the exposed key could move ownership anywhere |
 
 ## Chain 466302
 
@@ -82,10 +83,10 @@ its exits and Outbox claims keep working, and the deployment file keeps its addr
 - **Validation is permissionless.** The validator whitelist is disabled. Anyone who runs a node
   and posts the stake can assert and challenge. If the xGas validators stop, exits do not depend
   on them, but they then wait the full challenge window.
-- **Deposits go through EarlyDepositor until the vault switch.** The XMoney vault
-  (`0xa924…a97E`) still points `enterRollup` at the retired 466301 inbox until its timelocked
-  `setBridgeSystem` executes (executable 2026-09-27 08:33Z). Every enter tool reads
-  `vault.inbox()` live:
+- **Deposits go through the vault since the switch.** The XMoney vault's timelocked
+  `setBridgeSystem` executed on 2026-10-06, so `vault.inbox()` is this chain's inbox and deposits
+  use `vault.enterRollup`. The EarlyDepositor branch below stays in the code and only applies if
+  that ever changes. Every enter tool reads `vault.inbox()` live:
   - while it is not this chain's inbox (`0xa708…8146`), `prepare_enter` builds
     `USDG.approve(EarlyDepositor, exact amount)` then `EarlyDepositor.deposit(amount, recipient)`.
     EarlyDepositor (`l3.earlyDepositor`, `0x36e5…4d431`; no owner, holds nothing between calls)
@@ -96,7 +97,12 @@ its exits and Outbox claims keep working, and the deployment file keeps its addr
     guaranteed minimum (the ticket's call value) and an estimate (the deposit minus about 21.2k gas
     at the current L3 base fee, since unused gas is refunded to the recipient).
   - once it is, `prepare_enter` builds `USDG.approve(vault)` then `vault.enterRollup(amount, recipient)`,
-    with no transfer tax.
+    with no transfer tax. The deployed vault (`public/source/XMoney.sol`) mints the ticket's L4 gas
+    prepay (`l3GasLimit * l3MaxFeePerGas`, 0.0001 xMoney at the deployed values) on top of the
+    deposit with no USDG behind it, and the ticket's call value is the full net amount. So
+    `quote_enter` quotes the net amount as the guaranteed credit, the refunded part of the prepay
+    on top of it, and the unbacked mint itself with what it does to r/s: deposits minting under
+    about 2 xMoney lower r/s. The timelocked owner sets both gas values, with no upper bound.
   - if neither route can be shown to reach 466302, nothing is prepared.
   The approve is for the exact amount and is skipped when the allowance already covers it.
   `get_enter_status` reads both an `EarlyDeposit` and a `RollupEntered`.
@@ -121,7 +127,7 @@ its exits and Outbox claims keep working, and the deployment file keeps its addr
 
 ## XSwap: X Money in, anything out
 
-**V2 transition (October 2026):** The reviewed Robinhood V2 collector is `0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e`; its intents and asks escrows are `0xdf6398ff5a694a03d85a614812490143c4e5d238` and `0x2f507a18043002d8f5d6d3022efd6265be7a87fc`. The connector verifies their runtime hashes, owner, collector link and live terms before a V2 preparation. **New V2 orders are open since 2026-10-06**: `prepare_xswap_out` and `prepare_xswap_in` prepare V2 site-fee orders (10 bp of the winning solver ask, charged only at settlement), and `prepare_xswap_action` bids, claims, accepts and delivers on them. The solver network fills X Money → native ETH on Base today (10 X Money per order, 50 per UTC day); other routes wait for a solver to bid and refund after the deadline if none does. The gate is `XSWAP_V2.enabled` in `src/config.mjs`, opened after the V2 solver review and the fork lifecycle run (`npm run e2e:v2`). The current 5D/a999 and retired f8/0a escrows remain readable; refund, cancel, settle, confirm and per-contract withdrawal can be prepared for existing orders. Legacy open, ask, bid and claim transactions, including approval to a legacy escrow through `submit_xswap`, are refused. `quote_xswap` now treats its entered X Money amount as the gross wallet debit cap and shows the 1 bp transfer burn, 10 bp site fee and 50 bp protocol fee. `prepare_xswap_action action=withdraw` accepts `contract` to pull credit from a specific known escrow.
+**V2 (October 2026):** The reviewed Robinhood V2 collector is `0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e`; its intents and asks escrows are `0xdf6398ff5a694a03d85a614812490143c4e5d238` and `0x2f507a18043002d8f5d6d3022efd6265be7a87fc`. The connector verifies their runtime hashes, collector link, live terms and that both escrows name the same usable owner before a V2 preparation. V2 orders opened on 2026-10-06 and are **paused again on this connector while the escrows' owner is an exposed key** (see "New-swap gate" below). When the gate is open, `prepare_xswap_out` and `prepare_xswap_in` prepare V2 site-fee orders (10 bp of the winning solver ask, charged only at settlement), and `prepare_xswap_action` bids, claims, accepts and delivers on them. The solver network fills X Money → native ETH on Base today (10 X Money per order, 50 per UTC day); other routes wait for a solver to bid and refund after the deadline if none does. The gate is `XSWAP_V2.enabled` in `src/config.mjs`, opened after the V2 solver review and the fork lifecycle run (`npm run e2e:v2`). The current 5D/a999 and retired f8/0a escrows remain readable; refund, cancel, settle, confirm and per-contract withdrawal can be prepared for existing orders. Legacy open, ask, bid and claim transactions, including approval to a legacy escrow through `submit_xswap`, are refused. `quote_xswap` now treats its entered X Money amount as the gross wallet debit cap and shows the 1 bp transfer burn, 10 bp site fee and 50 bp protocol fee. `prepare_xswap_action action=withdraw` accepts `contract` to pull credit from a specific known escrow.
 
 `quote_xswap` and `prepare_xswap_out` escrow X Money against an order (chain, asset, amount, recipient) hashed the way every solver hashes it. Solvers bid the price down,
 the lowest ask wins, and whatever the bidding saves comes back to the payer as credit.
@@ -136,7 +142,29 @@ rather than pretending a number it does not have.
 The connector cannot see the destination chain. It never claims an asset arrived; the
 challenge window and the bond are what stand in for that.
 
-### Paused: nobody can resolve a dispute on the v1 contracts
+### New-swap gate: the V2 arbiter key
+
+`owner()` of the V2 escrows alone runs `resolve()`: it rules on every dispute, and a ruling for the
+solver (or, on an ask, for the seller) releases the other side's money. Both V2 escrows were deployed
+with owner `0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158`, a key treated as exposed since 2026-10-03.
+So the connector has one gate, `acceptNewSwaps()` in `src/xswapV2.mjs`, that reads `owner()` on both
+V2 escrows live (cached 30 s for reads, re-read fresh before anything is prepared or relayed) and is
+closed while that owner is on `XSWAP_V2.exposedOwners`, unreadable, zero or forge's default sender,
+or different between the two escrows. While it is closed:
+
+- the server instructions, `xswap_terms` and `quote_xswap` say XSwap is paused for new swaps and why;
+- `prepare_xswap_out`, `prepare_xswap_in`, `prepare_xswap_action` with `bid`, `claim`, `accept` or
+  `delivered`, and `submit_xswap` for any V2 open, ask, bid, claim, accept, delivered or approval
+  to a V2 escrow refuse with the reason;
+- refund, cancel, settle, confirm, dispute and withdraw of swaps that already exist keep working.
+
+It reopens only when ownership of both escrows is the address pinned in `XSWAP_V2_OWNER` on the
+host. The V2 escrows are plain `Ownable`, so `transferOwnership` takes effect at once and whoever
+holds the exposed key could move ownership anywhere; an unpinned owner change keeps new swaps
+closed. `xswap_terms` names the live owner, what kind of account it is,
+and what it can and cannot do.
+
+### Legacy v1 escrows: nobody can resolve a dispute
 
 The v1 escrows on Robinhood (intents `0xf8B4F14eF9A08e334CA9fc026C6e5E9a79B39a35`, asks
 `0x0a33001A28A82d50ECC5c166dd5DCb8f5efaCd13`, and an earlier intents
@@ -157,24 +185,16 @@ but the default sender became the owner. So `resolve()`, `setParams()` and `tran
 can never be called there: a disputed swap would stay frozen forever, escrow and bond both.
 Both contracts held 0 xMoney and 0 ETH when this was found.
 
-While the connector points at those addresses:
+The connector never prepares a new swap on these addresses, or on the later legacy pair
+(`0x5D78…B53d` / `0xa999…c8a3`); they are exit-only:
 
-- `prepare_xswap_out`, `prepare_xswap_in`, and `prepare_xswap_action` with `bid`, `claim`,
-  `accept` or `delivered` refuse with the reason. `wallet_execute` goes through the same
-  handlers, so it refuses too, and `submit_xswap` will not relay a signed `open`, `ask`, `bid`,
-  `claim`, `accept` or `delivered` to a v1 address or to a paused escrow.
-- `xswap_terms`, `quote_xswap` (marked as a quote only), `xswap_status`, `list_my_xswaps`,
-  `xswap_reputation`, and the ways out (`refund`, `cancel`, `settle`, `confirm`, `withdraw`) keep
-  working. `dispute` still prepares, but on a contract nobody can rule on it is not listed as a way
-  out anywhere: `xswap_terms`, every refusal and the dispute screen say it freezes the escrow and the
-  bond for good (its only effect is that the other side is never paid).
-- `xswap_terms` reads `owner()` live and says who resolves disputes: nobody (and why), a Safe
-  (threshold and signers), or one key, plus any pending handover. Once there is an owner it lists
-  what that owner can do (rule on a disputed swap, and only that swap's money; `setParams` within
-  the contract's bounds; a two-step handover on the redeploy) and what it cannot (touch any other
-  swap, anyone's credit, pause, upgrade, renounce), and that parameter changes reach swaps already
-  in flight.
-- `list_my_xswaps` no longer passes a swap's memo through. It keeps the five order fields,
+- `prepare_xswap_action` with `bid`, `claim`, `accept` or `delivered` refuses on a legacy escrow,
+  and `submit_xswap` will not relay a signed `open`, `ask`, `bid`, `claim`, `accept`, `delivered`
+  or an approval to one. `wallet_execute` goes through the same handlers, so it refuses too.
+- `xswap_status`, `list_my_xswaps`, `xswap_reputation` (with `contract`) and the ways out
+  (`refund`, `cancel`, `settle`, `confirm`, `withdraw`) keep working. `dispute` is refused on the
+  keyless v1 escrows: nobody can rule on it there, so it would only freeze the escrow and the bond.
+- `list_my_xswaps` does not pass a swap's memo through. It keeps the five order fields,
   type-checked, and says whether they hash to the on-chain want/give hash.
 
 ### Redeploy and switch on
@@ -210,11 +230,9 @@ OWNER=0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158 PRIVATE_KEY=... \
 
 The script prints an `xswap` block. Put it in `src/contracts/l4-deployment.json` (and so in the
 package's `deployment.json` at the next release). The connector reads `xswap.intents`,
-`xswap.asks` and `xswap.owner` from it. New swaps stay off until `XSWAP_ENABLED=1` on the host,
-or `"enabled": true` in that block, and only with an expected owner configured (`xswap.owner` or
-`XSWAP_OWNER`; without one XSwap stays off). Each new swap then checks `owner()` on both escrows:
-it must be a key or a working Safe (a contract that does not answer like one is refused, as the
-deploy script refuses it), never the default sender or zero, and it must match that owner.
+`xswap.asks` and `xswap.owner` from it. That pair (`0x5D78…B53d` / `0xa999…c8a3` today) is
+legacy and exit-only whatever `XSWAP_ENABLED` or `"enabled"` say: new swaps only go to the V2
+escrows, behind the gate above.
 
 ## Design rules
 
@@ -419,6 +437,23 @@ not instructions. The server instructions tell models the same.
 | `MCP_AUTH_TOKEN` | operator token for our own tooling; users use their X sign-in instead |
 
 ## Changelog
+
+**Unreleased**
+- XSwap: one new-swap gate, `acceptNewSwaps()`, read by the server instructions, `xswap_terms`,
+  `quote_xswap`, both prepare tools, the gated `prepare_xswap_action` steps and `submit_xswap`.
+  Closed while the V2 escrows' `owner()` is the exposed key `0x26E8…5158`; reopens by itself when
+  ownership moves to the address pinned in `XSWAP_V2_OWNER` (required; unset stays closed). `xswap_terms` now reads the V2 escrows (terms,
+  live owner, protocol, site and burn fees) instead of the legacy pair. `xswap_reputation` reports
+  `rep.failed` as `solver_disputes_lost` (claims the owner ruled against), not as failed jobs.
+- Pawn: `create_pawn_pool` validates exactly `createPool`'s checks and takes an optional `curve`;
+  `prepare_pawn` states the real liquidation split (bounty, debt, surplus to the ticket holder,
+  shortfall to lenders). CLMM launch text says what a mint really locks and where the rest goes.
+- Drops: `launch_drop` caps `protocol_bps` at 5000 (StaccDrop reverts above); `get_drop` finds a
+  holder's PumpDrop ids from Transfer logs (to `nextId - 1`) and says when a result is incomplete;
+  `prepare_pump_buy` and `prepare_drop_mint` refuse not-started, sold-out and allowlist stages.
+- Bridge: `quote_enter` follows the deployed vault (the gas prepay is minted on top of the
+  deposit) and discloses that unbacked mint and its effect on r/s; `get_fee_schedule` lists it.
+- Peg: `create_peg_market` no longer claims one market per collection; it warns about existing ones.
 
 **0.6.4**
 - Package: restore the `xgas-mcp` bin entry that npm 11 dropped from 0.6.3 (`npx -y xgas-mcp` works again). No tool changes.

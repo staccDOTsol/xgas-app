@@ -25,6 +25,27 @@ export const XGAS_CHAIN_ID = DEPLOY.chainId;           // 466302 xGas Orbit L4 (
 const PARENT_RPC = process.env.XGAS_PARENT_RPC || DEPLOY.parentRpcUrl;
 const XGAS_RPC = process.env.XGAS_RPC || DEPLOY.publicRpcUrl || DEPLOY.rpcUrl || DEPLOY.sequencerRpcUrl;
 
+// What this connector READS through and what it TELLS clients are two different URLs. The hosted app reads the
+// parent chain through a private failover proxy (XGAS_PARENT_RPC=http://xgas-rpc.internal:8545 in fly.toml) that
+// nobody outside Fly can reach, so tool output names a public endpoint instead: XGAS_PARENT_PUBLIC_RPC /
+// XGAS_PUBLIC_RPC if set, else the deployment file's public URL. A private URL is never shown, whatever is set.
+const isPrivateRpc = (u) => {
+  try {
+    const h = new URL(u).hostname.toLowerCase();
+    return h.endsWith('.internal') || h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '[::1]'
+      || /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || !h.includes('.');
+  } catch { return true; }
+};
+const firstPublic = (...urls) => urls.find((u) => u && !isPrivateRpc(u)) || null;
+const PARENT_PUBLIC_RPC = firstPublic(process.env.XGAS_PARENT_PUBLIC_RPC, PARENT_RPC, DEPLOY.parentRpcUrl, 'https://rpc.mainnet.chain.robinhood.com');
+const XGAS_PUBLIC_RPC = firstPublic(process.env.XGAS_PUBLIC_RPC, XGAS_RPC, DEPLOY.publicRpcUrl, DEPLOY.rpcUrl) || `${(process.env.XGAS_API || 'https://xgas.dev').replace(/\/+$/, '')}/rpc`;
+/** An RPC URL as it may appear in tool output: itself when public, a description when it is a private host. */
+const shownRpc = (u) => (isPrivateRpc(u) ? "this host's private RPC" : u);
+/** Replace this host's private RPC URLs in any text bound for a client (viem errors quote the URL they failed on). */
+export const scrubRpc = (text) => [PARENT_RPC, XGAS_RPC].filter((u) => u && isPrivateRpc(u))
+  .reduce((t, u) => t.split(u).join(shownRpc(u)), String(text ?? ''));
+export { isPrivateRpc };
+
 // The host that runs the Outbox executor ("claim for me") and serves /api/l4-info.
 export const XGAS_API = (process.env.XGAS_API || 'https://xgas.dev').replace(/\/+$/, '');
 
@@ -32,7 +53,7 @@ export const parentChain = defineChain({
   id: PARENT_CHAIN_ID,
   name: 'Robinhood Chain',
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-  rpcUrls: { default: { http: [PARENT_RPC] } },
+  rpcUrls: { default: { http: [PARENT_PUBLIC_RPC] } }, // display only: `parent` below reads through PARENT_RPC
   blockExplorers: { default: { name: 'Blockscout', url: 'https://robinhoodchain.blockscout.com' } },
 });
 
@@ -40,14 +61,15 @@ export const xgasChain = defineChain({
   id: XGAS_CHAIN_ID,
   name: 'xGas Orbit L4',
   nativeCurrency: { name: 'X Money Gas', symbol: 'xMoney', decimals: 18 },
-  rpcUrls: { default: { http: [XGAS_RPC] } },
+  rpcUrls: { default: { http: [XGAS_PUBLIC_RPC] } }, // display only: `xgas` below reads through XGAS_RPC
 });
 
 export const parent = createPublicClient({ chain: parentChain, transport: http(PARENT_RPC, { timeout: 20_000 }) });
 export const xgas = createPublicClient({ chain: xgasChain, transport: http(XGAS_RPC, { timeout: 20_000 }) });
 
 export const clientFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? xgas : parent);
-export const rpcFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? XGAS_RPC : PARENT_RPC);
+/** The public RPC for a chain, as tool output names it (never the host's private read path). */
+export const rpcFor = (chainId) => (Number(chainId) === XGAS_CHAIN_ID ? XGAS_PUBLIC_RPC : PARENT_PUBLIC_RPC);
 
 export const L3 = DEPLOY.l3;
 // The staccpad fleet on the L4 (NFT NGU, peg markets, drops, CLMM, pawn). Null on a deployment without it.
@@ -167,6 +189,11 @@ export const isXswapLegacy = (a) => XSWAP_LEGACY_SET.has(String(a || '').toLower
 // New V2 contracts are independent of legacy deployment.json and XSWAP_* environment overrides.
 // New funding and claims opened 2026-10-06: runtime pins verified, the V2 solver (staccpad xswap-solver-v2.mjs)
 // reviewed and funded, and the fork lifecycle (mcp/scripts/xswap-v2-e2e.mjs) run against the deployed bytecode.
+// New swaps are gated twice: `enabled` is the source kill switch, and acceptNewSwaps() in xswapV2.mjs reads owner()
+// on both V2 escrows live and stays closed while it is one of `exposedOwners`. owner() alone runs resolve(), so a key
+// someone else may hold can rule for a solver that never delivered and keep the payer's escrow.
+// `deployedOwner` is the owner the escrows were deployed with: history, not a pin. The gate reopens on its own once
+// ownership moves to another usable address, or, with XSWAP_V2_OWNER set on the host, only once it is that address.
 export const XSWAP_V2 = {
   collector: '0x5a5e18e5003d75f9705252b2c3436c1b61e6d33e',
   collectorRuntimeHash: '0xb0eb9674d60fbfe03eb1f26c2453ee2446433812ff9e0690fd7db8c89032633b',
@@ -174,7 +201,10 @@ export const XSWAP_V2 = {
   intentsRuntimeHash: '0xd5f3ec158647ae483ed942998d9f164aa0e26b98a1a2e29a4a0b6b3bd9a354eb',
   asks: '0x2f507a18043002d8f5d6d3022efd6265be7a87fc',
   asksRuntimeHash: '0x998aca274594b99b203562e5c0b9a46aa6f5794b3bfbbee762afdb125bf1f557',
-  expectedOwner: '0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158',
+  deployedOwner: '0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158',
+  // Keys that must not arbitrate new swaps. 0x26E8…5158 was pasted into a chat on 2026-10-03 (staccpad-ai wiki).
+  // Keys that must not arbitrate new swaps. Empty: the owner decided 2026-10-12 to keep XSwap open on 0x26E8…5158.
+  exposedOwners: Object.freeze([]),
   treasury: '0x1b88A6c6516FD2918905186F21Bb9F5CaA1a15c8',
   enabled: true,
 };
@@ -227,10 +257,10 @@ export function checkChains() {
     const read = (client) => client.getChainId().then((id) => ({ id }), (e) => ({ error: e.shortMessage || e.message }));
     const [l4, par] = await Promise.all([read(xgas), read(parent)]);
     const problems = [];
-    if (l4.error) problems.push(`could not read eth_chainId from the xGas RPC ${XGAS_RPC} (${l4.error})`);
-    else if (l4.id !== XGAS_CHAIN_ID) problems.push(`the xGas RPC ${XGAS_RPC} is chain ${l4.id}, but the deployment is chain ${XGAS_CHAIN_ID}`);
-    if (par.error) problems.push(`could not read eth_chainId from the parent RPC ${PARENT_RPC} (${par.error})`);
-    else if (par.id !== PARENT_CHAIN_ID) problems.push(`the parent RPC ${PARENT_RPC} is chain ${par.id}, but the deployment's parent is chain ${PARENT_CHAIN_ID}`);
+    if (l4.error) problems.push(`could not read eth_chainId from the xGas RPC ${shownRpc(XGAS_RPC)} (${scrubRpc(l4.error)})`);
+    else if (l4.id !== XGAS_CHAIN_ID) problems.push(`the xGas RPC ${shownRpc(XGAS_RPC)} is chain ${l4.id}, but the deployment is chain ${XGAS_CHAIN_ID}`);
+    if (par.error) problems.push(`could not read eth_chainId from the parent RPC ${shownRpc(PARENT_RPC)} (${scrubRpc(par.error)})`);
+    else if (par.id !== PARENT_CHAIN_ID) problems.push(`the parent RPC ${shownRpc(PARENT_RPC)} is chain ${par.id}, but the deployment's parent is chain ${PARENT_CHAIN_ID}`);
     const mismatch = (!l4.error && l4.id !== XGAS_CHAIN_ID) || (!par.error && par.id !== PARENT_CHAIN_ID);
     const result = { ok: problems.length === 0, mismatch, l4ChainId: l4.id ?? null, parentChainId: par.id ?? null, problems };
     chainCheck.result = result;

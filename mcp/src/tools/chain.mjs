@@ -19,6 +19,7 @@ export const FEE_SCHEDULE = {
     usdg_rake_to: L3.fanout,
     xmoney_entry_burn_bps: 1,
     entry_burn_split: 'half to 0x…dEaD, half minted to the Orbit bridge as a permanent solvency buffer',
+    unbacked_l4_gas_mint: 'vault.enterRollup also mints l3GasLimit * l3MaxFeePerGas xMoney per deposit with no USDG behind it, to prepay L4 delivery gas (unused part refunded to the recipient). It counts as circulating, so small deposits lower r/s. The timelocked owner sets both values with no upper bound. quote_enter shows the live amount.',
   },
   xmoney_transfer: {
     burn_bps: 1,
@@ -149,7 +150,7 @@ export const tools = [
     async handler() {
       return reply(
         [
-          'Enter (USDG → $xMoney): 0.01% USDG to the Fanout + 0.01% xMoney entry burn (half dead, half bridge buffer).',
+          'Enter (USDG → $xMoney): 0.01% USDG to the Fanout + 0.01% xMoney entry burn (half dead, half bridge buffer). The vault also mints the L4 gas prepay (l3GasLimit x l3MaxFeePerGas) per deposit with no USDG behind it, so small deposits lower r/s; quote_enter shows it live.',
           'Parent xMoney transfers: 0.01% burn. Into the bridge system: exempt. Out of it: burned as usual.',
           'OTC release: 0.01% burned + 0.01% to the FanoutSink + 0.02% XGAS.DEV buyback; 99.96% net to the buyer.',
           'Exit (xMoney → USDG): 0.01% USDG rake to the Fanout.',

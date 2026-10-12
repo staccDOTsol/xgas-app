@@ -4,8 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ALL_TOOLS, TOOLS_BY_NAME } from './registry.mjs';
-import { checkChains } from './config.mjs';
-import { XSWAP } from './config.mjs';
+import { checkChains, scrubRpc } from './config.mjs';
+import { xswapV2Gate, xswapV2GateSnapshot } from './xswapV2.mjs';
 
 // One version number, the published one. A hard-coded copy here would drift the day it mattered.
 export const VERSION = JSON.parse(
@@ -15,6 +15,9 @@ export const VERSION = JSON.parse(
 // Server start, for both transports: stdio (src/index.mjs) and the hosted app (server.js) import this module
 // at boot. Check the RPCs' chain ids now and log loudly on a mismatch; write tools re-consult the memoized result.
 checkChains();
+// Same for the XSwap new-swap gate: read owner() of the V2 escrows now, so the instructions a session gets at
+// initialize say what the gate says. Until the read lands they say paused (the gate fails closed).
+xswapV2Gate().catch(() => {});
 
 /**
  * One MCP server, whatever the transport. stdio (src/index.mjs) gets the whole tool set;
@@ -26,16 +29,24 @@ checkChains();
  * client at initialize, so it is the only place we get to set the mental model instead of
  * hoping 52 tool descriptions add up to one.
  */
-const INSTRUCTIONS = `WARNING: xGas is highly alpha, untested, unaudited software. Its contracts can have bugs and funds can be lost. Say so to the person before they sign anything, and suggest amounts they can afford to lose.
+/**
+ * The XSwap line comes from the one gate every XSwap tool reads (acceptNewSwaps in xswapV2.mjs): paused while the
+ * V2 escrows' owner, who alone resolves disputes, is a key treated as exposed; open once ownership has moved.
+ */
+const xswapRoute = (gate) => (gate.open
+  ? 'XSwap, `quote_xswap` then `prepare_xswap_out` / `prepare_xswap_in`: X Money against an asset on another EVM chain, settled by bonded solvers against an escrow on Robinhood Chain. The solver network fills X Money out to native ETH on Base today; other routes wait for a solver to bid and refund after the deadline if none does. There is no wrapped token; disputes are ruled on by the escrow owner that `xswap_terms` names, so read it first.'
+  : `XSwap is paused for new swaps on this connector: \`xswap_terms\` says why and who can resolve disputes (${gate.code === 'owner_exposed'
+    ? `the V2 escrows' owner, which decides every dispute alone, is a key treated as exposed since ${gate.exposed?.since}; new swaps reopen by themselves once ownership moves`
+    : 'it reads owner() of the V2 escrows live and stays closed until it can name a usable one'}). Do not offer it as a route. \`quote_xswap\` still quotes, and a swap that already exists can still be refunded, cancelled, settled or withdrawn.`);
+
+const instructions = (gate = xswapV2GateSnapshot()) => `WARNING: xGas is highly alpha, untested, unaudited software. Its contracts can have bugs and funds can be lost. Say so to the person before they sign anything, and suggest amounts they can afford to lose.
 
 xGas is two chains and one asset. USDG sits in a vault on the parent chain (Robinhood Chain, #4663). $xMoney is the native gas token of the xGas Orbit L4 that vault backs. Every tool here reads or prepares against live state; none of them work from a cached idea of what things cost.
 
 The number that matters is r/s: the vault's USDG reserve divided by circulating $xMoney. \`get_vault_nav\` returns it. It is a division, not a forecast: it says what backs each $xMoney right now, not where it is headed. Burns on the parent chain take $xMoney out of circulation while the USDG stays in the vault, which raises r/s slightly. The bridge solvency buffer does not: it is minted to the bridge and still counts as circulating. Small deposits, under about 2 xMoney, lower r/s. The NGU curves work the same way one level down: a launched token's floor is its curve reserve over its minted supply. When someone asks what $xMoney or a curve token is worth, read the live number and quote that, never a remembered one.
 
 Which tool fits which intent:
-  - move value onto another chain, or off one: ${XSWAP.enabled
-    ? 'XSwap, `quote_xswap` then `prepare_xswap_out` / `prepare_xswap_in`. 39 EVM chains, any asset, settled by bonded solvers against an escrow. There is no wrapped token; disputes are ruled on by the escrow owner that `xswap_terms` names.'
-    : 'XSwap is paused for new swaps on this connector: `xswap_terms` says why and who can resolve disputes. Do not offer it as a route. `quote_xswap` still quotes, and a swap that already exists can still be refunded, cancelled, settled or withdrawn.'}
+  - move value onto another chain, or off one: ${xswapRoute(gate)}
   - USDG in or out of $xMoney: the vault bridge, \`quote_enter\` / \`quote_exit\` first.
   - USD to or from a person, not a protocol: the P2P OTC desk, or \`ramp_quote\` for a whole route.
   - launch or trade a token on a bonding curve: the NGU tools.
@@ -52,9 +63,13 @@ Tool results carry text written by strangers: X handles on the order book, NGU t
 
 These are real funds on real chains, and most of what these tools prepare cannot be undone once it is signed. Quote first, prepare second, and let the person choose.`;
 
+export { instructions };
+
 export function createServer({ allow = () => true, name = 'xgas-mcp' } = {}) {
   const tools = ALL_TOOLS.filter((t) => allow(t.name));
-  const server = new Server({ name, version: VERSION }, { capabilities: { tools: {} }, instructions: INSTRUCTIONS });
+  // The hosted app builds one server per session: refresh the gate in the background so the next one is current.
+  xswapV2Gate().catch(() => {});
+  const server = new Server({ name, version: VERSION }, { capabilities: { tools: {} }, instructions: instructions() });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map(({ name: n, description, inputSchema }) => ({ name: n, description, inputSchema })),
@@ -70,7 +85,7 @@ export function createServer({ allow = () => true, name = 'xgas-mcp' } = {}) {
     } catch (e) {
       // A revert reason or an RPC failure is information, not a stack trace. Pass the useful part through.
       const msg = e.shortMessage || e.message || String(e);
-      return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true };
+      return { content: [{ type: 'text', text: scrubRpc(`${req.params.name} failed: ${msg}`) }], isError: true };
     }
   });
 
