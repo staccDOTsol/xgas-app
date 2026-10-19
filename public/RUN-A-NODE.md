@@ -33,3 +33,5 @@ Source: https://xgas.dev/source/
 
 The previous chain, 466301, is retired. It was an AnyTrust chain whose batch data lived only on its
 committee, so a new node cannot sync it.
+
+The sovereign-unit brief is [docs/sovereign-unit-memo.md](../docs/sovereign-unit-memo.md). The Plasma child (XPL as gas, chain id 974502) and its node command are [docs/orbit-on-plasma-tempo.md](../docs/orbit-on-plasma-tempo.md). The $1000 USDT0 yield record against 4.29% is [docs/plasma-proof.md](../docs/plasma-proof.md).

@@ -2,6 +2,8 @@
 
 Plasma (chain 9745) is the parent. The child is an ETH-style Arbitrum Orbit chain: `nativeToken = address(0)`, so the child's gas token is Plasma's native coin, XPL. There is no custom ERC-20 gas token and no AnyTrust fast confirmer.
 
+The sovereign-unit brief this launch is for is [sovereign-unit-memo.md](sovereign-unit-memo.md). Which of its claims the $1000 USDT0 deployment can test, and the empty mainnet hash table, are [plasma-proof.md](plasma-proof.md). The vault economics are [plasma-tempo-deploy.md](plasma-tempo-deploy.md).
+
 Chain id **974502** is a provisional label used by the launch script. It is not registered.
 
 Tempo (chain 4217) is not a parent for this design. It has no native coin, so the Inbox/Outbox ETH path does not exist there. A Tempo equivalent would be a different, custom-gas Orbit chain (`ERC20Inbox`, `nativeToken` = OUSD or pathUSD, `L1OrbitERC20Gateway`). That configuration was not deployed.
