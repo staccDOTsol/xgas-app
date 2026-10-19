@@ -1,6 +1,6 @@
 # Plasma and Tempo reserve vaults
 
-Single-reserve $xMoney for chains where $xMoney is not the gas token. The Orbit child of Plasma, where XPL is gas and both USDT0 and USDC back the child vault, is [orbit-on-plasma-tempo.md](orbit-on-plasma-tempo.md). The design brief those contracts are measuring is [sovereign-unit-memo.md](sovereign-unit-memo.md). What the Plasma mainnet broadcast has and has not proved against Plasma One's 4.29% APY is [plasma-proof.md](plasma-proof.md).
+Single-reserve $xMoney for chains where $xMoney is not the gas token. The Orbit child of Plasma, where XPL is gas and both USDT0 and USDC back the child vault, is [orbit-on-plasma-tempo.md](orbit-on-plasma-tempo.md). The design brief those contracts are measuring is [sovereign-unit-memo.md](sovereign-unit-memo.md). What the Plasma mainnet broadcast has and has not proved against Plasma One's 4.29% APY is [plasma-proof.md](plasma-proof.md). A config file that deploys the vault as the gas token of its own chain is [sovereign-unit-kit.md](sovereign-unit-kit.md). The XPL-native commands are the broadcast.
 
 No testnet. No private keys in the repo. `forge script` below does not pass `--broadcast`.
 

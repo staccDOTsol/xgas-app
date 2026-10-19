@@ -32,7 +32,8 @@ contract DeployPlasmaMainnet is Script {
         address[] memory executors = new address[](1);
         executors[0] = address(0);
         XMoneyTimelock timelock = new XMoneyTimelock(1 days, proposers, executors);
-        XMoneyMultiReserveVault vault = new XMoneyMultiReserveVault(reserves, address(fanout), address(timelock));
+        XMoneyMultiReserveVault vault =
+            new XMoneyMultiReserveVault("X Money", "xMoney", reserves, address(fanout), address(timelock));
         MultiReserveBuyback buyback = new MultiReserveBuyback(vault, address(timelock), keeper);
         fanout.setBuyback(address(buyback));
         vm.stopBroadcast();

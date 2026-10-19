@@ -72,7 +72,8 @@ contract PlasmaChildBridgeForkTest is Test {
                 confirmPeriodBlocks: 1,
                 minimumAssertionPeriod: 0,
                 wasmModuleRoot: keccak256("xgas-plasma-child-v1"),
-                chainConfig: _chainConfig()
+                chainConfig: _chainConfig(),
+                nativeToken: address(0)
             })
         );
         uint256 templatesAndCreate = gasBefore - gasleft();

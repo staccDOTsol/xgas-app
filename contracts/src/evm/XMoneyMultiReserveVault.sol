@@ -58,7 +58,10 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
     error InsufficientBalance();
     error InsufficientReserve(address token, uint256 have, uint256 need);
 
-    constructor(IERC20[] memory reserves_, address fanout_, address owner_) ERC20("X Money", "xMoney") Ownable(owner_) {
+    constructor(string memory name_, string memory symbol_, IERC20[] memory reserves_, address fanout_, address owner_)
+        ERC20(name_, symbol_)
+        Ownable(owner_)
+    {
         if (fanout_ == address(0) || owner_ == address(0) || reserves_.length == 0) revert ZeroAddress();
         fanout = fanout_;
         for (uint256 i = 0; i < reserves_.length; i++) {

@@ -46,7 +46,7 @@ contract XMoneyMultiReserveTest is Test {
         IERC20[] memory reserves = new IERC20[](2);
         reserves[0] = usdt0;
         reserves[1] = usdc;
-        vault = new XMoneyMultiReserveVault(reserves, address(fanout), owner);
+        vault = new XMoneyMultiReserveVault("X Money", "xMoney", reserves, address(fanout), owner);
         buyback = new MultiReserveBuyback(vault, owner, keeper);
         fanout.setBuyback(address(buyback));
 
@@ -106,7 +106,7 @@ contract XMoneyMultiReserveTest is Test {
         IERC20[] memory reserves = new IERC20[](2);
         reserves[0] = six;
         reserves[1] = eighteen;
-        XMoneyMultiReserveVault v = new XMoneyMultiReserveVault(reserves, address(fanout), owner);
+        XMoneyMultiReserveVault v = new XMoneyMultiReserveVault("X Money", "xMoney", reserves, address(fanout), owner);
         six.mint(alice, 1_000_000);
         eighteen.mint(alice, 1 ether);
         vm.startPrank(alice);

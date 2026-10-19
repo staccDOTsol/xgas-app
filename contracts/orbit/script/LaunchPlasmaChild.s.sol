@@ -37,7 +37,8 @@ contract LaunchPlasmaChild is Script {
                 confirmPeriodBlocks: PlasmaChild.CONFIRM_PERIOD_BLOCKS,
                 minimumAssertionPeriod: 75,
                 wasmModuleRoot: vm.envBytes32("WASM_MODULE_ROOT"),
-                chainConfig: vm.envString("CHAIN_CONFIG")
+                chainConfig: vm.envString("CHAIN_CONFIG"),
+                nativeToken: address(0)
             })
         );
         StandardGatewayLaunch gateways = new StandardGatewayLaunch();

@@ -65,7 +65,8 @@ contract DeployPlasmaMainnet is Script {
             confirmPeriodBlocks: PlasmaChild.CONFIRM_PERIOD_BLOCKS,
             minimumAssertionPeriod: 75,
             wasmModuleRoot: wasm,
-            chainConfig: chainConfig
+            chainConfig: chainConfig,
+            nativeToken: address(0)
         });
     }
 

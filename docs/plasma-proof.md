@@ -4,6 +4,8 @@ This file is the on-chain companion to [sovereign-unit-memo.md](sovereign-unit-m
 
 The comparison rate is Plasma One Earn at **4.29% APY**. The deposit is the deployer's **1000.428045 USDT0** (`1000428045` base units) on Plasma mainnet, chain 9745.
 
+The chain in this record uses XPL as gas. A config-driven chain whose gas token is the unit itself is a separate deploy, child chain id 974503 for the first file, documented in [sovereign-unit-kit.md](sovereign-unit-kit.md). It is not this broadcast and it does not replace the commands below.
+
 Nothing in the tables below is a mainnet transaction yet. Cells marked `PENDING` are empty until the broadcast. Fork hashes are rehearsal receipts from anvil. They are not Plasma mainnet, and they are not the yield proof.
 
 ## What is already true on Plasma

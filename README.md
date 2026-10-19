@@ -293,5 +293,5 @@ fly deploy --ha=false
 - [.claude/wiki.md](.claude/wiki.md) — how the chain was actually operated, including notes that later commits superseded.
 - [contracts/src/amm/README.md](contracts/src/amm/README.md) — JIT toll and the PonsV2 rules.
 - [public/RUN-A-NODE.md](public/RUN-A-NODE.md), [public/run-a-validator.md](public/run-a-validator.md) — Nitro node and permissionless validator.
-- [docs/sovereign-unit-memo.md](docs/sovereign-unit-memo.md) — sovereign-unit design brief. The Plasma deployment and the $1000 USDT0 yield comparison against 4.29% are [docs/plasma-proof.md](docs/plasma-proof.md). The launch runbook is [docs/orbit-on-plasma-tempo.md](docs/orbit-on-plasma-tempo.md) and [docs/plasma-tempo-deploy.md](docs/plasma-tempo-deploy.md).
+- [docs/sovereign-unit-memo.md](docs/sovereign-unit-memo.md) — sovereign-unit design brief. A new unit is one file under [config/units/](config/units/); the steps are [docs/sovereign-unit-kit.md](docs/sovereign-unit-kit.md). The Plasma deployment and the $1000 USDT0 yield comparison against 4.29% are [docs/plasma-proof.md](docs/plasma-proof.md). The XPL-native launch runbook is [docs/orbit-on-plasma-tempo.md](docs/orbit-on-plasma-tempo.md) and [docs/plasma-tempo-deploy.md](docs/plasma-tempo-deploy.md).
 - [server/paymaster/spec.md](server/paymaster/spec.md) — `XgasDevPaymaster` wire format.

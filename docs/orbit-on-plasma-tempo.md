@@ -2,7 +2,7 @@
 
 Plasma (chain 9745) is the parent. The child is an ETH-style Arbitrum Orbit chain: `nativeToken = address(0)`, so the child's gas token is Plasma's native coin, XPL. There is no custom ERC-20 gas token and no AnyTrust fast confirmer.
 
-The sovereign-unit brief this launch is for is [sovereign-unit-memo.md](sovereign-unit-memo.md). Which of its claims the $1000 USDT0 deployment can test, and the empty mainnet hash table, are [plasma-proof.md](plasma-proof.md). The vault economics are [plasma-tempo-deploy.md](plasma-tempo-deploy.md).
+The sovereign-unit brief this launch is for is [sovereign-unit-memo.md](sovereign-unit-memo.md). Which of its claims the $1000 USDT0 deployment can test, and the empty mainnet hash table, are [plasma-proof.md](plasma-proof.md). The vault economics are [plasma-tempo-deploy.md](plasma-tempo-deploy.md). A second chain, whose gas token is the unit in a config file, is [sovereign-unit-kit.md](sovereign-unit-kit.md). That kit does not replace the commands in this runbook.
 
 Chain id **974502** is a provisional label used by the launch script. It is not registered.
 

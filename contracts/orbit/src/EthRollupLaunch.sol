@@ -36,11 +36,11 @@ import {BufferConfig} from "nitro-src/bridge/DelayBufferTypes.sol";
 import {IBridge} from "nitro-src/bridge/IBridge.sol";
 import {RollupCore} from "nitro-src/rollup/RollupCore.sol";
 
-/// @notice Deploys an ETH-style (native parent gas) Orbit rollup.
-///         `nativeToken` is address(0): the child gas token is the parent's
-///         native coin. On Plasma that coin is XPL. Custom-gas ERC20Inbox
-///         templates are still deployed because RollupCreator.setTemplates
-///         checks both template sets, and they are not selected.
+/// @notice Deploys an Orbit rollup. `Params.nativeToken = address(0)` selects
+///         the parent chain's native coin (XPL on Plasma). Any other address
+///         is the ERC-20 gas token and selects the ERC20 bridge templates.
+///         Both template sets are deployed either way, because
+///         RollupCreator.setTemplates checks both.
 ///
 ///         This is a library so each `new` is performed by the caller. A
 ///         Foundry script therefore broadcasts one transaction per template,
@@ -59,6 +59,9 @@ library EthRollupLaunch {
         uint256 minimumAssertionPeriod;
         bytes32 wasmModuleRoot;
         string chainConfig;
+        /// @dev address(0) selects the parent chain's native coin (XPL on Plasma).
+        ///      Any other address is the ERC-20 gas token and selects the ERC20 bridge templates.
+        address nativeToken;
     }
 
     struct Result {
@@ -284,7 +287,7 @@ library EthRollupLaunch {
             batchPosters: posters,
             validators: validators,
             maxDataSize: MAX_DATA_SIZE,
-            nativeToken: address(0),
+            nativeToken: p.nativeToken,
             deployFactoriesToL2: false,
             maxFeePerGasForRetryables: 0,
             batchPosterManager: p.batchPosterManager,
