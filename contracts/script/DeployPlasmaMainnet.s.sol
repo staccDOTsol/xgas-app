@@ -23,9 +23,7 @@ contract DeployPlasmaMainnet is Script {
         address keeper = vm.envOr("KEEPER", deployer);
         address treasury = vm.envOr("FANOUT_TREASURY", deployer);
 
-        IERC20[] memory reserves = new IERC20[](2);
-        reserves[0] = IERC20(Plasma.USDT0);
-        reserves[1] = IERC20(Plasma.USDC);
+        IERC20[] memory reserves = _reserves();
 
         vm.startBroadcast(deployer);
         MultiReserveFanout fanout = new MultiReserveFanout(treasury, deployer);
@@ -55,7 +53,46 @@ contract DeployPlasmaMainnet is Script {
         vm.serializeAddress(obj, "vault", address(vault));
         vm.serializeAddress(obj, "buyback", address(buyback));
         vm.serializeAddress(obj, "usdt0", Plasma.USDT0);
-        string memory json = vm.serializeAddress(obj, "usdc", Plasma.USDC);
+        vm.serializeAddress(obj, "usdc", Plasma.USDC);
+        string memory reserveList;
+        for (uint256 i = 0; i < reserves.length; i++) {
+            reserveList = string.concat(reserveList, i == 0 ? "" : ",", vm.toString(address(reserves[i])));
+        }
+        string memory json = vm.serializeString(obj, "reserves", reserveList);
         vm.writeJson(json, "deployments/plasma-vault.json");
+    }
+
+    /// @dev RESERVE_TOKENS is a comma-separated list of USD stables, each valued at $1.
+    ///      Default is Plasma USDT0 and Circle USDC.
+    function _reserves() internal view returns (IERC20[] memory list) {
+        string memory raw = vm.envOr("RESERVE_TOKENS", string(""));
+        if (bytes(raw).length == 0) {
+            list = new IERC20[](2);
+            list[0] = IERC20(Plasma.USDT0);
+            list[1] = IERC20(Plasma.USDC);
+            return list;
+        }
+        bytes memory b = bytes(raw);
+        uint256 n = 1;
+        for (uint256 i = 0; i < b.length; i++) {
+            if (b[i] == ",") n++;
+        }
+        list = new IERC20[](n);
+        uint256 idx;
+        uint256 start;
+        for (uint256 i = 0; i <= b.length; i++) {
+            if (i == b.length || b[i] == ",") {
+                list[idx++] = IERC20(vm.parseAddress(_slice(b, start, i)));
+                start = i + 1;
+            }
+        }
+    }
+
+    function _slice(bytes memory b, uint256 start, uint256 end) internal pure returns (string memory) {
+        bytes memory out = new bytes(end - start);
+        for (uint256 i = start; i < end; i++) {
+            out[i - start] = b[i];
+        }
+        return string(out);
     }
 }

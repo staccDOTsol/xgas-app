@@ -37,6 +37,24 @@ library PlasmaChild {
     uint256 internal constant MAX_DATA_SIZE = 117_964;
     string internal constant PARENT_RPC = "https://rpc.plasma.to";
 
+    /// @dev Latest WAVM machine shipped in offchainlabs/nitro-node:v3.11.4-7d5ac27.
+    ///      The image's `latest` symlink is consensus-v61 (ArbOS 61).
+    ///      Source: https://github.com/OffchainLabs/nitro/releases/tag/consensus-v61
+    ///      ("WAVM Module Root: 0xc10c…dc97") and the Dockerfile
+    ///      `download-machine.sh consensus-v61 0xc10c…dc97`, which writes that
+    ///      hash to `/home/user/target/machines/latest/module-root.txt`.
+    bytes32 internal constant WASM_MODULE_ROOT =
+        0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97;
+
+    /// @dev Must match the machine above. consensus-v61 is ArbOS 61.
+    uint64 internal constant INITIAL_ARBOS_VERSION = 61;
+
+    string internal constant CHAIN_CONFIG =
+        '{"chainId":974502,"arbitrum":{"EnableArbOS":true,"DataAvailabilityCommittee":false,"InitialArbOSVersion":61,"InitialChainOwner":"0x0000000000000000000000000000000000000000"}}';
+
+    /// @dev 1000.428045 USDT0, 6 decimals. The deployer's confirmed Plasma balance.
+    uint256 internal constant SEED_USDT0 = 1_000_428_045;
+
     /// @dev Production confirmation window, same order of magnitude as 466302
     ///      (50400 parent blocks). The fork test uses 1 so it can confirm
     ///      without waiting. AnyTrust fast confirmer stays unset.

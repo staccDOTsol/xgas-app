@@ -1,39 +1,48 @@
 {
   "broadcast": "anvil-fork",
   "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
-  "balanceBeforeWei": "47000000000000000000",
-  "balanceAfterWei": "46999999999238908124",
-  "xplSpentWei": "761091876",
+  "balanceBeforeWei": "47211150098866677224",
+  "balanceAfterWei": "47211124701328977224",
+  "xplSpentWei": "25397537700000",
   "gas": {
-    "rollupAndBridge": 80459150,
-    "vault": 4106614,
-    "total": 84565764,
-    "xplAtPoint001GweiWei": "84565764000000",
-    "maxTxGas": 6836986,
+    "rollupAndBridge": 80461843,
+    "vault": 4196616,
+    "total": 84658459,
+    "xplAtPoint001GweiWei": "84658459000000",
+    "maxTxGas": 6839679,
     "plasmaBlockGasLimit": 36000000
   },
   "rollup": {
-    "bridge": "0x5b84Fa7259923081B4bB212Ceed8C7dEb710C6b6",
+    "bridge": "0xd73ee6eDBbE6A7b5224dAc2D12C923903B236E38",
+    "chainConfig": {
+      "chainId": 974502,
+      "arbitrum": {
+        "EnableArbOS": true,
+        "DataAvailabilityCommittee": false,
+        "InitialArbOSVersion": 61,
+        "InitialChainOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
     "chainId": 9745,
     "childChainId": 974502,
     "childDeployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
     "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
     "gateway": "0xFBe3c372A86e6f9aeFF32Dde08F01331Ee14EC35",
-    "inbox": "0x09310608c2a70f3DE4c53F03C94A5d508B495b1C",
+    "inbox": "0xd6EF4268fBEFbe343A9549989e906e7051336Aa5",
     "l2BeaconProxyFactory": "0xf43aCE1Bcf1Fb19CAbeF695269Fa1E8734B32f87",
     "l2Erc20Gateway": "0x3a22560c596251f656ffc629675C3F6c7Ca32847",
     "l2GatewayRouter": "0xcb4f0EE71D816a74C9c4eCa38261191948EBFcE2",
     "l2Usdc": "0xA0a075d98dBc97223DF8D90A3A696c51330D4602",
     "l2Usdt0": "0x350be3484620cd8323414e5c7aBaedcc12488EBA",
-    "outbox": "0x80C94172dA9A3228930462bed576adC90797475D",
-    "rollup": "0x272B7a174BcfD866Bd6Bb9BC455CE71bD30a7935",
+    "outbox": "0x301EC3475165986b014A7f7c6A74634d33C91E4C",
+    "rollup": "0x182622A9C9f311ec002cCd99A52CbF8C4fEfBc24",
     "rollupCreator": "0x31b63F6D78112Db09Bf9408D1a5E40C605D9E525",
     "router": "0x7AC835EB9b00E973c2717d50ed907a4bf6a666aD",
-    "sequencerInbox": "0x9b97B82a67A29DCA412bB266471998D5ab84D100",
+    "sequencerInbox": "0x304A6c9285Ea24b615B3E0A632AFCC0a8448a8d6",
     "upgradeExecutor": "0x5eB0A800aed17A043624BeA9299BFa5e5C7a4c4b",
     "usdc": "0x2d661C89D812261039AF9764eceaAee884f5F67F",
     "usdt0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
-    "wasmModuleRoot": "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "wasmModuleRoot": "0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97",
     "wxpl": "0x6100E367285b01F48D07953803A2d8dCA5D19873"
   },
   "vault": {
@@ -43,6 +52,7 @@
     "fanout": "0xa7B726eB1dd1117bB6f761C16403eB8161a490d9",
     "keeper": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
     "owner": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "reserves": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb,0x2d661C89D812261039AF9764eceaAee884f5F67F",
     "timelock": "0xD39cdf3829D29d34Aa7a7C9ac3E05DeA245DE89C",
     "treasury": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
     "usdc": "0x2d661C89D812261039AF9764eceaAee884f5F67F",
@@ -56,203 +66,203 @@
         "type": "CREATE",
         "function": null,
         "gasUsed": 1363958,
-        "hash": "0xcb9c65d5b7c87465265a60409b485dde9c25e75bb5b92ebc5f830af105ccd2ce"
+        "hash": "0xe3cf485c2e9e2df69bbb655631bf7ddec5714f2f107c1f00ce58e88aca777e7a"
       },
       {
         "contract": "SequencerInbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4194646,
-        "hash": "0x2427354c54b2ae14488f61c11647d563204b885a20e3fd6b77f36ddc3c538356"
+        "hash": "0xae383bd3437179944cefed37bf6ed6cc5f05fb08ae881c3810af0ae245c9b115"
       },
       {
         "contract": "SequencerInbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4194658,
-        "hash": "0x81df3085b1c84b86f64012c02f80f095e9786d4a87e5d83fcdf689020177b294"
+        "hash": "0x4f67df79df117900581d877703964b01ae5c9dc74985916583df6f605c265f9c"
       },
       {
         "contract": "Inbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 2178037,
-        "hash": "0xabf8e5751d69ba8d0adac7a414d27e8a6f837e851f05f358258f553bcb67ffa5"
+        "hash": "0xd2cbacbe7cb91b0726fa1234ea7984f6a692876d025b8fa4e15d8a8707e6657f"
       },
       {
         "contract": "RollupEventInbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 534937,
-        "hash": "0xae90ad7a10efe583253d9e12c317042d10f262ba910966f33db585802e9b17bd"
+        "hash": "0xd45d518fea7ffeb9fef74c8107199cc2f2100515f86cc052afeb8425d2ada706"
       },
       {
         "contract": "Outbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1271968,
-        "hash": "0x3106c256cddf4beafc91bbbc65bcc38a131e30df7f5382d86f87ad2e635a7199"
+        "hash": "0x25c3584c9928b3a4d824d74c79654f8f5ee4907b1486e260700fba031ddef6fa"
       },
       {
         "contract": "ERC20Bridge",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1723782,
-        "hash": "0x122a4a1ce4c31d2ac9de1c893c3e342d9fb9e9de057b2e0ce8e85a0c23473ad6"
+        "hash": "0x79c1fc3a733f225ac08d99de93afe154207378aeef5066c1ac3f016c55c6ad45"
       },
       {
         "contract": "SequencerInbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4194658,
-        "hash": "0xf683c309bfd474023330c6ba55e11aa33eb6ec98ec219022e6a58d0e17425dc9"
+        "hash": "0xa049a6e2535aa61adbc7f55a7d3e6678bba0e999921c8fb51b3c7d2fc9a15941"
       },
       {
         "contract": "SequencerInbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4194670,
-        "hash": "0x41d49c43665f86bfa9fb9f61f0a09d90f751b7ff812e54370e1ee1dbc2c0024b"
+        "hash": "0xc204e895586d81dba040df031e5ab5285bb04cf751d2510d760e823d5e04f396"
       },
       {
         "contract": "ERC20Inbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 2065231,
-        "hash": "0x44fed98d98fb7fca991611e79faf4671c72a294c09b921302a575f7c12ab4262"
+        "hash": "0x2d4df0d02bda0d6fe48b77dbc7ebb8573d1edc39b6bc52fa911a7f00f7720dbc"
       },
       {
         "contract": "ERC20RollupEventInbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 628341,
-        "hash": "0x1154f4099a35949466788316602cd52125a637a224b749465e9cae4d902b6146"
+        "hash": "0xd53688b011f4a7fe9e30fd6850f0563a96edd6a12d4e0bcbf4b50cbef40802a4"
       },
       {
         "contract": "ERC20Outbox",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1352838,
-        "hash": "0x233382b60e2a60fb688727649e0cf420299289dd7d7d5be6a89f8c023ca14f5c"
+        "hash": "0x49668b7c57cfe551da447d73c08859e78a49c40221e930479ae8a5ee392fc0cb"
       },
       {
         "contract": "RollupCreator",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4735666,
-        "hash": "0xc970a403d62adc02b7875c824d5f3ac266d0c4b1621a89a075242b1d5e1efe2b"
+        "hash": "0x493c46e8972b691465f394cc1e79fc79383af4f10af54077c75c3246f564d738"
       },
       {
         "contract": "BridgeCreator",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1797569,
-        "hash": "0xf473a63b7b28fe740229126b6738c6041a27b30823fc9685b9a2e0d1ca91e90e"
+        "hash": "0x6fb09a391cef43161e9e1cfa0c790c16f473563d421aaad9d43677bb97b72307"
       },
       {
         "contract": "OneStepProver0",
         "type": "CREATE",
         "function": null,
         "gasUsed": 2447060,
-        "hash": "0x39172de10e7092295b4b5d3570c4afb3c9fed9b0576977930a69b5c0176e2563"
+        "hash": "0xd1a1827019d785b82e4828e6c603b4a6b4932205f2e49cd045f0a7ec5833e7b4"
       },
       {
         "contract": "OneStepProverMemory",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1734026,
-        "hash": "0x5c1c8a7d63049b193144bbf4d4603f5532519733f68bb23c8ba859a9b2cbd12b"
+        "hash": "0x3526824f132afa3ba3eeb550a5e0f9e71582048376c84a5b5a94b1ad7b817add"
       },
       {
         "contract": "OneStepProverMath",
         "type": "CREATE",
         "function": null,
         "gasUsed": 2028534,
-        "hash": "0xef455584fb57627c1ebc5821ca3d97f7d8cedfd8ea6e8e4bb469f4119f3ad4f0"
+        "hash": "0x22ce2e320a656d0ca0024d9356051474918e535f1a512189af53d74a19f50d9f"
       },
       {
         "contract": "OneStepProverHostIo",
         "type": "CREATE",
         "function": null,
         "gasUsed": 3273811,
-        "hash": "0x2c7478f6686db126a542d5efc2b027621504e4c08f218c2cedfb0063d38edead"
+        "hash": "0xf20fd72f99c1da3932f755728f9843a768b2cc0c239fecd6e1109ac7edeb4d22"
       },
       {
         "contract": "OneStepProofEntry",
         "type": "CREATE",
         "function": null,
         "gasUsed": 2818007,
-        "hash": "0x53a061701221b8582db7b7c96bebb516d1be35904f0c63b2426b8fde32414e12"
+        "hash": "0x99e5f8972a868783f3d7b97e0134cab2ba2510c6b52c28ddd151e36eec1fb7a0"
       },
       {
         "contract": "EdgeChallengeManager",
         "type": "CREATE",
         "function": null,
         "gasUsed": 5060942,
-        "hash": "0xbee087b99ab610dc5ab192143c34d4a2990b198fb4eb7277c3ad00f337ad905d"
+        "hash": "0xa831b329abbb3507484ada97c8c8bfbb19d2be4cfe1c3b2e12b6a5c356caa9b3"
       },
       {
         "contract": "RollupAdminLogic",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4654139,
-        "hash": "0xfe1a9bd36313e6509b42a80da3f77f37db81ef1bb992cedf62b1fd8e042d8b62"
+        "hash": "0x58e2a99d13265562339bfe7d975140d72bc6fe73d6912d8d36c05444e4323287"
       },
       {
         "contract": "RollupUserLogic",
         "type": "CREATE",
         "function": null,
         "gasUsed": 3752784,
-        "hash": "0x632268118c62beae98f95b4438cc6120c8e0027d6638f0766e50b0d0b23f0593"
+        "hash": "0xe2443ea9ef079b7d0ceb2813c7282cb648792ff99522e510b704930acebf18c4"
       },
       {
         "contract": "UpgradeExecutorMock",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1074877,
-        "hash": "0xf719719418086c1f59fbb06ee9cfaaed2fd3c226adce7c3fb5fd7458dc41c7da"
+        "hash": "0x4b96bf5ffdd0fc05a7bca9418d8381cddaf3236be899112973a5ba4054664b36"
       },
       {
         "contract": "ValidatorWalletCreator",
         "type": "CREATE",
         "function": null,
         "gasUsed": 3009642,
-        "hash": "0xb2b068e7186760cac5b26a7f61f65fd0c934399808bc719ec55243a4fd8cc784"
+        "hash": "0x21dc2fb9433ccf57a62b00aa1dd7f727e31cd5a4ae43f78e63b3a925ae1bf306"
       },
       {
         "contract": "DeployHelper",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1387260,
-        "hash": "0x9c5094f01867a3b68df92b11e9d9f64d6434366ba99e41796558cd52a46fcd59"
+        "hash": "0xb4738688e4bf82fff06a032c9d87c92d3df57e28550395286889a066e9e769b2"
       },
       {
         "contract": "RollupCreator",
         "type": "CALL",
         "function": "setTemplates(address,address,address,address,address,address,address,address)",
         "gasUsed": 204990,
-        "hash": "0x9860df11c7b69cc995e5b132a7445cee29698f42ad0c3118fd7e022432d5fb93"
+        "hash": "0xf0d7a5f6612ada5d4332b3069e61f9299ba1cbfbe3c78574302f4cd2ea716aa3"
       },
       {
         "contract": "RollupCreator",
         "type": "CALL",
         "function": "createRollup(((uint64,address,uint256,bytes32,address,address,uint256,string,uint256,uint64,uint256[],(uint256,uint256,uint256,uint256),uint256,uint256,uint256,((bytes32[2],uint64[2]),uint8,bytes32),uint256,address,uint8,uint64,(uint64,uint64,uint64)),address[],uint256,address,bool,uint256,address[],address,address))",
-        "gasUsed": 6836986,
-        "hash": "0x81b6d984f0a73dc2add3eaaab6d6eb733c8211d615b60d2077bba03f0858d601"
+        "gasUsed": 6839679,
+        "hash": "0x9fbce029e5266fbc089d02a4d9958522493294a7ac0593d79b00c068b01e0518"
       },
       {
         "contract": "StandardGatewayLaunch",
         "type": "CREATE",
         "function": null,
         "gasUsed": 4127876,
-        "hash": "0x5675ffadb53a9995e461d0bb21d51c07b437f28a4a1d1ad8797aaa4401a31fa5"
+        "hash": "0x864d472b665da0c6fab179730a4505f01f002971c6efa92771518a6db5b50b10"
       },
       {
         "contract": "StandardGatewayLaunch",
         "type": "CALL",
         "function": "deploy(address,address,address,address,address)",
         "gasUsed": 3617257,
-        "hash": "0x78663cd8c6d51f67fff4b18254f174dca61ac90ff59b6a4cf0795c04ec0aa1fb"
+        "hash": "0x3642eb4b44e6eeccf50e43c683fc8885d40aa1f59a8c0cb922b45d434fdd2efd"
       }
     ],
     "vault": [
@@ -261,35 +271,35 @@
         "type": "CREATE",
         "function": null,
         "gasUsed": 351370,
-        "hash": "0xcb124bcb680f50b401ffbf71da42a40bf0a766a60af06348db1911fe581dfdc0"
+        "hash": "0xbb24e5917ea7ac6cada5a2eb6f1709a911110fc64339c4edebac44e1c75cc899"
       },
       {
         "contract": "XMoneyTimelock",
         "type": "CREATE",
         "function": null,
         "gasUsed": 1608373,
-        "hash": "0x203e49982daf2c18bea321ba50621be17956c9852559bfbcf2d41709505ed12d"
+        "hash": "0x489a6b0a77e7e539f1f769051757571f8053d594ea0f6b1c7d376b600ebdf59d"
       },
       {
         "contract": "XMoneyMultiReserveVault",
         "type": "CREATE",
         "function": null,
-        "gasUsed": 1572694,
-        "hash": "0x7865355687ba48ad619977d531b9dfb999a868bbd670b011d62c1435f7cb1383"
+        "gasUsed": 1662652,
+        "hash": "0x3f67a4b499a449dbc38977b20214047f9d26736b74c7c4db09aad0392fe7cc63"
       },
       {
         "contract": "MultiReserveBuyback",
         "type": "CREATE",
         "function": null,
-        "gasUsed": 528974,
-        "hash": "0xec1ae7ce72457118a325f91e3d865f5105714281e297b8c7dba9f59309025a78"
+        "gasUsed": 529018,
+        "hash": "0x417af0dbc07f8efa4f3e72927390e31cc5f6a24403ada67cb8127ae2f627ab99"
       },
       {
         "contract": "MultiReserveFanout",
         "type": "CALL",
         "function": "setBuyback(address)",
         "gasUsed": 45203,
-        "hash": "0x402275df3363d4ee2e46c1cf78d18d0562a4d72e575f5eae23c109ec08bce1f4"
+        "hash": "0x2a66dbd91e1a9a7285d15a59e7e68bfabdf115ad32dc0a01fd8180d4ef48f703"
       }
     ]
   }

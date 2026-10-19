@@ -8,6 +8,14 @@ import {XMoneyMultiReserveVault} from "../../src/evm/XMoneyMultiReserveVault.sol
 import {MultiReserveFanout} from "../../src/evm/MultiReserveFanout.sol";
 import {MultiReserveBuyback} from "../../src/evm/MultiReserveBuyback.sol";
 
+contract Eighteen is ERC20 {
+    constructor() ERC20("EIGHTEEN", "E18") {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
 contract SixDec is ERC20 {
     constructor(string memory n, string memory s) ERC20(n, s) {}
 
@@ -90,6 +98,29 @@ contract XMoneyMultiReserveTest is Test {
         assertEq(deadDelta - burned, deadDelta / 10_000, "entry burn is the only extra");
         assertEq(vault.balanceOf(address(buyback)), 0);
         assertEq(usdt0.balanceOf(address(buyback)), 0);
+    }
+
+    function test_oneDollarRegardlessOfDecimals() public {
+        SixDec six = new SixDec("USD", "USD");
+        Eighteen eighteen = new Eighteen();
+        IERC20[] memory reserves = new IERC20[](2);
+        reserves[0] = six;
+        reserves[1] = eighteen;
+        XMoneyMultiReserveVault v = new XMoneyMultiReserveVault(reserves, address(fanout), owner);
+        six.mint(alice, 1_000_000);
+        eighteen.mint(alice, 1 ether);
+        vm.startPrank(alice);
+        six.approve(address(v), type(uint256).max);
+        eighteen.approve(address(v), type(uint256).max);
+        uint256 fromSix = v.enter(six, 1_000_000, alice);
+        uint256 fromEighteen = v.enter(eighteen, 1 ether, alice);
+        vm.stopPrank();
+        // Second deposit is priced off the first reserve, so it is not identical,
+        // but both are the same order: one whole dollar, not 1e12 dollars.
+        assertApproxEqRel(fromSix, 1 ether, 0.01e18);
+        assertApproxEqRel(fromEighteen, fromSix, 0.02e18);
+        assertEq(v.scaleOf(address(six)), 1e12);
+        assertEq(v.scaleOf(address(eighteen)), 1);
     }
 
     function test_rejectsUnknownReserve() public {

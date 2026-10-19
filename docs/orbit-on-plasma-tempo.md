@@ -63,7 +63,7 @@ The L1 gateway is initialized with these counterparts. The child chain has to pl
 | USDT0 | `0xdcEF77A85B501B038e127270e2E206857e26D93e` |
 | USDC | `0x07ae580F267A268Cbafd34d0F926ceFE04b59505` |
 
-`XMoneyMultiReserveVault` accepts both. Each must report 6 decimals. Enter and exit name which reserve moves, with the same 1 bp rake, 1 bp entry burn, and 1 bp transfer burn as the single-reserve vault. `MultiReserveFanout` splits whichever reserve it is given 2:1 between buyback and treasury. `MultiReserveBuyback` enters that reserve and sends the minted $xMoney to `0xdead`.
+`XMoneyMultiReserveVault` accepts a list of USD stables. Every whole token is valued at $1, so a token with `d` decimals (d ≤ 18) contributes `balance * 10^(18-d)` to the NAV. USDT0 and USDC are the Plasma default. `RESERVE_TOKENS` is a comma-separated override (USDG, USDT, USDT0, USDC, or any other USD stable the constructor can read `decimals()` from). Enter and exit name which reserve moves, with the same 1 bp rake, 1 bp entry burn, and 1 bp transfer burn as the single-reserve vault. `MultiReserveFanout` splits whichever reserve it is given 2:1 between buyback and treasury. `MultiReserveBuyback` enters that reserve and sends the minted $xMoney to `0xdead`.
 
 The fork cannot execute those L2 tokens: they do not exist until the child is running. The vault is covered by `contracts/test/evm/XMoneyMultiReserve.t.sol`.
 
@@ -71,25 +71,37 @@ Stake token for assertions is WXPL `0x6100E367285b01F48D07953803A2d8dCA5D19873` 
 
 ## One-command launch
 
-From `contracts/orbit`. This simulates on a Plasma fork and does not broadcast. Omit `--broadcast`.
+`./deploy-plasma-mainnet.sh` broadcasts the rollup, the USDT0/USDC gateway, and the Plasma xMoney vault. `./seed-plasma-usdt0.sh` then escrows the deployer's 1000.428045 USDT0.
+
+The WASM module root is the consensus-v61 machine shipped in `offchainlabs/nitro-node:v3.11.4-7d5ac27`:
+
+`0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97`
+
+That is the hash in the [consensus-v61 release](https://github.com/OffchainLabs/nitro/releases/tag/consensus-v61) ("WAVM Module Root") and the argument to `download-machine.sh consensus-v61` in the [v3.11.4 Dockerfile](https://github.com/OffchainLabs/nitro/blob/v3.11.4/Dockerfile). The image writes it to `/home/user/target/machines/latest/module-root.txt`. The chain config's `InitialArbOSVersion` is 61 so genesis matches that machine. The shell defaults `WASM_MODULE_ROOT` to this hash. Set it only to pin a different image.
 
 ```bash
-cd contracts/orbit
-export DEPLOYER=0x1111111111111111111111111111111111111111
-export ROLLUP_OWNER=0x2222222222222222222222222222222222222222
-export VALIDATOR=0x3333333333333333333333333333333333333333
-export BATCH_POSTER=0x4444444444444444444444444444444444444444
-export BATCH_POSTER_MANAGER=0x5555555555555555555555555555555555555555
-export LOSER_STAKE_ESCROW=0x6666666666666666666666666666666666666666
-export WASM_MODULE_ROOT=0x0000000000000000000000000000000000000000000000000000000000000001
-export CHAIN_CONFIG='{"chainId":974502,"arbitrum":{"EnableArbOS":true,"DataAvailabilityCommittee":false,"InitialArbOSVersion":51}}'
-
-forge script script/LaunchPlasmaChild.s.sol \
-  --rpc-url plasma \
-  --sender "$DEPLOYER"
+export PLASMA_DEPLOYER_KEY=...
+./deploy-plasma-mainnet.sh
+./seed-plasma-usdt0.sh
 ```
 
-`deployFactoriesToL2` is false, so the launch does not need a lump of XPL inside the transaction for L2 factory retryables. A production chain that wants the canonical CREATE2 factories should fund that path separately before anyone can use nonce 0 on the child. The script logs the rollup, bridge, inbox, sequencer inbox, outbox, gateway, router, and the two L2 reserve addresses. Copy the rollup addresses into `contracts/orbit/node/chain-info-974502.json` (`rollup`, `bridge`, `inbox`, `sequencer-inbox`). `InitialChainOwner` becomes the upgrade executor the script's rollup owner controls.
+Both scripts use `https://rpc.plasma.to`, `--private-key`, `--broadcast`, and `--slow`. A fork rehearsal sets `PLASMA_FORK_URL` and leaves the key unset.
+
+`deployFactoriesToL2` is false, so the launch does not need a lump of XPL inside the transaction for L2 factory retryables. A production chain that wants the canonical CREATE2 factories should fund that path separately before anyone can use nonce 0 on the child. The script logs the rollup, bridge, inbox, sequencer inbox, outbox, gateway, router, and the two L2 reserve addresses. Copy the rollup addresses from the JSON the script writes into `contracts/orbit/node/chain-info-974502.json` (`rollup`, `bridge`, `inbox`, `sequencer-inbox`). `InitialChainOwner` becomes the upgrade executor the script's rollup owner controls. `InitialArbOSVersion` in that file is already 61.
+
+The addresses above in the L2 counterpart table are the fork test's vanity constants. The mainnet script predicts the child contracts from `CHILD_DEPLOYER`'s nonces 0 through 4 instead. Those predictions are in `contracts/orbit/deployments/plasma-rollup.json` (`l2Erc20Gateway`, `l2GatewayRouter`, `l2BeaconProxyFactory`, `l2Usdt0`, `l2Usdc`). `DeployChildTokenBridge.s.sol` has to be that key's first five creates on chain 974502.
+
+Fork rehearsal of 19 Oct 2026, anvil fork of Plasma at the deployer's live balances (47.211150098866677224 XPL and 1000.428045 USDT0), real consensus-v61 root, no mainnet transaction. Every receipt status 1. Heaviest transaction 6,839,679 gas, under the 36,000,000 cap.
+
+| Step | Gas used | XPL at 0.001 gwei |
+| --- | ---: | ---: |
+| Rollup, bridge, gateway | 80,461,843 | 0.000080461843 |
+| Vault, fanout, timelock, buyback | 4,196,616 | 0.000004196616 |
+| Deploy total | 84,658,459 | 0.000084658459 |
+| USDT0 approve | 53,377 | 0.000000053377 |
+| USDT0 `outboundTransfer` of 1000.428045 | 235,865 | 0.000000235865 |
+
+The seed also locks 100000000093440 wei (0.000100000000093440 XPL) in the bridge as the retryable's submission fee and L2 gas budget. That value is refundable on the child. It is not a fee paid to Plasma. The fork charged 300,000 wei per gas, so the deployer actually spent 0.0000253975377 XPL on the deploy and 0.0000000867726 XPL of gas on the seed, plus the locked retryable value. The 0.001 gwei column is the ceiling if every gas unit is priced at the cap the script passes on a fork.
 
 Node, once those addresses are real:
 
@@ -98,6 +110,7 @@ docker run --rm -it -v "$PWD/xgas-plasma-node:/home/user/.arbitrum" -p 8547:8547
   offchainlabs/nitro-node:v3.11.4-7d5ac27 \
   --chain.info-json="$(cat contracts/orbit/node/chain-info-974502.json)" \
   --parent-chain.connection.url=https://rpc.plasma.to \
+  --node.batch-poster.post-4844-blobs=false \
   --http.api=net,web3,eth,arb --http.addr=0.0.0.0 --http.vhosts=*
 ```
 
@@ -108,8 +121,8 @@ Child vault, after the child is up and the two reserve addresses are the ones `c
 ```bash
 cd contracts
 export DEPLOYER=... OWNER=... KEEPER=... FANOUT_TREASURY=...
-export RESERVE_USDT0=0xdcEF77A85B501B038e127270e2E206857e26D93e
-export RESERVE_USDC=0x07ae580F267A268Cbafd34d0F926ceFE04b59505
+export RESERVE_USDT0=<l2Usdt0 from contracts/orbit/deployments/plasma-rollup.json>
+export RESERVE_USDC=<l2Usdc from contracts/orbit/deployments/plasma-rollup.json>
 forge script script/DeployChildReserves.s.sol --rpc-url <child rpc> --sender "$DEPLOYER"
 ```
 

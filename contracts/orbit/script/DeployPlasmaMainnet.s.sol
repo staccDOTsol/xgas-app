@@ -27,6 +27,8 @@ contract DeployPlasmaMainnet is Script {
     address internal l2Factory;
     EthRollupLaunch.Result internal launched;
     StandardGatewayLaunch.Result internal wired;
+    bytes32 internal wasmRoot;
+    string internal chainConfig;
 
     function run() external {
         deployer = vm.envAddress("DEPLOYER");
@@ -41,10 +43,11 @@ contract DeployPlasmaMainnet is Script {
     }
 
     function _broadcast() internal {
-        bytes32 wasm = vm.envBytes32("WASM_MODULE_ROOT");
-        require(wasm != bytes32(0), "wasm module root");
+        wasmRoot = vm.envOr("WASM_MODULE_ROOT", PlasmaChild.WASM_MODULE_ROOT);
+        chainConfig = vm.envOr("CHAIN_CONFIG", PlasmaChild.CHAIN_CONFIG);
+        require(wasmRoot != bytes32(0), "wasm module root");
         vm.startBroadcast(deployer);
-        launched = EthRollupLaunch.deploy(_params(wasm));
+        launched = EthRollupLaunch.deploy(_params(wasmRoot));
         StandardGatewayLaunch gateways = new StandardGatewayLaunch();
         wired = gateways.deploy(launched.inbox, l2Gateway, l2Router, l2Factory, vm.envOr("ROLLUP_OWNER", deployer));
         vm.stopBroadcast();
@@ -62,12 +65,7 @@ contract DeployPlasmaMainnet is Script {
             confirmPeriodBlocks: PlasmaChild.CONFIRM_PERIOD_BLOCKS,
             minimumAssertionPeriod: 75,
             wasmModuleRoot: wasm,
-            chainConfig: vm.envOr(
-                "CHAIN_CONFIG",
-                string(
-                    '{"chainId":974502,"arbitrum":{"EnableArbOS":true,"DataAvailabilityCommittee":false,"InitialArbOSVersion":51,"InitialChainOwner":"0x0000000000000000000000000000000000000000"}}'
-                )
-            )
+            chainConfig: chainConfig
         });
     }
 
@@ -112,7 +110,8 @@ contract DeployPlasmaMainnet is Script {
         vm.serializeAddress(obj, "usdt0", PlasmaChild.USDT0);
         vm.serializeAddress(obj, "usdc", PlasmaChild.USDC);
         vm.serializeAddress(obj, "wxpl", PlasmaChild.WXPL);
-        string memory json = vm.serializeBytes32(obj, "wasmModuleRoot", vm.envBytes32("WASM_MODULE_ROOT"));
+        vm.serializeBytes32(obj, "wasmModuleRoot", wasmRoot);
+        string memory json = vm.serializeString(obj, "chainConfig", chainConfig);
         vm.writeJson(json, "deployments/plasma-rollup.json");
     }
 }

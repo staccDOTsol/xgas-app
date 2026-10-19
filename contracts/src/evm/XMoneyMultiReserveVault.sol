@@ -10,9 +10,10 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title XMoneyMultiReserveVault
  * @notice Child-chain $xMoney backed by more than one 6-decimal reserve.
- *         On the Plasma Orbit child those reserves are the bridged USDT0 and
- *         USDC (L1ERC20Gateway.calculateL2TokenAddress). Both are 6 decimals,
- *         so each unit mints and redeems at the same 1e12 scale as USDG.
+ *         Any USD stable is a reserve and is valued at $1 per whole token.
+ *         USDC, USDT, USDT0, USDG, and the rest are interchangeable: a token
+ *         with `d` decimals contributes `balance * 10^(18-d)` to the NAV.
+ *         On the Plasma child the usual reserves are bridged USDT0 and USDC.
  *         Enter and exit name which reserve moves. The 1 bp rake, 1 bp entry
  *         burn, and 1 bp transfer burn match XMoneyErc20Vault.
  */
@@ -22,11 +23,12 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
     uint256 public constant BURN_BPS = 1;
     uint256 public constant FANOUT_RAKE_BPS = 1;
-    uint256 public constant SCALE = 1e12;
 
     address public immutable fanout;
     address[] public reserves;
     mapping(address => bool) public isReserve;
+    /// @dev 10^(18 - decimals). One whole token is worth 1e18 NAV units, i.e. $1.
+    mapping(address => uint256) public scaleOf;
 
     address public inbox;
     address public bridge;
@@ -64,8 +66,9 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
             if (token == address(0) || token.code.length == 0) revert ZeroAddress();
             if (isReserve[token]) revert DuplicateReserve(token);
             uint8 d = IERC20Metadata(token).decimals();
-            if (d != 6) revert UnsupportedDecimals(token, d);
+            if (d > 18) revert UnsupportedDecimals(token, d);
             isReserve[token] = true;
+            scaleOf[token] = 10 ** (18 - d);
             reserves.push(token);
         }
     }
@@ -101,9 +104,9 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
         if (rake > 0) reserve.safeTransfer(fanout, rake);
         uint256 netReserve = reserve.balanceOf(address(this)) - balBefore;
         if (netReserve == 0) revert InvalidAmount();
-        totalReserveRakedToFanout += rake;
+        totalReserveRakedToFanout += rake * scaleOf[address(reserve)];
 
-        uint256 gross = _grossFor(netReserve);
+        uint256 gross = _grossFor(address(reserve), netReserve);
         uint256 entryBurn = (gross * BURN_BPS) / 10_000;
         minted = gross - entryBurn;
 
@@ -128,13 +131,13 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
         uint256 circulating = totalSupply() - balanceOf(DEAD);
         uint256 valueBefore = totalReserveValue();
         uint256 grossValue = (xMoneyAmount * valueBefore) / circulating;
-        uint256 grossReserve = grossValue / SCALE;
+        uint256 grossReserve = grossValue / scaleOf[address(reserve)];
         uint256 rake = (grossReserve * FANOUT_RAKE_BPS) / 10_000;
         reserveOut = grossReserve - rake;
         uint256 have = reserve.balanceOf(address(this));
         if (have < grossReserve) revert InsufficientReserve(address(reserve), have, grossReserve);
 
-        totalReserveRakedToFanout += rake;
+        totalReserveRakedToFanout += rake * scaleOf[address(reserve)];
         _burn(msg.sender, xMoneyAmount);
         if (rake > 0) reserve.safeTransfer(fanout, rake);
         if (reserveOut > 0) reserve.safeTransfer(msg.sender, reserveOut);
@@ -144,7 +147,7 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
 
     function totalReserveValue() public view returns (uint256 value) {
         for (uint256 i = 0; i < reserves.length; i++) {
-            value += IERC20(reserves[i]).balanceOf(address(this)) * SCALE;
+            value += IERC20(reserves[i]).balanceOf(address(this)) * scaleOf[reserves[i]];
         }
     }
 
@@ -155,8 +158,8 @@ contract XMoneyMultiReserveVault is ERC20, Ownable {
         navRay = (reserveValue * 1e18) / circulatingXMoney;
     }
 
-    function _grossFor(uint256 netReserve) internal view returns (uint256) {
-        uint256 netValue = netReserve * SCALE;
+    function _grossFor(address reserve, uint256 netReserve) internal view returns (uint256) {
+        uint256 netValue = netReserve * scaleOf[reserve];
         uint256 valueBefore = totalReserveValue() - netValue;
         uint256 circulating = totalSupply() - balanceOf(DEAD);
         if (circulating == 0 || valueBefore == 0) return netValue;

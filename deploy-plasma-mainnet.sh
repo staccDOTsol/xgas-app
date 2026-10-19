@@ -5,23 +5,31 @@
 # Real broadcast (uses the funded deployer key, which is not in this repo):
 #
 #   export PLASMA_DEPLOYER_KEY=...
-#   export WASM_MODULE_ROOT=0x...   # must match the nitro-node image
 #   ./deploy-plasma-mainnet.sh
+#
+# WASM_MODULE_ROOT defaults to the consensus-v61 machine in
+# offchainlabs/nitro-node:v3.11.4-7d5ac27. Override it only to pin a
+# different nitro image. Then run ./seed-plasma-usdt0.sh.
 #
 # That runs, twice:
 #   forge script ... --rpc-url https://rpc.plasma.to \
 #     --private-key "$PLASMA_DEPLOYER_KEY" --broadcast --slow
 #
 # Fork proof (no mainnet transaction). Point PLASMA_FORK_URL at an anvil
-# fork, fund 0x26E8...5158 with exactly 47 XPL, and leave the key unset:
+# fork and leave the key unset:
 #
-#   PLASMA_FORK_URL=http://127.0.0.1:8545 WASM_MODULE_ROOT=0x01 ./deploy-plasma-mainnet.sh
+#   PLASMA_FORK_URL=http://127.0.0.1:8545 ./deploy-plasma-mainnet.sh
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 DEPLOYER="${PLASMA_DEPLOYER:-0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158}"
-: "${WASM_MODULE_ROOT:?set WASM_MODULE_ROOT to the nitro-node machine root before broadcasting}"
+# Latest machine in offchainlabs/nitro-node:v3.11.4-7d5ac27.
+# consensus-v61 is ArbOS 61. Cited at
+# https://github.com/OffchainLabs/nitro/releases/tag/consensus-v61
+# and written to /home/user/target/machines/latest/module-root.txt by
+# Dockerfile `download-machine.sh consensus-v61 0xc10c…dc97`.
+export WASM_MODULE_ROOT="${WASM_MODULE_ROOT:-0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97}"
 
 GAS_ARGS=()
 if [[ -n "${PLASMA_FORK_URL:-}" ]]; then
@@ -84,9 +92,14 @@ echo "balance before wei $before"
 after="$(cast balance "$DEPLOYER" --rpc-url "$RPC")"
 echo "balance after wei $after"
 
-python3 - "$ROOT" "$before" "$after" "$DEPLOYER" <<'PY'
+KIND="broadcast"
+if [[ -n "${PLASMA_FORK_URL:-}" ]]; then
+  KIND="anvil-fork"
+fi
+
+python3 - "$ROOT" "$before" "$after" "$DEPLOYER" "$KIND" <<'PY'
 import json, sys
-root, before, after, deployer = sys.argv[1:]
+root, before, after, deployer, kind = sys.argv[1:]
 before, after = int(before), int(after)
 spent = before - after
 
@@ -120,7 +133,7 @@ at_milli_gwei = total * 1_000_000
 rollup = json.load(open(f"{root}/contracts/orbit/deployments/plasma-rollup.json"))
 vault = json.load(open(f"{root}/contracts/deployments/plasma-vault.json"))
 out = {
-    "broadcast": "anvil-fork" if before == 47 * 10**18 else "broadcast",
+    "broadcast": kind,
     "deployer": deployer,
     "balanceBeforeWei": str(before),
     "balanceAfterWei": str(after),

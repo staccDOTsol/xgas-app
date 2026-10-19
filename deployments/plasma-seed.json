@@ -1,0 +1,47 @@
+{
+  "broadcast": "anvil-fork",
+  "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+  "xplBeforeWei": "47211124701328977224",
+  "xplAfterWei": "47211024614556283784",
+  "xplSpentWei": "100086772693440",
+  "retryableValueWei": "100000000093440",
+  "xplGasWei": "86772600000",
+  "usdt0Before": "1000428045",
+  "usdt0After": "0",
+  "usdt0Escrowed": "1000428045",
+  "gatewayUsdt0": "1000428045",
+  "gas": {
+    "total": 289242,
+    "xplAtPoint001GweiWei": "289242000000",
+    "maxTxGas": 235865
+  },
+  "seed": {
+    "amount": 1000428045,
+    "chainId": 9745,
+    "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "gasPriceBid": 100000000,
+    "gateway": "0xFBe3c372A86e6f9aeFF32Dde08F01331Ee14EC35",
+    "inbox": "0xd6EF4268fBEFbe343A9549989e906e7051336Aa5",
+    "inboxSequence": 1,
+    "l2Recipient": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "maxGas": 1000000,
+    "retryableValueWei": 100000000093440,
+    "router": "0x7AC835EB9b00E973c2717d50ed907a4bf6a666aD",
+    "submissionFee": 93440,
+    "token": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"
+  },
+  "transactions": [
+    {
+      "contract": null,
+      "function": "approve(address,uint256)",
+      "gasUsed": 53377,
+      "hash": "0x3a13d45771d2e46e4db373dda8842e024cb065394e75bb841e24ce69f9060f9a"
+    },
+    {
+      "contract": null,
+      "function": "outboundTransfer(address,address,uint256,uint256,uint256,bytes)",
+      "gasUsed": 235865,
+      "hash": "0xe49bc592c9b6625aa8583d422801105795f9e8cb874b6c08db733bd41c919428"
+    }
+  ]
+}

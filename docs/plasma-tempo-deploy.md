@@ -14,6 +14,8 @@ No testnet. No private keys in the repo. `forge script` below does not pass `--b
 
 `XMoneyErc20Vault` reads `decimals()` once and stores `scaleFactor = 10 ** (18 - decimals)`. Both reserves are 6 decimals, so the scale is `1e12`, the same factor USDG uses. A fee-on-transfer reserve mints against the balance that actually stayed in the vault.
 
+`XMoneyMultiReserveVault`, which `./deploy-plasma-mainnet.sh` deploys on Plasma, takes a list. Every USD stable is worth $1 per whole token: `scaleOf[token] = 10 ** (18 - decimals)`, and decimals above 18 are rejected. The default list is Plasma USDT0 and Circle USDC. `RESERVE_TOKENS` overrides it with a comma-separated address list (USDG, USDT, USDT0, USDC, and the rest).
+
 Economics, matching `XMoney.enterRollupToL3`: 1 bp of reserve received is raked to the fanout on enter and on exit, 1 bp of the xMoney minted on entry is burned, 1 bp of an ordinary transfer is burned. `ReserveFeeFanout.distribute` sends 2/3 to `ReserveBuyback` and 1/3 to treasury. The buyback enters the vault and sends the minted xMoney to `0xdead`. Nothing in this stack is payable. `FanoutSink` and `XgasDevBuyback` are not reused: the sink's `ArbSys.withdrawEth` (`0x64`) has no code on Plasma, and Tempo's CALLVALUE and BALANCE are always 0.
 
 The owner is a 24 hour `XMoneyTimelock`. The executor role is open (`address(0)`).
