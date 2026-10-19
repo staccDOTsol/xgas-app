@@ -1,0 +1,33 @@
+{
+  "bridge": "0xd73ee6eDBbE6A7b5224dAc2D12C923903B236E38",
+  "chainConfig": {
+    "chainId": 974502,
+    "arbitrum": {
+      "EnableArbOS": true,
+      "DataAvailabilityCommittee": false,
+      "InitialArbOSVersion": 61,
+      "InitialChainOwner": "0x0000000000000000000000000000000000000000"
+    }
+  },
+  "chainId": 9745,
+  "childChainId": 974502,
+  "childDeployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+  "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+  "gateway": "0xFBe3c372A86e6f9aeFF32Dde08F01331Ee14EC35",
+  "inbox": "0xd6EF4268fBEFbe343A9549989e906e7051336Aa5",
+  "l2BeaconProxyFactory": "0xf43aCE1Bcf1Fb19CAbeF695269Fa1E8734B32f87",
+  "l2Erc20Gateway": "0x3a22560c596251f656ffc629675C3F6c7Ca32847",
+  "l2GatewayRouter": "0xcb4f0EE71D816a74C9c4eCa38261191948EBFcE2",
+  "l2Usdc": "0xA0a075d98dBc97223DF8D90A3A696c51330D4602",
+  "l2Usdt0": "0x350be3484620cd8323414e5c7aBaedcc12488EBA",
+  "outbox": "0x301EC3475165986b014A7f7c6A74634d33C91E4C",
+  "rollup": "0x182622A9C9f311ec002cCd99A52CbF8C4fEfBc24",
+  "rollupCreator": "0x31b63F6D78112Db09Bf9408D1a5E40C605D9E525",
+  "router": "0x7AC835EB9b00E973c2717d50ed907a4bf6a666aD",
+  "sequencerInbox": "0x304A6c9285Ea24b615B3E0A632AFCC0a8448a8d6",
+  "upgradeExecutor": "0x5eB0A800aed17A043624BeA9299BFa5e5C7a4c4b",
+  "usdc": "0x2d661C89D812261039AF9764eceaAee884f5F67F",
+  "usdt0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
+  "wasmModuleRoot": "0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97",
+  "wxpl": "0x6100E367285b01F48D07953803A2d8dCA5D19873"
+}

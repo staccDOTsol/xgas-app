@@ -1,0 +1,42 @@
+{
+  "id": "xmoney-plasma",
+  "unit": {
+    "name": "X Money",
+    "symbol": "xMoney",
+    "decimals": 18
+  },
+  "peg": {
+    "quote": "USD",
+    "wholeUnitEquals": 1,
+    "backing": "full"
+  },
+  "reserves": [
+    {
+      "symbol": "USDT0",
+      "address": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
+      "decimals": 6
+    },
+    {
+      "symbol": "USDC",
+      "address": "0x2d661C89D812261039AF9764eceaAee884f5F67F",
+      "decimals": 6
+    }
+  ],
+  "feesBps": {
+    "transferBurn": 1,
+    "entryBurn": 1,
+    "reserveRake": 1
+  },
+  "chain": {
+    "parentChainId": 9745,
+    "parentRpc": "https://rpc.plasma.to",
+    "chainId": 974503,
+    "chainName": "xmoney-plasma",
+    "gasToken": "unit",
+    "stakeToken": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+    "wasmModuleRoot": "0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97",
+    "initialArbOSVersion": 61,
+    "dataAvailabilityCommittee": false,
+    "confirmPeriodBlocks": 50400
+  }
+}

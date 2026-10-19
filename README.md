@@ -27,6 +27,7 @@ Operational history, superseded notes, and landmines live in [.claude/wiki.md](.
 | [fly-bundler/](fly-bundler/) | ERC-4337 bundler (Pimlico Alto) for chain 466302. |
 | [scripts/](scripts/) | Operator utilities. Several assume `/Users/stacc/nft-range` and a local signer file. |
 | [research/](research/) | Notes and drafts. Not a runbook. |
+| [docs/](docs/) | Plasma and Tempo deploy runbook, the Orbit child, and the sovereign-unit memo. |
 | [assets/fonts/](assets/fonts/) | Fonts for the OG cards. |
 
 The root `package.json` is still named `react-example`. The Fly app name in [fly.toml](fly.toml) is `xgas`. The production image is Node 20 ([Dockerfile](Dockerfile)). `fly-rpc` and `fly-bundler` use Node 22.
@@ -292,4 +293,5 @@ fly deploy --ha=false
 - [.claude/wiki.md](.claude/wiki.md) — how the chain was actually operated, including notes that later commits superseded.
 - [contracts/src/amm/README.md](contracts/src/amm/README.md) — JIT toll and the PonsV2 rules.
 - [public/RUN-A-NODE.md](public/RUN-A-NODE.md), [public/run-a-validator.md](public/run-a-validator.md) — Nitro node and permissionless validator.
+- [docs/sovereign-unit-memo.md](docs/sovereign-unit-memo.md) — sovereign-unit design brief. A new unit is one file under [config/units/](config/units/); the steps are [docs/sovereign-unit-kit.md](docs/sovereign-unit-kit.md). The Plasma deployment and the $1000 USDT0 yield comparison against 4.29% are [docs/plasma-proof.md](docs/plasma-proof.md). The XPL-native launch runbook is [docs/orbit-on-plasma-tempo.md](docs/orbit-on-plasma-tempo.md) and [docs/plasma-tempo-deploy.md](docs/plasma-tempo-deploy.md).
 - [server/paymaster/spec.md](server/paymaster/spec.md) — `XgasDevPaymaster` wire format.

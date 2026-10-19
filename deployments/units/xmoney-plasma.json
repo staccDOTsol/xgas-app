@@ -1,0 +1,43 @@
+{
+  "broadcast": "anvil-fork",
+  "config": "config/units/xmoney-plasma.json",
+  "unit": {
+    "buyback": "0xf94a4fE6c88c4884Ee2e816575A0ECD60b8B596a",
+    "chainId": 9745,
+    "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "fanout": "0xbf0dA470a5221C8FBf23Ed423F36cDCe6e70aa46",
+    "id": "xmoney-plasma",
+    "name": "X Money",
+    "symbol": "xMoney",
+    "timelock": "0xCbEC67499D92eF97EEA2160Cfc6D622dAd43f4e2",
+    "vault": "0x886bd71B18095675d469066b407fE97E5ae338E5"
+  },
+  "rollup": {
+    "bridge": "0x133f77653cF23D42DB0CD39Da883AD72d275Be84",
+    "chainConfig": {
+      "chainId": 974503,
+      "arbitrum": {
+        "EnableArbOS": true,
+        "DataAvailabilityCommittee": false,
+        "InitialArbOSVersion": 61,
+        "InitialChainOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    "chainId": 9745,
+    "childChainId": 974503,
+    "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+    "gasToken": "0x886bd71B18095675d469066b407fE97E5ae338E5",
+    "inbox": "0xb58f93Ab445d08ec98b015a4bc911237de209Fdc",
+    "outbox": "0x48f5d5837151e60B92a2773402E8B48f6a9C0227",
+    "rollup": "0xA191e3f7e73613B88257f38D0FDbFE3887aBadD4",
+    "sequencerInbox": "0xE1770DC9D175f5344246D94b5F24760272ED0fcB",
+    "upgradeExecutor": "0x44ce027BaFe2A037F1773A90395c883c2a3acfC6",
+    "wasmModuleRoot": "0xc10cd7ec6acaf1c441a3f6bd0900ad20f15855ba775a96f1939118cbc629dc97"
+  },
+  "wired": {
+    "vault": "0x886bd71B18095675d469066b407fE97E5ae338E5",
+    "inbox": "0xb58f93Ab445d08ec98b015a4bc911237de209Fdc",
+    "bridge": "0x133f77653cF23D42DB0CD39Da883AD72d275Be84",
+    "timelock": "0xCbEC67499D92eF97EEA2160Cfc6D622dAd43f4e2"
+  }
+}

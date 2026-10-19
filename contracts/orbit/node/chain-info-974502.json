@@ -1,0 +1,44 @@
+[
+  {
+    "chain-id": 974502,
+    "parent-chain-id": 9745,
+    "parent-chain-is-arbitrum": false,
+    "chain-name": "xgas-plasma",
+    "chain-config": {
+      "chainId": 974502,
+      "homesteadBlock": 0,
+      "daoForkBlock": null,
+      "daoForkSupport": true,
+      "eip150Block": 0,
+      "eip150Hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "eip155Block": 0,
+      "eip158Block": 0,
+      "byzantiumBlock": 0,
+      "constantinopleBlock": 0,
+      "petersburgBlock": 0,
+      "istanbulBlock": 0,
+      "muirGlacierBlock": 0,
+      "berlinBlock": 0,
+      "londonBlock": 0,
+      "clique": { "period": 0, "epoch": 0 },
+      "arbitrum": {
+        "EnableArbOS": true,
+        "AllowDebugPrecompiles": false,
+        "DataAvailabilityCommittee": false,
+        "InitialArbOSVersion": 61,
+        "InitialChainOwner": "0x0000000000000000000000000000000000000000",
+        "GenesisBlockNum": 0,
+        "MaxCodeSize": 24576,
+        "MaxInitCodeSize": 49152
+      }
+    },
+    "rollup": {
+      "bridge": "0x0000000000000000000000000000000000000000",
+      "inbox": "0x0000000000000000000000000000000000000000",
+      "sequencer-inbox": "0x0000000000000000000000000000000000000000",
+      "rollup": "0x0000000000000000000000000000000000000000",
+      "stake-token": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+      "native-token": "0x0000000000000000000000000000000000000000"
+    }
+  }
+]

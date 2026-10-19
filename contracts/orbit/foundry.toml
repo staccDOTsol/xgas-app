@@ -1,0 +1,33 @@
+[profile.default]
+src = "src"
+out = "out"
+script = "script"
+test = "test"
+libs = ["lib"]
+optimizer = true
+# 200, not 2000: EdgeChallengeManager is 26,406 bytes at 2,000 runs, over
+# EIP-170. Upstream hardhat uses 200 runs for that contract. 200 keeps every
+# template under 24,576 bytes. via-ir stays off so bytecode stays comparable.
+optimizer_runs = 200
+via_ir = false
+evm_version = "cancun"
+solc = "0.8.24"
+# Plasma blocks cap a transaction at 36_000_000 gas. The fork test's setUp
+# deploys the whole template set in one Forge transaction, which is larger
+# than that cap, so the local limit is raised. Each contract the script
+# broadcasts is still checked against 36_000_000.
+gas_limit = 500_000_000
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@offchainlabs/upgrade-executor/=lib/upgrade-executor/",
+    "@arbitrum/nitro-contracts/=lib/nitro-contracts/",
+    "nitro-src/=lib/nitro-contracts/src/",
+    "token-bridge/=lib/token-bridge-contracts/contracts/",
+]
+
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
+
+[rpc_endpoints]
+plasma = "https://rpc.plasma.to"

@@ -1,0 +1,11 @@
+{
+  "buyback": "0xf94a4fE6c88c4884Ee2e816575A0ECD60b8B596a",
+  "chainId": 9745,
+  "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+  "fanout": "0xbf0dA470a5221C8FBf23Ed423F36cDCe6e70aa46",
+  "id": "xmoney-plasma",
+  "name": "X Money",
+  "symbol": "xMoney",
+  "timelock": "0xCbEC67499D92eF97EEA2160Cfc6D622dAd43f4e2",
+  "vault": "0x886bd71B18095675d469066b407fE97E5ae338E5"
+}

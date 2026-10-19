@@ -11,5 +11,8 @@ l4-data/
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+contracts/orbit/out/
+contracts/orbit/cache/
+contracts/orbit/broadcast/
 
 nohup.out

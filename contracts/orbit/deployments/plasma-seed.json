@@ -1,0 +1,15 @@
+{
+  "amount": 1000428045,
+  "chainId": 9745,
+  "deployer": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+  "gasPriceBid": 100000000,
+  "gateway": "0xFBe3c372A86e6f9aeFF32Dde08F01331Ee14EC35",
+  "inbox": "0xd6EF4268fBEFbe343A9549989e906e7051336Aa5",
+  "inboxSequence": 1,
+  "l2Recipient": "0x26E8134eCC3af5cCE32f34B03E7BD2f318B25158",
+  "maxGas": 1000000,
+  "retryableValueWei": 100000000093440,
+  "router": "0x7AC835EB9b00E973c2717d50ed907a4bf6a666aD",
+  "submissionFee": 93440,
+  "token": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"
+}
